@@ -63,10 +63,10 @@ CMake options: `TF_KERNEL_TARGET_SM` (ALL/AUTO/SM80/SM90/SM100), `TF_KERNEL_ENAB
 
 - `tf-kernel` is a separate Python distribution inside the TeleFuser monorepo. Its version is declared explicitly in
   `pyproject.toml` and must not be derived from TeleFuser release tags.
-- Do not add GitHub Actions workflows that compile or publish `tf-kernel`. Use `make update <version>`, build and
-  validate the wheel on an explicitly provisioned CUDA/NVCC host, and upload it manually.
-- `pip install -e ".[kernel]"` at the repository root selects the released wheel. Local source development runs the
-  Makefile from `tf-kernel/` independently of the TeleFuser installation.
+- No prebuilt package is currently published; do not document `pip install tf-kernel` or a TeleFuser `kernel` extra.
+  Local source development runs the Makefile from `tf-kernel/` independently of the TeleFuser installation.
+- Do not add GitHub Actions workflows that compile or publish `tf-kernel`. Future release artifacts require an
+  explicitly provisioned CUDA/NVCC host and manual validation.
 - Direct pip source and editable builds are rejected by CMake; all local source builds must use a Make target.
 - Never trigger a nested pip install from the TeleFuser or tf-kernel build backend. Keep local source paths out of
   published dependency metadata.

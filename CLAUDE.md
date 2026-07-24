@@ -73,15 +73,13 @@ telefuser/
 
 - `telefuser` and `tf-kernel` are separate Python distributions in one repository. Keep independent
   `pyproject.toml` files, versions, wheels, tests, and releases.
-- `pip install -e ".[kernel]"` installs the released `tf-kernel` wheel. Local tf-kernel source builds are independent
-  of the TeleFuser installation and use the Makefile under `tf-kernel/`.
+- No prebuilt tf-kernel package or TeleFuser `kernel` extra is currently provided. Local tf-kernel source builds are
+  independent of the TeleFuser installation and use the Makefile under `tf-kernel/`.
 - Direct `pip install .` and editable pip builds inside `tf-kernel/` are rejected at CMake configuration time.
 - Do not make the TeleFuser build backend invoke pip or compile `tf-kernel` as a side effect. Do not add a local-path
   dependency to published project metadata.
 - Do not add GitHub Actions workflows that compile or publish `tf-kernel`. Kernel wheels require an explicitly
-  provisioned CUDA/NVCC build host and are built, validated, and uploaded manually.
-- Keep the kernel's Torch/CUDA compatibility declaration aligned with its wheel build matrix before updating the
-  root `kernel` extra pin.
+  provisioned CUDA/NVCC build host and manual validation.
 
 ### LingBot Streaming State
 

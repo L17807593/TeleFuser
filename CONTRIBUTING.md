@@ -57,11 +57,9 @@ pre-commit install
 |-------|-------------|----------|
 | `dev` | All development dependencies | pytest, pre-commit, ruff |
 | `docs` | Documentation dependencies | mkdocs, mkdocs-material, mkdocstrings-python |
-| `kernel` | Released CUDA extension package | tf-kernel |
 
-`pip install -e ".[kernel]"` installs the released kernel wheel. TeleFuser development does not build the local
-`tf-kernel/` source tree. Build tf-kernel independently with its Makefile as documented in
-[`tf-kernel/README.md`](tf-kernel/README.md).
+TeleFuser development does not build the local `tf-kernel/` source tree. No prebuilt package is currently published;
+build tf-kernel independently with its Makefile as documented in [`tf-kernel/README.md`](tf-kernel/README.md).
 
 **Note**: Since the `ruff-pre-commit` is currently maintained in the open-source community of the R&D Cloud, you will need to set up SSH key authentication in the open-source community before running `pre-commit install`.
 

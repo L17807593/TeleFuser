@@ -1,11 +1,13 @@
 Quickstart
 ==========
 
-Install the published package and verify it as described in :doc:`installation`:
+Build and install tf-kernel from source as described in :doc:`installation`:
 
 .. code-block:: bash
 
-   python -m pip install --upgrade tf-kernel
+   git clone https://github.com/Tele-AI/TeleFuser.git
+   cd TeleFuser/tf-kernel
+   make build-auto PYTHON=/path/to/venv/bin/python
 
 TeleFuser Usage
 ---------------

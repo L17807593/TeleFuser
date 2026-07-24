@@ -1,8 +1,8 @@
 # tf-kernel 安装与使用
 
 `tf-kernel` 是 TeleFuser 的可选 CUDA 扩展包，提供融合逐元素算子、量化 GEMM、SageAttention 和块稀疏
-注意力内核。它位于本仓库的 `tf-kernel/` 目录，但拥有独立的包元数据、版本和 wheel。CUDA wheel 需要
-手动构建和发布；仓库不提供 tf-kernel 自动构建或自动发布 workflow。
+注意力内核。它位于本仓库的 `tf-kernel/` 目录，拥有独立的包元数据和版本。目前没有发布预编译包；
+本地安装需要在配置好 CUDA/NVCC 的机器上从源码构建。
 
 TeleFuser 不安装 `tf-kernel` 也可以运行：对于已经实现回退的算子，`telefuser.ops` 层会保留 PyTorch 原生
 或 Triton 路径。当 Pipeline 需要 `tf-kernel` 提供的优化 CUDA 路径时再安装它。
@@ -32,73 +32,7 @@ CUDA 12.8 和 H100（SM90a）组合上验证。其他目标和算子族用于生
     `CUDA error: misaligned address`。RMSNorm、融合激活、FP8 量化和通用 FP8 SageAttention 路径已通过
     smoke test。在部署 wheel 的专项 GPU 测试通过前，不应在生产环境启用 SM90 专用 SageAttention 后端。
 
-## 选择安装方式
-
-### 随 TeleFuser 安装已发布版本
-
-普通包安装：
-
-```bash
-python -m pip install "telefuser[kernel]"
-```
-
-在 TeleFuser checkout 中安装：
-
-```bash
-python -m pip install -e ".[kernel]"
-```
-
-`kernel` extra 有意不固定 `tf-kernel` 版本，它会从当前配置的包索引解析最新兼容版本；PyTorch 依赖和
-CUDA ABI 要求由 `tf-kernel` 自身管理。该命令**不会**编译仓库中的同级 `tf-kernel/` 源码目录。
-
-### 编译本地 tf-kernel 源码
-
-本地 tf-kernel 构建独立于 TeleFuser 安装。在仓库根目录调用 kernel Makefile，并指定后续加载扩展的
-Python 解释器：
-
-```bash
-make -C tf-kernel build-auto PYTHON=/path/to/venv/bin/python
-```
-
-在 CPU 和内存充足的编译机器上，可以同时提高两级编译并行度：
-
-```bash
-MAX_JOBS=16 TF_KERNEL_COMPILE_THREADS=4 \
-  make -C tf-kernel build-auto PYTHON=/path/to/venv/bin/python
-```
-
-本地 tf-kernel 源码只支持通过 Makefile 编译。Make target 会构建 wheel，再将其安装到 `PYTHON` 指定的
-解释器。直接执行 `pip install ./tf-kernel` 或 `pip install -e ./tf-kernel` 会在 CMake 配置阶段失败，并
-提示改用 Make。如果更关注编译时间、二进制体积或可复现性，建议使用下文的指定架构 Make target。
-
-### 独立安装 tf-kernel
-
-不安装 TeleFuser 也可以单独安装和升级 CUDA 扩展：
-
-```bash
-python -m pip install --upgrade tf-kernel
-```
-
-该包的版本与 TeleFuser 版本相互独立。已发布 wheel 必须在配置好 CUDA/NVCC 的构建机上手动生成；没有
-GitHub Actions workflow 会自动构建或发布。
-
-### 手动发布
-
-在已配置的构建机上选择所需架构并执行发布：
-
-```bash
-cd tf-kernel
-make update <version>
-make build-sm90 PYTHON=/path/to/venv/bin/python  # 也可选择 build-sm80/build-sm100。
-python -m pip install twine
-python -m twine check dist/*.whl
-python -m twine upload dist/*.whl
-```
-
-上传前应运行文档中的 GPU smoke test。随后可以创建 `tf-kernel-v<version>` tag 作为源码追溯标记，但该
-tag 不会触发编译或发布。
-
-## 从源码编译
+## 从源码编译和安装
 
 克隆 TeleFuser 单仓库，选择已经安装 PyTorch 2.11.0 的解释器，然后进入内核项目：
 
@@ -112,6 +46,9 @@ cd TeleFuser/tf-kernel
 ```bash
 make build-auto PYTHON=/path/to/venv/bin/python
 ```
+
+本地构建独立于 TeleFuser 安装。Make 会构建带有正确 tag 的 wheel，并将其安装到 `PYTHON` 指定的解释器。
+直接执行 `pip install .` 或 `pip install -e .` 会失败并提示改用 Make；当前不提供 pip 包索引安装。
 
 需要可复现的指定架构编译时：
 

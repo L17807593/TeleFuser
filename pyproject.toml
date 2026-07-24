@@ -73,10 +73,6 @@ livekit = [
     "livekit>=1.0.0",
 ]
 
-kernel = [
-    "tf-kernel",
-]
-
 dev = [
     "gradio==5.50",
     "ray",

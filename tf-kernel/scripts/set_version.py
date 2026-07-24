@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Update tf-kernel's independently released package version."""
+"""Update tf-kernel's independent package version."""
 
 from __future__ import annotations
 

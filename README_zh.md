@@ -58,16 +58,9 @@ pip install -e .
 pip install -e ".[dev]"
 ```
 
-从当前配置的包索引安装独立发布的 CUDA 扩展包：
-
-```bash
-pip install -e ".[kernel]"
-```
-
-未固定版本的 `kernel` extra 会解析最新兼容的 `tf-kernel`，不会编译同级源码目录。TeleFuser 不依赖
-`tf-kernel` 也能运行；本地 tf-kernel 源码构建独立于 TeleFuser 安装，并使用 `tf-kernel/` 下的 Makefile。
-编译方法见 [tf-kernel README](tf-kernel/README_zh.md)，安装验证、支持配置和常见问题见
-[tf-kernel 安装与使用指南](docs/zh/tf_kernel.md)。
+TeleFuser 不依赖 `tf-kernel` 也能运行。目前没有发布 tf-kernel 预编译包；该可选扩展仅支持使用
+`tf-kernel/` 下的 Makefile 从源码构建。编译方法见 [tf-kernel README](tf-kernel/README_zh.md)，安装验证、
+支持配置和常见问题见 [tf-kernel 安装与使用指南](docs/zh/tf_kernel.md)。
 
 默认安装已通过 `aiortc` 包含 WebRTC 流式服务能力。
 

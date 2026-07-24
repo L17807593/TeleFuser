@@ -2,8 +2,8 @@
 
 `tf-kernel` is TeleFuser's optional CUDA extension package. It provides fused elementwise operations, quantized
 GEMM, SageAttention, and block-sparse attention kernels. The package lives in the `tf-kernel/` directory of this
-repository, but it has its own package metadata, version, and wheel. CUDA wheels are built and published manually;
-the repository does not provide tf-kernel automatic build or release workflows.
+repository and has its own package metadata and version. No prebuilt package is currently published; local
+installation requires a source build on a provisioned CUDA/NVCC host.
 
 TeleFuser can run without `tf-kernel`: the `telefuser.ops` layer keeps native PyTorch or Triton fallbacks where they
 are implemented. Install `tf-kernel` when a pipeline uses one of its optimized CUDA paths.
@@ -35,75 +35,7 @@ their target GPU before production use.
     quantization, and the generic FP8 SageAttention path pass smoke tests. Do not enable the SM90-specific SageAttention
     backend in production until its focused GPU test passes on the wheel being deployed.
 
-## Choose an installation path
-
-### Install the released package with TeleFuser
-
-For a normal package installation:
-
-```bash
-python -m pip install "telefuser[kernel]"
-```
-
-From a TeleFuser checkout:
-
-```bash
-python -m pip install -e ".[kernel]"
-```
-
-The `kernel` extra intentionally has no `tf-kernel` version pin. It resolves the latest compatible `tf-kernel` from
-the configured package index; `tf-kernel` itself owns its PyTorch dependency and CUDA ABI requirements. This command
-does **not** compile the sibling `tf-kernel/` source directory.
-
-### Build local tf-kernel source
-
-The local tf-kernel build is independent of the TeleFuser installation. From the repository root, invoke the kernel
-Makefile with the Python interpreter that will load the extension:
-
-```bash
-make -C tf-kernel build-auto PYTHON=/path/to/venv/bin/python
-```
-
-On a build host with enough CPU and memory, increase both levels of compilation parallelism:
-
-```bash
-MAX_JOBS=16 TF_KERNEL_COMPILE_THREADS=4 \
-  make -C tf-kernel build-auto PYTHON=/path/to/venv/bin/python
-```
-
-Local tf-kernel source compilation is supported only through its Makefile. The Make target builds a wheel and then
-installs that wheel into `PYTHON`. Direct `pip install ./tf-kernel` and `pip install -e ./tf-kernel` commands fail at
-CMake configuration with instructions to use Make. Select an architecture-specific Make target instead when build
-time, binary size, or reproducibility matters.
-
-### Install tf-kernel independently
-
-The CUDA extension can be installed and upgraded without installing TeleFuser:
-
-```bash
-python -m pip install --upgrade tf-kernel
-```
-
-The package version is independent of the TeleFuser version. Published wheels are produced manually on a CUDA/NVCC
-build host; no GitHub Actions workflow builds or publishes them.
-
-### Publish a release manually
-
-Select the required architecture and run the release from the provisioned build host:
-
-```bash
-cd tf-kernel
-make update <version>
-make build-sm90 PYTHON=/path/to/venv/bin/python  # Or build-sm80/build-sm100.
-python -m pip install twine
-python -m twine check dist/*.whl
-python -m twine upload dist/*.whl
-```
-
-Run the documented GPU smoke tests before upload. A `tf-kernel-v<version>` tag may be created afterward as a source
-provenance marker, but it does not trigger compilation or publication.
-
-## Build from source
+## Build and install from source
 
 Clone the TeleFuser monorepo, select the interpreter that already contains PyTorch 2.11.0, and enter the kernel
 project:
@@ -118,6 +50,10 @@ For a local workstation, auto-detect the installed GPU:
 ```bash
 make build-auto PYTHON=/path/to/venv/bin/python
 ```
+
+The local build is independent of the TeleFuser installation. Make builds a correctly tagged wheel and installs it
+into `PYTHON`. Direct `pip install .` and `pip install -e .` source builds fail with instructions to use Make; pip
+package-index installation is not available.
 
 For a reproducible target-specific build:
 

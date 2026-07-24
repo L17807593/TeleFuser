@@ -302,7 +302,7 @@ pip install . --no-build-isolation
 
 SageAttention 提供量化注意力，使用 INT8 Q/K 量化以提高性能。
 
-#### 方式一：通过 tf-kernel 安装（TeleFuser 推荐）
+#### 方式一：从源码构建 tf-kernel（TeleFuser 推荐）
 
 参见 [tf-kernel](#tf-kernel) 章节的安装说明。
 
@@ -339,7 +339,7 @@ Radial attention 是一种用于视频生成的稀疏注意力模式，可减少
 **依赖：**
 - `flashinfer` 或 `tf-kernel`（带 sageattention）
 
-#### 方式一：通过 tf-kernel 安装（TeleFuser 推荐）
+#### 方式一：从源码构建 tf-kernel（TeleFuser 推荐）
 
 参见 [tf-kernel](#tf-kernel) 章节的安装说明。
 
@@ -360,7 +360,7 @@ pip install -e .
 
 用于局部稀疏注意力（`LOCAL_SPARSE_ATTN`）：
 
-#### 方式一：通过 tf-kernel 安装（TeleFuser 推荐）
+#### 方式一：从源码构建 tf-kernel（TeleFuser 推荐）
 
 参见 [tf-kernel](#tf-kernel) 章节的安装说明。
 
@@ -379,15 +379,8 @@ pip install -e .
 
 ### tf-kernel
 
-`tf-kernel` 是 TeleFuser 的可选 CUDA 扩展包，提供优化的 SageAttention 和块稀疏注意力实现。从当前配置
-的包索引安装已发布版本：
-
-```bash
-python -m pip install -e ".[kernel]"
-```
-
-`kernel` extra 不会编译 `tf-kernel/`，本地源码构建独立于 TeleFuser 安装。需要指定架构源码编译时，
-在 `tf-kernel/` 目录执行：
+`tf-kernel` 是 TeleFuser 的可选 CUDA 扩展包，提供优化的 SageAttention 和块稀疏注意力实现。目前没有
+发布预编译包。需要指定架构源码编译时，在 `tf-kernel/` 目录执行：
 
 ```bash
 make build-auto PYTHON=/path/to/venv/bin/python

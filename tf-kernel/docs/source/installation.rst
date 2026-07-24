@@ -1,10 +1,10 @@
 Installation
 ============
 
-``tf-kernel`` is an independently released CUDA extension stored in the
-TeleFuser monorepo. TeleFuser may consume the published wheel through an
-optional extra, while local tf-kernel source builds remain independent of the
-TeleFuser installation.
+``tf-kernel`` is an independently versioned CUDA extension stored in the
+TeleFuser monorepo. No prebuilt package is currently published. Installation
+requires a local Makefile build and remains independent of the TeleFuser
+installation.
 
 Requirements
 ------------
@@ -16,51 +16,6 @@ Requirements
 
 A PyTorch local version such as ``2.11.0+cu128`` satisfies the package's
 ``torch==2.11.0`` requirement. FP4 operations require SM100 or newer.
-
-Install a Published Wheel
--------------------------
-
-Install ``tf-kernel`` independently:
-
-.. code-block:: bash
-
-   python -m pip install --upgrade tf-kernel
-
-Or install it through TeleFuser's optional extra:
-
-.. code-block:: bash
-
-   python -m pip install "telefuser[kernel]"
-
-From a TeleFuser checkout, the equivalent editable TeleFuser command is:
-
-.. code-block:: bash
-
-   python -m pip install -e ".[kernel]"
-
-The extra resolves ``tf-kernel`` from the configured package index. It does
-not compile the sibling ``tf-kernel/`` directory.
-
-Manual Publication Only
------------------------
-
-The repository does not provide GitHub Actions workflows that compile or
-publish ``tf-kernel``. A release must be produced on an explicitly provisioned
-CUDA/NVCC host:
-
-.. code-block:: bash
-
-   cd tf-kernel
-   make update <version>
-   make build-sm90 PYTHON=/path/to/venv/bin/python
-   python -m pip install twine
-   python -m twine check dist/*.whl
-   python -m twine upload dist/*.whl
-
-Select ``build-sm80`` or ``build-sm100`` when those architectures are required,
-and run the target GPU smoke tests before upload. A matching
-``tf-kernel-v<version>`` tag may be added afterward for source provenance; it
-does not trigger compilation or publication.
 
 Source Build and Installation
 -----------------------------

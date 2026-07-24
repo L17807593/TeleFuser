@@ -100,6 +100,25 @@ sudo apt-get install clang-format
 brew install clang-format
 ```
 
+## Future Wheel Publication
+
+No prebuilt tf-kernel wheel is currently published. Do not add package-index installation instructions or a
+TeleFuser optional dependency until a compatible artifact is actually available.
+
+If wheel publication is enabled in the future, produce and validate it manually on an explicitly provisioned
+CUDA/NVCC host:
+
+```bash
+make update <version>
+make build-sm90 PYTHON=/path/to/venv/bin/python  # Select the required architecture.
+python -m pip install twine
+python -m twine check dist/*.whl
+python -m twine upload dist/*.whl
+```
+
+Run the architecture-specific GPU tests before upload. Add end-user installation documentation only after the wheel
+is visible from the supported package index and its Torch/CUDA compatibility has been verified.
+
 ## How to Contribute
 
 ### Reporting Bugs

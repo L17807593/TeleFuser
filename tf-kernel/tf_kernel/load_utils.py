@@ -23,9 +23,7 @@ def _preload_block_sparse_attn():
             ctypes.CDLL(str(block_sparse_path), mode=ctypes.RTLD_GLOBAL)
             logger.debug(f"[tf_kernel] Preloaded {block_sparse_path}")
         else:
-            logger.debug(
-                f"[tf_kernel] block_sparse_attn_shared.so not found at {block_sparse_path}"
-            )
+            logger.debug(f"[tf_kernel] block_sparse_attn_shared.so not found at {block_sparse_path}")
     except Exception as e:
         logger.debug(f"[tf_kernel] Failed to preload block_sparse_attn_shared.so: {e}")
 
@@ -52,9 +50,7 @@ def _filter_compiled_extensions(file_list):
     for file_path in file_list:
         path = Path(file_path)
         # Check if it's a compiled extension (including complex names like .abi3.so, .cpython-312.so)
-        if any(
-            str(path).endswith(ext) or ext in str(path) for ext in compiled_extensions
-        ):
+        if any(str(path).endswith(ext) or ext in str(path) for ext in compiled_extensions):
             compiled_files.append(file_path)
         else:
             other_files.append(file_path)
@@ -69,9 +65,7 @@ def _load_architecture_specific_ops():
     _preload_block_sparse_attn()
 
     compute_capability = _get_compute_capability()
-    logger.debug(
-        f"[tf_kernel] GPU Detection: compute_capability = {compute_capability}"
-    )
+    logger.debug(f"[tf_kernel] GPU Detection: compute_capability = {compute_capability}")
 
     # Get the directory where tf_kernel is installed
     tf_kernel_dir = Path(__file__).parent
@@ -130,14 +124,10 @@ def _load_architecture_specific_ops():
 
         except Exception as e:
             previous_import_errors.append(e)
-            logger.debug(
-                f"[tf_kernel] ✗ Failed to load from {ops_path}: {type(e).__name__}: {e}"
-            )
+            logger.debug(f"[tf_kernel] ✗ Failed to load from {ops_path}: {type(e).__name__}: {e}")
             # Continue to fallback
     else:
-        logger.debug(
-            f"[tf_kernel] ✗ Architecture-specific library not found matching pattern: {ops_pattern}"
-        )
+        logger.debug(f"[tf_kernel] ✗ Architecture-specific library not found matching pattern: {ops_pattern}")
 
     # Try alternative directory (in case installation structure differs)
     alt_pattern = str(tf_kernel_dir / "common_ops.*")
@@ -167,13 +157,9 @@ def _load_architecture_specific_ops():
 
         except Exception as e:
             previous_import_errors.append(e)
-            logger.debug(
-                f"[tf_kernel] ✗ Failed to load fallback from {alt_path}: {type(e).__name__}: {e}"
-            )
+            logger.debug(f"[tf_kernel] ✗ Failed to load fallback from {alt_path}: {type(e).__name__}: {e}")
     else:
-        logger.debug(
-            f"[tf_kernel] ✗ Fallback library not found matching pattern: {alt_pattern}"
-        )
+        logger.debug(f"[tf_kernel] ✗ Fallback library not found matching pattern: {alt_pattern}")
 
     # Final attempt: try standard Python import (for backward compatibility)
     logger.debug("[tf_kernel] Final attempt: trying standard Python import 'common_ops'")
@@ -187,9 +173,7 @@ def _load_architecture_specific_ops():
         previous_import_errors.append(e)
         logger.debug(f"[tf_kernel] ✗ Standard Python import failed: {e}")
 
-    attempt_error_msg = "\n".join(
-        f"- {type(err).__name__}: {err}" for err in previous_import_errors
-    )
+    attempt_error_msg = "\n".join(f"- {type(err).__name__}: {err}" for err in previous_import_errors)
 
     # All attempts failed
     error_msg = f"""
@@ -204,8 +188,7 @@ GPU Info:
 - Compute capability: {compute_capability}
 - Expected variant: {variant_name}
 
-Install a published wheel with `pip install --upgrade tf-kernel`, or build
-the local source through its Makefile, for example:
+Build and install the local source through its Makefile, for example:
 make build-auto PYTHON=/path/to/venv/bin/python
 
 Error details from previous import attempts:

@@ -302,7 +302,7 @@ pip install . --no-build-isolation
 
 SageAttention provides quantized attention with INT8 Q/K quantization for improved performance.
 
-#### Option 1: Install via tf-kernel (Recommended for TeleFuser)
+#### Option 1: Build tf-kernel from source (Recommended for TeleFuser)
 
 See [tf-kernel](#tf-kernel) section for installation instructions.
 
@@ -339,7 +339,7 @@ Radial attention is a sparse attention pattern for video generation that reduces
 **Dependencies:**
 - `flashinfer` OR `tf-kernel` (with sageattention)
 
-#### Option 1: Install via tf-kernel (Recommended for TeleFuser)
+#### Option 1: Build tf-kernel from source (Recommended for TeleFuser)
 
 See [tf-kernel](#tf-kernel) section for installation instructions.
 
@@ -360,7 +360,7 @@ pip install -e .
 
 For local sparse attention (`LOCAL_SPARSE_ATTN`):
 
-#### Option 1: Install via tf-kernel (Recommended for TeleFuser)
+#### Option 1: Build tf-kernel from source (Recommended for TeleFuser)
 
 See [tf-kernel](#tf-kernel) section for installation instructions.
 
@@ -380,14 +380,8 @@ pip install -e .
 ### tf-kernel
 
 `tf-kernel` is TeleFuser's optional CUDA extension package and provides optimized SageAttention and block-sparse
-attention implementations. Install the released package from the configured package index with:
-
-```bash
-python -m pip install -e ".[kernel]"
-```
-
-The `kernel` extra does not compile `tf-kernel/`. Local source builds are independent of the TeleFuser installation.
-For an architecture-specific source build, run one of these commands from the `tf-kernel/` directory:
+attention implementations. No prebuilt package is currently published. For an architecture-specific source build,
+run one of these commands from the `tf-kernel/` directory:
 
 ```bash
 make build-auto PYTHON=/path/to/venv/bin/python
