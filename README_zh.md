@@ -64,18 +64,10 @@ pip install -e ".[dev]"
 pip install -e ".[kernel]"
 ```
 
-如需同时开发 TeleFuser 与仓库内的 `tf-kernel` 源码，可用一条命令安装并编译两个 editable 项目：
-
-```bash
-scripts/install_dev.sh --kernel
-
-# 等价的 pip 命令：
-python -m pip install -e ./tf-kernel -e ".[dev]"
-```
-
-未固定版本的 `kernel` extra 会解析最新兼容的 `tf-kernel`，不会编译同级源码目录；本地开发命令则编译
-`tf-kernel/` 下的源码。两种方式都使用独立 kernel 包声明的 PyTorch 版本。指定架构编译、安装验证、
-支持配置和常见问题见 [tf-kernel 安装与使用指南](docs/zh/tf_kernel.md)。
+未固定版本的 `kernel` extra 会解析最新兼容的 `tf-kernel`，不会编译同级源码目录。TeleFuser 不依赖
+`tf-kernel` 也能运行；本地 tf-kernel 源码构建独立于 TeleFuser 安装，并使用 `tf-kernel/` 下的 Makefile。
+编译方法见 [tf-kernel README](tf-kernel/README_zh.md)，安装验证、支持配置和常见问题见
+[tf-kernel 安装与使用指南](docs/zh/tf_kernel.md)。
 
 默认安装已通过 `aiortc` 包含 WebRTC 流式服务能力。
 

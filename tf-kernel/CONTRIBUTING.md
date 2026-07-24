@@ -40,41 +40,47 @@ This project adheres to the [Contributor Covenant Code of Conduct](CODE_OF_CONDU
 
 ### Setup Development Environment
 
-#### Option 1: Install with all dev dependencies (Recommended)
+#### Option 1: Install development tools and build (Recommended)
 
-This installs all development, testing, documentation, and linting dependencies:
+Install development, testing, documentation, and linting tools without invoking a source installation through pip,
+then compile tf-kernel with Make:
 
 ```bash
-# Install with all development dependencies
-pip install -e ".[dev]"
+# Install development tools
+python -m pip install pytest pytest-cov sphinx sphinx-rtd-theme \
+  sphinx-autodoc-typehints pre-commit isort ruff clang-format
 
 # Install pre-commit hooks
 pre-commit install
 
-# Build the project (requires CUDA)
-make build-auto
+# Build and install the project (requires CUDA)
+make build-auto PYTHON=/path/to/venv/bin/python
 
 # Run tests
 make test
 ```
 
-#### Option 2: Install specific dependency groups
+#### Option 2: Install specific tool groups
 
 If you only need specific dependencies:
 
 ```bash
 # For running tests
-pip install -e ".[test]"
+python -m pip install pytest pytest-cov
 
 # For building documentation
-pip install -e ".[docs]"
+python -m pip install sphinx sphinx-rtd-theme sphinx-autodoc-typehints
 
 # For code linting and formatting
-pip install -e ".[lint]"
+python -m pip install pre-commit isort ruff clang-format
 
 # Install pre-commit hooks (after installing lint dependencies)
 pre-commit install
 ```
+
+Do not use `pip install .`, `pip install -e .`, or `pip install -e ".[dev]"` for local tf-kernel source. Direct source
+installation fails during CMake configuration. Compilation and installation must go through a `make build-*` target,
+which installs the generated wheel.
 
 #### Dependency Groups
 

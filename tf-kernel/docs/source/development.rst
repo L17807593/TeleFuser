@@ -13,11 +13,12 @@ Setting up Development Environment
       git clone https://github.com/Tele-AI/TeleFuser.git
       cd TeleFuser/tf-kernel
 
-2. Install development dependencies:
+2. Install development tools without installing tf-kernel from source through pip:
 
    .. code-block:: bash
 
-      python -m pip install -e ".[dev]"
+      python -m pip install pytest pytest-cov sphinx sphinx-rtd-theme \
+        sphinx-autodoc-typehints pre-commit isort ruff clang-format
 
 3. Install pre-commit hooks:
 
@@ -25,11 +26,19 @@ Setting up Development Environment
 
       pre-commit install
 
-4. Build the project:
+4. Build and install the project through its Makefile:
 
    .. code-block:: bash
 
       make build-auto PYTHON=/path/to/venv/bin/python
+
+   On a host with sufficient CPU and memory, enable more compilation
+   parallelism with:
+
+   .. code-block:: bash
+
+      make build-auto MAX_JOBS=16 TF_KERNEL_COMPILE_THREADS=4 \
+        PYTHON=/path/to/venv/bin/python
 
 Project Structure
 -----------------

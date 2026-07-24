@@ -65,8 +65,9 @@ CMake options: `TF_KERNEL_TARGET_SM` (ALL/AUTO/SM80/SM90/SM100), `TF_KERNEL_ENAB
   `pyproject.toml` and must not be derived from TeleFuser release tags.
 - Do not add GitHub Actions workflows that compile or publish `tf-kernel`. Use `make update <version>`, build and
   validate the wheel on an explicitly provisioned CUDA/NVCC host, and upload it manually.
-- `pip install -e ".[kernel]"` at the repository root selects the released wheel. Joint source development installs
-  both editable projects with `scripts/install_dev.sh --kernel`.
+- `pip install -e ".[kernel]"` at the repository root selects the released wheel. Local source development runs the
+  Makefile from `tf-kernel/` independently of the TeleFuser installation.
+- Direct pip source and editable builds are rejected by CMake; all local source builds must use a Make target.
 - Never trigger a nested pip install from the TeleFuser or tf-kernel build backend. Keep local source paths out of
   published dependency metadata.
 - Keep the exact PyTorch requirement, Docker build version, wheel build tag, and tested ABI synchronized.
@@ -113,7 +114,7 @@ Python auto-loads the correct library based on GPU:
 
 | Issue | Solution |
 |-------|----------|
-| Build OOM | `make build MAX_JOBS=2 CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"` |
+| Build OOM | `make build-auto MAX_JOBS=2 TF_KERNEL_COMPILE_THREADS=1` |
 | CUDA 12.6 segfault | Update ptxas to 12.8 |
 | CUDA runtime not found | Set `CUDA_HOME` or `CUDA_PATH` |
 | FP4 symbols in SM80/SM90 | Ensure FP4 sources only in `SM_100_SOURCES` |

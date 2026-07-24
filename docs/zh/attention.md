@@ -386,13 +386,8 @@ pip install -e .
 python -m pip install -e ".[kernel]"
 ```
 
-如需随 TeleFuser 编译仓库内源码：
-
-```bash
-PYTHON=/path/to/venv/bin/python scripts/install_dev.sh --kernel
-```
-
-`kernel` extra 不会编译 `tf-kernel/`。需要指定架构源码编译时，在 `tf-kernel/` 目录执行：
+`kernel` extra 不会编译 `tf-kernel/`，本地源码构建独立于 TeleFuser 安装。需要指定架构源码编译时，
+在 `tf-kernel/` 目录执行：
 
 ```bash
 make build-auto PYTHON=/path/to/venv/bin/python

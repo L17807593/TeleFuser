@@ -64,19 +64,10 @@ To install the independently released CUDA extension from the configured package
 pip install -e ".[kernel]"
 ```
 
-To develop TeleFuser and the in-tree `tf-kernel` sources together, build both editable projects in one command:
-
-```bash
-scripts/install_dev.sh --kernel
-
-# Equivalent pip command:
-python -m pip install -e ./tf-kernel -e ".[dev]"
-```
-
 The unpinned `kernel` extra resolves the latest compatible `tf-kernel`; it does not compile the sibling source tree.
-The local development command compiles `tf-kernel/` instead. Both paths use the PyTorch version declared by the
-independently versioned kernel package. See the [tf-kernel installation and usage guide](docs/en/tf_kernel.md) for
-architecture-specific builds, verification, supported configurations, and troubleshooting.
+TeleFuser does not require `tf-kernel` to run. Local tf-kernel source builds are independent of the TeleFuser
+installation and use the Makefile under `tf-kernel/`. See the [tf-kernel README](tf-kernel/README.md) and
+[installation and usage guide](docs/en/tf_kernel.md) for build, verification, and compatibility details.
 
 WebRTC streaming support is included in the default installation through `aiortc`.
 

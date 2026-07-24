@@ -45,9 +45,6 @@ This project adheres to the [Contributor Covenant Code of Conduct](CODE_OF_CONDU
 # Install with development dependencies
 pip install -e ".[dev]"
 
-# Also build the in-tree tf-kernel project for joint development
-scripts/install_dev.sh --kernel
-
 # Install pre-commit hooks
 pip install -U pre-commit
 pip install ruff==0.9.4
@@ -62,8 +59,9 @@ pre-commit install
 | `docs` | Documentation dependencies | mkdocs, mkdocs-material, mkdocstrings-python |
 | `kernel` | Released CUDA extension package | tf-kernel |
 
-`pip install -e ".[kernel]"` installs the released kernel wheel. Use `scripts/install_dev.sh --kernel` when a change
-touches both TeleFuser and the local `tf-kernel/` source tree.
+`pip install -e ".[kernel]"` installs the released kernel wheel. TeleFuser development does not build the local
+`tf-kernel/` source tree. Build tf-kernel independently with its Makefile as documented in
+[`tf-kernel/README.md`](tf-kernel/README.md).
 
 **Note**: Since the `ruff-pre-commit` is currently maintained in the open-source community of the R&D Cloud, you will need to set up SSH key authentication in the open-source community before running `pre-commit install`.
 

@@ -27,14 +27,6 @@
 python -m pip install --upgrade tf-kernel
 ```
 
-在 TeleFuser checkout 中，`python -m pip install -e ".[kernel]"` 会从当前配置的包索引安装已发布版本，
-不会编译本源码目录。如需联合开发两个项目：
-
-```bash
-cd /path/to/TeleFuser
-PYTHON=/path/to/venv/bin/python scripts/install_dev.sh --kernel
-```
-
 兼容性、验证方法、可运行 API 示例和常见问题见
 [TeleFuser 完整安装与使用指南](../docs/zh/tf_kernel.md)。
 
@@ -47,30 +39,23 @@ PYTHON=/path/to/venv/bin/python scripts/install_dev.sh --kernel
 - Python ≥3.10
 - PyTorch == 2.11.0
 - scikit-build-core
-- ninja（可选）
+- ninja
 
-### 开发环境安装
+### 本地编译和安装
 
-`tf-kernel` 是存放在 TeleFuser 单仓库中的独立版本 Python distribution。如需联合开发，请克隆 TeleFuser
-并使用同一个解释器安装两个 editable 项目：
+`tf-kernel` 是存放在 TeleFuser 单仓库中的独立版本 Python distribution。本地构建不会安装或依赖
+TeleFuser Python 包：
 
 ```bash
 git clone https://github.com/Tele-AI/TeleFuser.git
-cd TeleFuser
-PYTHON=/path/to/venv/bin/python scripts/install_dev.sh --kernel
-
-# 等价命令：
-/path/to/venv/bin/python -m pip install -e ./tf-kernel -e ".[dev]"
+cd TeleFuser/tf-kernel
+make build-auto PYTHON=/path/to/venv/bin/python
 ```
 
 可选依赖组：`dev`（全部）、`test`（测试）、`docs`（文档）、`lint`（代码检查）。
 
-如果只开发 `tf-kernel`，不安装 TeleFuser 的开发依赖：
-
-```bash
-cd tf-kernel
-python -m pip install -e ".[dev]"
-```
+本地源码必须通过 Makefile 编译。直接执行 `pip install .` 或 `pip install -e .` 会在 CMake 配置阶段失败。
+Make 会构建带有正确 tag 的 wheel，并将产物安装到指定解释器。
 
 ### 独立发布
 
@@ -112,7 +97,7 @@ make build-sm90 \
   PYTHON=/path/to/venv/bin/python \
   MAX_JOBS=2 \
   CMAKE_BUILD_PARALLEL_LEVEL=2 \
-  CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"
+  TF_KERNEL_COMPILE_THREADS=1
 ```
 
 ### 目标 SM 架构选择
@@ -127,25 +112,29 @@ make build-sm90 \
 | `SM90` | 仅编译 SM 90（Hopper H100） |
 | `SM100` | 仅编译 SM 100+（Blackwell） |
 
-直接使用 CMake：
+使用对应的 Make target：
 ```bash
-cmake -DTF_KERNEL_TARGET_SM=AUTO ..
-cmake -DTF_KERNEL_TARGET_SM=SM80 ..
+make build-auto
+make build-sm80
 ```
 
 **注意：** 针对特定 SM 架构编译可以显著减少编译时间和二进制文件大小，相比编译所有架构。
 
-### 限制编译资源占用（CPU / 并行度）
+### 配置编译并行度
 
-默认情况下，`make build` 会使用所有可用的 CPU 核心。你可以覆盖编译并行度和 NVCC 编译线程数：
+默认情况下，`make build` 会使用所有可用的 CPU 核心，每个编译任务最多使用 32 个 NVCC 内部线程。
+可以根据机器的 CPU 和内存资源增加或限制两级并行度：
 
 ```bash
-# 限制并行作业数（控制 make 和 cmake 的并行度）
-make build MAX_JOBS=2
+# 在资源充足的机器上加速指定架构编译
+make build-auto MAX_JOBS=16 TF_KERNEL_COMPILE_THREADS=4
 
-# 额外限制 NVCC 内部线程数（减少 CPU 和峰值内存占用）
-make build MAX_JOBS=2 CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"
+# 降低 CPU 和峰值内存占用
+make build-auto MAX_JOBS=2 TF_KERNEL_COMPILE_THREADS=1
 ```
+
+`MAX_JOBS` 控制并发编译任务数，`TF_KERNEL_COMPILE_THREADS` 控制每个任务内部使用的 NVCC 线程数。
+两者乘积增大时，CPU 和峰值内存压力也会增加。
 
 ### 验证已安装扩展
 

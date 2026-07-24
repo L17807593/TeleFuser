@@ -4,10 +4,11 @@
 # Build resource controls
 # ---------------------------
 # By default, build uses all available CPU cores, but users can override:
-#   make build MAX_JOBS=2 CMAKE_BUILD_PARALLEL_LEVEL=2 CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"
+#   make build-auto MAX_JOBS=16 TF_KERNEL_COMPILE_THREADS=4
 NPROC ?= $(shell nproc 2>/dev/null || echo 1)
 MAX_JOBS ?= $(NPROC)
 CMAKE_BUILD_PARALLEL_LEVEL ?= $(MAX_JOBS)
+TF_KERNEL_COMPILE_THREADS ?= 32
 UV_BUILD_DIR ?= build
 CMAKE_POLICY_VERSION_MINIMUM ?= 3.5
 PYTHON ?= python3
@@ -20,12 +21,17 @@ TF_KERNEL_TARGET_SM ?= ALL
 help: ## Show this help message
 	@echo "Available targets:"
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Build parallelism:"
+	@echo "  MAX_JOBS=<n>                    Parallel build jobs (default: detected CPU count)"
+	@echo "  TF_KERNEL_COMPILE_THREADS=<n>   NVCC threads per compilation job (default: 32)"
+	@echo "  Example: make build-auto MAX_JOBS=16 TF_KERNEL_COMPILE_THREADS=4"
 
 check-deps: ## Check and install required Python formatting dependencies
 	@$(PYTHON) -c "import isort" >/dev/null 2>&1 || (echo "Installing isort..." && $(PYTHON) -m pip install isort)
 
 install-deps: ## Install Python formatting and wheel build tools
-	$(PYTHON) -m pip install scikit-build-core isort uv wheel
+	$(PYTHON) -m pip install scikit-build-core isort ninja uv wheel
 
 tree: ## Show project directory structure
 	@tree --prune -I "__pycache__|*.egg-info|*.so|build|3rdparty|dist"
@@ -34,17 +40,16 @@ submodule: ## Initialize and update git submodules
 	@git submodule update --init --recursive
 
 ln: submodule ## Create compilation database
-	@rm -rf build && mkdir build && cd build && cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=YES -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+	@rm -rf build && mkdir build && cd build && cmake .. -DTF_KERNEL_BUILD_VIA_MAKE=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=YES -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
-install: submodule ## Install package in development mode
-	@$(PYTHON) -m pip install -e ".[dev]"
+install: build-auto ## Build and install a wheel for the auto-detected GPU architecture
 
 build: install-deps submodule ## Build and install wheel package (default: ALL)
 	@rm -rf dist/* || true && \
 		CMAKE_POLICY_VERSION_MINIMUM=$(CMAKE_POLICY_VERSION_MINIMUM) \
 		MAX_JOBS=$(MAX_JOBS) \
 		CMAKE_BUILD_PARALLEL_LEVEL=$(CMAKE_BUILD_PARALLEL_LEVEL) \
-		CMAKE_ARGS="$(CMAKE_ARGS) -DTF_KERNEL_TARGET_SM=$(TF_KERNEL_TARGET_SM)" \
+		CMAKE_ARGS="$(CMAKE_ARGS) -DTF_KERNEL_BUILD_VIA_MAKE=ON -DTF_KERNEL_TARGET_SM=$(TF_KERNEL_TARGET_SM) -DTF_KERNEL_COMPILE_THREADS=$(TF_KERNEL_COMPILE_THREADS)" \
 		$(PYTHON) -m uv build --wheel -Cbuild-dir=$(UV_BUILD_DIR) . --verbose --color=always --no-build-isolation && \
 		$(MAKE) rename-wheels PYTHON="$(PYTHON)" && \
 		$(PYTHON) -m pip install dist/*whl --force-reinstall --no-deps

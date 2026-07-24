@@ -3,7 +3,8 @@ Installation
 
 ``tf-kernel`` is an independently released CUDA extension stored in the
 TeleFuser monorepo. TeleFuser may consume the published wheel through an
-optional extra or compile the in-tree project for joint development.
+optional extra, while local tf-kernel source builds remain independent of the
+TeleFuser installation.
 
 Requirements
 ------------
@@ -61,23 +62,22 @@ and run the target GPU smoke tests before upload. A matching
 ``tf-kernel-v<version>`` tag may be added afterward for source provenance; it
 does not trigger compilation or publication.
 
-Joint Editable Development
---------------------------
+Source Build and Installation
+-----------------------------
 
-Clone the TeleFuser monorepo and install both projects with the same Python
-interpreter:
+Clone the TeleFuser monorepo and build tf-kernel independently through its
+Makefile. This does not install or depend on the TeleFuser Python package:
 
 .. code-block:: bash
 
    git clone https://github.com/Tele-AI/TeleFuser.git
-   cd TeleFuser
-   PYTHON=/path/to/venv/bin/python scripts/install_dev.sh --kernel
+   cd TeleFuser/tf-kernel
+   make build-auto PYTHON=/path/to/venv/bin/python
 
-The direct equivalent is:
-
-.. code-block:: bash
-
-   /path/to/venv/bin/python -m pip install -e ./tf-kernel -e ".[dev]"
+Local source compilation is supported only through the Makefile. Direct
+``pip install ./tf-kernel`` and ``pip install -e ./tf-kernel`` commands fail
+during CMake configuration. Make builds a correctly tagged wheel and installs
+that artifact into the selected interpreter.
 
 Build an Architecture-Specific Wheel
 ------------------------------------
@@ -105,10 +105,20 @@ can be run with:
      PYTHON=/path/to/venv/bin/python \
      MAX_JOBS=2 \
      CMAKE_BUILD_PARALLEL_LEVEL=2 \
-     CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"
+     TF_KERNEL_COMPILE_THREADS=1
 
 The first source build needs network access for pinned CUTLASS, FlashInfer,
 and other CMake dependencies.
+
+``MAX_JOBS`` controls concurrent build jobs, while
+``TF_KERNEL_COMPILE_THREADS`` controls the internal NVCC threads used by each
+job. On a host with enough CPU and memory, a faster build can be requested with:
+
+.. code-block:: bash
+
+   make build-auto MAX_JOBS=16 TF_KERNEL_COMPILE_THREADS=4
+
+Increasing their product also increases peak CPU and memory pressure.
 
 Verify Installation
 -------------------
@@ -163,9 +173,9 @@ Rebuild with ``make build-auto`` on the target machine or explicitly select
 High Build Resource Use
 ^^^^^^^^^^^^^^^^^^^^^^^
 
-Reduce ``MAX_JOBS`` and ``CMAKE_BUILD_PARALLEL_LEVEL`` and set
-``CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"``. Building one SM target also
-reduces compilation time and wheel size.
+Reduce ``MAX_JOBS``, ``CMAKE_BUILD_PARALLEL_LEVEL``, and
+``TF_KERNEL_COMPILE_THREADS``. Building one SM target also reduces compilation
+time and wheel size.
 
 FP4 Warning on Ampere or Hopper
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,4 +1,14 @@
 cmake_minimum_required(VERSION 3.26 FATAL_ERROR)
+
+option(TF_KERNEL_BUILD_VIA_MAKE "Build tf-kernel through its Makefile" OFF)
+if(NOT TF_KERNEL_BUILD_VIA_MAKE)
+    message(FATAL_ERROR
+        "Direct tf-kernel source builds are unsupported. "
+        "Run `make build-auto PYTHON=/path/to/python` or an architecture-specific Make target. "
+        "pip may only install a published or prebuilt tf-kernel wheel."
+    )
+endif()
+
 project(tf-kernel LANGUAGES CXX CUDA)
 
 # utils

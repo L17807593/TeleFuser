@@ -386,14 +386,8 @@ attention implementations. Install the released package from the configured pack
 python -m pip install -e ".[kernel]"
 ```
 
-To compile the in-tree source together with TeleFuser instead:
-
-```bash
-PYTHON=/path/to/venv/bin/python scripts/install_dev.sh --kernel
-```
-
-The `kernel` extra does not compile `tf-kernel/`. For an architecture-specific source build, run one of these commands
-from the `tf-kernel/` directory:
+The `kernel` extra does not compile `tf-kernel/`. Local source builds are independent of the TeleFuser installation.
+For an architecture-specific source build, run one of these commands from the `tf-kernel/` directory:
 
 ```bash
 make build-auto PYTHON=/path/to/venv/bin/python

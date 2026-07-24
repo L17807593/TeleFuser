@@ -161,7 +161,7 @@ def _load_architecture_specific_ops():
 
             logger.debug(f"[tf_kernel] Loading fallback module from {alt_path}...")
             spec.loader.exec_module(common_ops)
-            logger.debug(f"[tf_kernel] ✓ Successfully loaded fallback library")
+            logger.debug("[tf_kernel] ✓ Successfully loaded fallback library")
             logger.debug(f"[tf_kernel] ✓ Module file: {common_ops.__file__}")
             return common_ops
 
@@ -176,13 +176,11 @@ def _load_architecture_specific_ops():
         )
 
     # Final attempt: try standard Python import (for backward compatibility)
-    logger.debug(
-        f"[tf_kernel] Final attempt: trying standard Python import 'common_ops'"
-    )
+    logger.debug("[tf_kernel] Final attempt: trying standard Python import 'common_ops'")
     try:
         import common_ops
 
-        logger.debug(f"[tf_kernel] ✓ Successfully imported via standard Python import")
+        logger.debug("[tf_kernel] ✓ Successfully imported via standard Python import")
         logger.debug(f"[tf_kernel] ✓ Module file: {common_ops.__file__}")
         return common_ops
     except ImportError as e:
@@ -206,8 +204,9 @@ GPU Info:
 - Compute capability: {compute_capability}
 - Expected variant: {variant_name}
 
-Please ensure tf_kernel is properly installed with:
-pip install --upgrade tf_kernel
+Install a published wheel with `pip install --upgrade tf-kernel`, or build
+the local source through its Makefile, for example:
+make build-auto PYTHON=/path/to/venv/bin/python
 
 Error details from previous import attempts:
 {attempt_error_msg}

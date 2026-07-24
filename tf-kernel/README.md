@@ -27,14 +27,6 @@ English | [中文](README_zh.md)
 python -m pip install --upgrade tf-kernel
 ```
 
-From a TeleFuser checkout, `python -m pip install -e ".[kernel]"` installs the published package from the configured
-index. It does not compile this source directory. To develop both projects together, use:
-
-```bash
-cd /path/to/TeleFuser
-PYTHON=/path/to/venv/bin/python scripts/install_dev.sh --kernel
-```
-
 See the [full TeleFuser installation and usage guide](../docs/en/tf_kernel.md) for compatibility, verification,
 runnable API examples, and troubleshooting.
 
@@ -47,30 +39,24 @@ runnable API examples, and troubleshooting.
 - Python ≥3.10
 - PyTorch == 2.11.0
 - scikit-build-core
-- ninja (optional)
+- ninja
 
-### Development Installation
+### Local Build and Installation
 
-`tf-kernel` is an independently versioned Python distribution stored in the TeleFuser monorepo. For joint
-development, clone TeleFuser and install both editable projects with the same interpreter:
+`tf-kernel` is an independently versioned Python distribution stored in the TeleFuser monorepo. Its local build does
+not install or otherwise depend on the TeleFuser Python package:
 
 ```bash
 git clone https://github.com/Tele-AI/TeleFuser.git
-cd TeleFuser
-PYTHON=/path/to/venv/bin/python scripts/install_dev.sh --kernel
-
-# Equivalent command:
-/path/to/venv/bin/python -m pip install -e ./tf-kernel -e ".[dev]"
+cd TeleFuser/tf-kernel
+make build-auto PYTHON=/path/to/venv/bin/python
 ```
 
 Dependency groups available: `dev` (all), `test`, `docs`, `lint`.
 
-To work on `tf-kernel` without installing TeleFuser's development dependencies:
-
-```bash
-cd tf-kernel
-python -m pip install -e ".[dev]"
-```
+Local source builds must use the Makefile. Direct `pip install .` and `pip install -e .` commands fail during CMake
+configuration. Make builds a correctly tagged wheel and installs the resulting artifact into the selected
+interpreter.
 
 ### Independent Releases
 
@@ -115,7 +101,7 @@ make build-sm90 \
   PYTHON=/path/to/venv/bin/python \
   MAX_JOBS=2 \
   CMAKE_BUILD_PARALLEL_LEVEL=2 \
-  CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"
+  TF_KERNEL_COMPILE_THREADS=1
 ```
 
 ### Target SM Architecture Selection
@@ -130,25 +116,29 @@ The build system supports selecting target SM architectures via the `TF_KERNEL_T
 | `SM90` | Build for SM 90 (Hopper H100) |
 | `SM100` | Build for SM 100+ (Blackwell) |
 
-Using CMake directly:
+Use the corresponding Make targets:
 ```bash
-cmake -DTF_KERNEL_TARGET_SM=AUTO ..
-cmake -DTF_KERNEL_TARGET_SM=SM80 ..
+make build-auto
+make build-sm80
 ```
 
 **Note:** Building for a specific SM architecture reduces build time and binary size significantly compared to building for all architectures.
 
-### Limit build resource usage (CPU / parallelism)
+### Configure build parallelism
 
-By default, `make build` uses all available CPU cores. You can override build parallelism and NVCC compile threads:
+By default, `make build` uses all available CPU cores and up to 32 internal NVCC threads per compilation job.
+Increase or limit both levels according to the host's CPU and memory capacity:
 
 ```bash
-# Limit parallel jobs (controls both make and cmake parallelism)
-make build MAX_JOBS=2
+# Accelerate a target-specific build on a sufficiently provisioned host
+make build-auto MAX_JOBS=16 TF_KERNEL_COMPILE_THREADS=4
 
-# Additionally limit NVCC internal threads (reduces CPU and peak memory)
-make build MAX_JOBS=2 CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"
+# Reduce CPU and peak memory use
+make build-auto MAX_JOBS=2 TF_KERNEL_COMPILE_THREADS=1
 ```
+
+`MAX_JOBS` controls concurrent build jobs, while `TF_KERNEL_COMPILE_THREADS` controls the internal NVCC threads used
+by each job. Increasing their product also increases peak CPU and memory pressure.
 
 ### Verify the installed extension
 

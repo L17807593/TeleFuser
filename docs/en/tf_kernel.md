@@ -55,21 +55,25 @@ The `kernel` extra intentionally has no `tf-kernel` version pin. It resolves the
 the configured package index; `tf-kernel` itself owns its PyTorch dependency and CUDA ABI requirements. This command
 does **not** compile the sibling `tf-kernel/` source directory.
 
-### Develop TeleFuser and tf-kernel together
+### Build local tf-kernel source
 
-From the repository root, install both editable projects with the same interpreter:
-
-```bash
-PYTHON=/path/to/venv/bin/python scripts/install_dev.sh --kernel
-```
-
-Equivalent command:
+The local tf-kernel build is independent of the TeleFuser installation. From the repository root, invoke the kernel
+Makefile with the Python interpreter that will load the extension:
 
 ```bash
-/path/to/venv/bin/python -m pip install -e ./tf-kernel -e ".[dev]"
+make -C tf-kernel build-auto PYTHON=/path/to/venv/bin/python
 ```
 
-Editable installation invokes the CUDA build backend. Use an architecture-specific wheel build instead when build
+On a build host with enough CPU and memory, increase both levels of compilation parallelism:
+
+```bash
+MAX_JOBS=16 TF_KERNEL_COMPILE_THREADS=4 \
+  make -C tf-kernel build-auto PYTHON=/path/to/venv/bin/python
+```
+
+Local tf-kernel source compilation is supported only through its Makefile. The Make target builds a wheel and then
+installs that wheel into `PYTHON`. Direct `pip install ./tf-kernel` and `pip install -e ./tf-kernel` commands fail at
+CMake configuration with instructions to use Make. Select an architecture-specific Make target instead when build
 time, binary size, or reproducibility matters.
 
 ### Install tf-kernel independently
@@ -132,12 +136,16 @@ make build-sm90 \
   PYTHON=/path/to/venv/bin/python \
   MAX_JOBS=2 \
   CMAKE_BUILD_PARALLEL_LEVEL=2 \
-  CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"
+  TF_KERNEL_COMPILE_THREADS=1
 ```
 
 `make build` builds all supported targets. Every build target writes a wheel to `dist/`, adds a legal wheel build
 tag containing the Torch/CUDA ABI, and installs that wheel into the interpreter selected by `PYTHON`. The initial
 build needs network access to obtain pinned CUTLASS, FlashInfer, and other CMake dependencies.
+
+`MAX_JOBS` controls the number of concurrent build jobs. `TF_KERNEL_COMPILE_THREADS` controls the internal NVCC
+threads used by each job. Increasing them can reduce build time on a sufficiently provisioned host; their product
+also increases CPU and memory pressure.
 
 ## Verify the installation
 
@@ -251,6 +259,5 @@ isolated validation, but production enablement still requires parity and workloa
 
 ### The build exhausts CPU or memory
 
-Lower `MAX_JOBS` and `CMAKE_BUILD_PARALLEL_LEVEL`, and set
-`CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"`. Targeting one SM architecture also substantially reduces build time and
-artifact size.
+Lower `MAX_JOBS`, `CMAKE_BUILD_PARALLEL_LEVEL`, and `TF_KERNEL_COMPILE_THREADS`. Targeting one SM architecture also
+substantially reduces build time and artifact size.

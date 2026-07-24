@@ -51,22 +51,25 @@ python -m pip install -e ".[kernel]"
 `kernel` extra 有意不固定 `tf-kernel` 版本，它会从当前配置的包索引解析最新兼容版本；PyTorch 依赖和
 CUDA ABI 要求由 `tf-kernel` 自身管理。该命令**不会**编译仓库中的同级 `tf-kernel/` 源码目录。
 
-### 联合开发 TeleFuser 和 tf-kernel
+### 编译本地 tf-kernel 源码
 
-在仓库根目录使用同一个 Python 解释器安装两个 editable 项目：
-
-```bash
-PYTHON=/path/to/venv/bin/python scripts/install_dev.sh --kernel
-```
-
-等价命令：
+本地 tf-kernel 构建独立于 TeleFuser 安装。在仓库根目录调用 kernel Makefile，并指定后续加载扩展的
+Python 解释器：
 
 ```bash
-/path/to/venv/bin/python -m pip install -e ./tf-kernel -e ".[dev]"
+make -C tf-kernel build-auto PYTHON=/path/to/venv/bin/python
 ```
 
-editable 安装会调用 CUDA 编译后端。如果更关注编译时间、二进制体积或可复现性，建议使用下文的
-指定架构 wheel 编译方式。
+在 CPU 和内存充足的编译机器上，可以同时提高两级编译并行度：
+
+```bash
+MAX_JOBS=16 TF_KERNEL_COMPILE_THREADS=4 \
+  make -C tf-kernel build-auto PYTHON=/path/to/venv/bin/python
+```
+
+本地 tf-kernel 源码只支持通过 Makefile 编译。Make target 会构建 wheel，再将其安装到 `PYTHON` 指定的
+解释器。直接执行 `pip install ./tf-kernel` 或 `pip install -e ./tf-kernel` 会在 CMake 配置阶段失败，并
+提示改用 Make。如果更关注编译时间、二进制体积或可复现性，建议使用下文的指定架构 Make target。
 
 ### 独立安装 tf-kernel
 
@@ -127,12 +130,15 @@ make build-sm90 \
   PYTHON=/path/to/venv/bin/python \
   MAX_JOBS=2 \
   CMAKE_BUILD_PARALLEL_LEVEL=2 \
-  CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"
+  TF_KERNEL_COMPILE_THREADS=1
 ```
 
 `make build` 会编译所有支持的目标。每个编译目标都会把 wheel 写入 `dist/`，添加包含 Torch/CUDA ABI
 信息的合法 wheel build tag，并将其安装到 `PYTHON` 指定的解释器。首次编译需要联网获取固定版本的
 CUTLASS、FlashInfer 和其他 CMake 依赖。
+
+`MAX_JOBS` 控制并发编译任务数，`TF_KERNEL_COMPILE_THREADS` 控制每个任务内部使用的 NVCC 线程数。
+在资源充足的机器上提高两者可以缩短编译时间，但它们的乘积也会增加 CPU 和内存压力。
 
 ## 验证安装
 
@@ -244,5 +250,5 @@ PyTorch 版本，请在干净环境中安装 TeleFuser 和 `tf-kernel`。除非�
 
 ### 编译耗尽 CPU 或内存
 
-降低 `MAX_JOBS` 和 `CMAKE_BUILD_PARALLEL_LEVEL`，并设置
-`CMAKE_ARGS="-DTF_KERNEL_COMPILE_THREADS=1"`。只编译一个 SM 架构也能显著降低编译时间和产物体积。
+降低 `MAX_JOBS`、`CMAKE_BUILD_PARALLEL_LEVEL` 和 `TF_KERNEL_COMPILE_THREADS`。只编译一个 SM
+架构也能显著降低编译时间和产物体积。
