@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from telefuser.models.lingbot_vla_v2_loader import (
+    build_official_6b_config,
     resolve_lingbot_vla_v2_shards,
     validate_official_6b_checkpoint,
 )
@@ -56,3 +57,8 @@ def test_validate_official_6b_checkpoint_rejects_wrong_shape() -> None:
 
     with pytest.raises(ValueError, match="Unexpected shape"):
         validate_official_6b_checkpoint(state_dict)
+
+
+def test_build_official_6b_config_rejects_non_base_variant(tmp_path) -> None:
+    with pytest.raises(ValueError, match="Unsupported LingBot-VLA v2 checkpoint variant"):
+        build_official_6b_config(tmp_path, checkpoint_variant="robotwin")

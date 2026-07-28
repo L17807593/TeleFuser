@@ -51,7 +51,11 @@ def _processor() -> tuple[LingBotVlaV2InputProcessor, _ImageProcessor, _Tokenize
     tokenizer = _Tokenizer()
     processor = SimpleNamespace(image_processor=image_processor, tokenizer=tokenizer)
     config = SimpleNamespace(max_state_dim=55, tokenizer_max_length=6)
-    return LingBotVlaV2InputProcessor(processor, config, RobotWinProfile.default()), image_processor, tokenizer
+    return (
+        LingBotVlaV2InputProcessor(processor, config, RobotWinProfile.default(), image_size=8),
+        image_processor,
+        tokenizer,
+    )
 
 
 def _observation() -> LingBotVlaV2Observation:
@@ -99,3 +103,16 @@ def test_prepare_scales_unit_float_images_to_uint8() -> None:
     processor.prepare(LingBotVlaV2Observation(observation.task, observation.state, images))
 
     assert image_processor.values[0] == 128
+
+
+def test_prepare_resizes_each_camera_before_qwen_processing() -> None:
+    processor, image_processor, _ = _processor()
+    observation = _observation()
+    images = {
+        key: np.full((12, 16, 3), value, dtype=np.uint8)
+        for key, value in zip(ROBOTWIN_CAMERA_KEYS, (10, 20, 30), strict=True)
+    }
+
+    processor.prepare(LingBotVlaV2Observation(observation.task, observation.state, images))
+
+    assert image_processor.values == [10, 20, 30]

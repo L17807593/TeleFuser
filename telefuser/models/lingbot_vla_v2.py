@@ -77,6 +77,7 @@ class LingbotVLAConfig(PretrainedConfig):
         routed_scaling_factor: float = 1.0,
         use_shared_expert_gate: bool = True,
         moe_implementation: Optional[Literal[None, "eager", "fused"]] = None,
+        use_robby_moe_kernel: bool = False,
         split_fused_experts_from_decoder_fsdp: bool = False,
         expert_hidden_size: int = 768,
         expert_intermediate_size: int = 2752,
@@ -155,6 +156,7 @@ class LingbotVLAConfig(PretrainedConfig):
         self.routed_scaling_factor = routed_scaling_factor
         self.use_shared_expert_gate = use_shared_expert_gate
         self.moe_implementation = moe_implementation
+        self.use_robby_moe_kernel = use_robby_moe_kernel
         if moe_implementation is not None:
             if moe_implementation not in ("eager", "fused"):
                 raise ValueError(f"Invalid moe_implementation: {moe_implementation}")
@@ -1952,7 +1954,7 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         if self.config.use_lm_head:
             self.qwenvl.tie_weights()
 
-        self.config.qwen_expert_config._attn_implementation = "flash_attention_2"
+        self.config.qwen_expert_config._attn_implementation = base_attn_implementation
         self.qwen_expert = Qwen2ForCausalLM._from_config(self.config.qwen_expert_config, eval=eval)
 
         if getattr(self.config, "adanorm_time", False):
@@ -1969,6 +1971,7 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         self.cu_seqlens = None
         self.visual_split_sizes = None
         self.visual_max_seqlen = None
+        self._cached_image_grid_signature = None
 
         del self.qwen_expert.model.embed_tokens
         if self.config.enable_expert_vision:
@@ -1984,6 +1987,20 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
 
         self.attention_interface = self.get_attention_interface()
         self.set_requires_grad()
+
+    def _apply(self, fn):
+        super()._apply(fn)
+        for name in ("pos_embeds", "position_embeddings", "cu_seqlens"):
+            value = getattr(self, name, None)
+            if isinstance(value, torch.Tensor):
+                setattr(self, name, fn(value))
+            elif isinstance(value, tuple):
+                setattr(
+                    self,
+                    name,
+                    tuple(fn(item) if isinstance(item, torch.Tensor) else item for item in value),
+                )
+        return self
 
     def _install_moe_blocks(self):
         if not getattr(self.config, "use_moe", False):
@@ -2009,6 +2026,7 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
             token_config.router_activation = getattr(self.config, "router_activation", "softmax")
             token_config.routed_scaling_factor = getattr(self.config, "routed_scaling_factor", 1.0)
             token_config.use_shared_expert_gate = getattr(self.config, "use_shared_expert_gate", True)
+            token_config.use_robby_moe_kernel = getattr(self.config, "use_robby_moe_kernel", False)
             for idx in token_moe_layers:
                 self.qwen_expert.model.layers[idx].mlp = Qwen2TokenMoeBlock(token_config)
 
@@ -2035,7 +2053,9 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
         image_grid_thw: torch.LongTensor,
     ):
         precompute_grid_thw = getattr(self.config, "precompute_grid_thw", False)
-        if precompute_grid_thw and self.position_embeddings is None:
+        grid_signature = tuple(image_grid_thw.detach().to(device="cpu").reshape(-1).tolist())
+        cache_miss = self.position_embeddings is None or self._cached_image_grid_signature != grid_signature
+        if precompute_grid_thw and cache_miss:
             (
                 self.pos_embeds,
                 self.position_embeddings,
@@ -2043,6 +2063,7 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
                 self.visual_split_sizes,
                 self.visual_max_seqlen,
             ) = self.qwenvl.visual.preprcess_grid_thw(grid_thw=image_grid_thw)
+            self._cached_image_grid_signature = grid_signature
         image_embeds, deepstack_image_embeds = self.qwenvl.visual(
             pixel_values,
             grid_thw=image_grid_thw,
@@ -2279,6 +2300,7 @@ class FlowMatchingV2(FlowMatchingV1):
             "router_activation",
             "routed_scaling_factor",
             "use_shared_expert_gate",
+            "use_robby_moe_kernel",
             "_moe_implementation",
         ]:
             if hasattr(config, name):
@@ -2816,7 +2838,7 @@ class FlowMatchingV2(FlowMatchingV1):
 
             x_t += dt * v_t
             time += dt
-        print(f"Denoise {count} steps")
+        logger.debug("Denoised actions in %d steps", count)
         return x_t
 
     def predict_velocity(

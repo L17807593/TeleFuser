@@ -1,4 +1,4 @@
-"""Run LingBot-VLA v2 with a RobotWin observation."""
+"""Run the LingBot-VLA v2 base checkpoint with a RobotWin observation adapter."""
 
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ from telefuser.core.config import ModelRuntimeConfig
 from telefuser.core.module_manager import ModuleManager
 from telefuser.models.lingbot_vla_v2_loader import load_lingbot_vla_v2
 from telefuser.pipelines.lingbot_vla_v2 import (
+    ROBOTWIN_CAMERA_KEYS,
     LingBotVlaV2Observation,
     LingBotVlaV2Pipeline,
     LingBotVlaV2PipelineConfig,
-    ROBOTWIN_CAMERA_KEYS,
 )
 
 
@@ -24,10 +24,10 @@ def get_pipeline(
     model_root: str,
     qwen3vl_root: str,
     device: str = "cuda",
-    include_canonical_actions: bool = False,
 ) -> LingBotVlaV2Pipeline:
     """Load the official 6B checkpoint and Qwen3-VL processor."""
-    dtype = torch.bfloat16 if torch.device(device).type == "cuda" else torch.float32
+    target_device = torch.device(device)
+    dtype = torch.bfloat16 if target_device.type == "cuda" else torch.float32
     processor = AutoProcessor.from_pretrained(qwen3vl_root, local_files_only=True, padding_side="right")
     manager = ModuleManager(torch_dtype=dtype, device="cpu")
     manager.add_module(processor, "lingbot_vla_v2_processor", path=qwen3vl_root)
@@ -36,8 +36,11 @@ def get_pipeline(
     pipeline.init(
         manager,
         LingBotVlaV2PipelineConfig(
-            policy_config=ModelRuntimeConfig(device_type=torch.device(device).type, torch_dtype=dtype),
-            include_canonical_actions=include_canonical_actions,
+            policy_config=ModelRuntimeConfig(
+                device_type=target_device.type,
+                device_id=target_device.index or 0,
+                torch_dtype=dtype,
+            ),
         ),
     )
     return pipeline
@@ -51,8 +54,7 @@ def get_pipeline(
 @click.option("--camera-right-wrist", required=True, type=click.Path(exists=True, dir_okay=False))
 @click.option("--task", required=True)
 @click.option("--state-json", required=True, help="Raw 14-D RobotWin state as a JSON list")
-@click.option("--output", default="action_chunk.npz", type=click.Path(dir_okay=False))
-@click.option("--include-canonical-actions", is_flag=True)
+@click.option("--output", default="canonical_action_chunk.npz", type=click.Path(dir_okay=False))
 @click.option("--seed", default=None, type=int)
 @click.option("--device", default="cuda")
 def main(
@@ -64,11 +66,10 @@ def main(
     task: str,
     state_json: str,
     output: str,
-    include_canonical_actions: bool,
     seed: int | None,
     device: str,
 ) -> None:
-    """Predict and save a structured RobotWin action chunk."""
+    """Predict and save a normalized canonical action chunk."""
     try:
         state = json.loads(state_json)
     except json.JSONDecodeError as error:
@@ -90,25 +91,20 @@ def main(
         model_root,
         qwen3vl_root,
         device=device,
-        include_canonical_actions=include_canonical_actions,
     )
     try:
         chunk = pipeline(observation, seed=seed)
         arrays = {
-            "action": chunk.raw_actions.numpy(),
-            "action_arm_position": chunk.fields["action.arm.position"].numpy(),
-            "action_effector_position": chunk.fields["action.effector.position"].numpy(),
-            "action_mask": chunk.action_mask.numpy(),
+            "canonical_normalized_actions": chunk.canonical_normalized_actions.numpy(),
             "horizon": np.asarray(chunk.horizon),
-            "robot_profile": np.asarray(chunk.robot_profile),
+            "action_dim": np.asarray(chunk.action_dim),
+            "checkpoint_variant": np.asarray(chunk.checkpoint_variant),
             "policy_verified": np.asarray(chunk.policy_verified),
             "verification_status": np.asarray(chunk.verification_status),
         }
-        if chunk.canonical_normalized_actions is not None:
-            arrays["canonical_normalized_actions"] = chunk.canonical_normalized_actions.numpy()
         np.savez(output, **arrays)
         click.echo(
-            f"Saved {chunk.horizon}-step RobotWin action chunk to {output}; "
+            f"Saved {chunk.horizon}-step normalized canonical action chunk to {output}; "
             f"policy status: {chunk.verification_status}"
         )
     finally:

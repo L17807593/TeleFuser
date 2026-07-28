@@ -401,7 +401,7 @@ def qwen25_forward_without_grid_thw(
 
 
 def apply_lingbot_qwen25_vl_patch():
-    logger.info_rank0("apply patch")
+    logger.info("apply Qwen2.5-VL LingBot patch")
     hf_qwen25vl.Qwen2_5_VLPreTrainedModel = Qwen2_5_VLPreTrainedModel
     hf_qwen25vl.Qwen2_5_VLDecoderLayer = Qwen2_5_VLDecoderLayer
     hf_qwen25vl.Qwen2_5_VLTextModel = Qwen2_5_VLTextModel
@@ -733,7 +733,7 @@ def forward_without_grid_thw(
 
 
 def apply_lingbot_qwen3_vl_patch():
-    logger.info_rank0("apply Qwen3-VL Lingbot patch")
+    logger.info("apply Qwen3-VL LingBot patch")
     hf_qwen3vl.Qwen3VLPreTrainedModel = Qwen3VLPreTrainedModel
     hf_qwen3vl.Qwen3VLTextDecoderLayer = Qwen3VLTextDecoderLayer
     hf_qwen3vl.Qwen3VLTextModel = Qwen3VLTextModel
@@ -743,4 +743,3 @@ def apply_lingbot_qwen3_vl_patch():
     hf_qwen3vl.Qwen3VLVisionBlock = Qwen3VLVisionBlock
     hf_qwen3vl.Qwen3VLVisionModel.forward = forward_without_grid_thw
     hf_qwen3vl.Qwen3VLVisionModel.preprcess_grid_thw = preprcess_grid_thw
-

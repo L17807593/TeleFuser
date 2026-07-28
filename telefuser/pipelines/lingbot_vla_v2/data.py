@@ -9,9 +9,9 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import torch
 from PIL import Image
+from torchvision.transforms.v2 import Resize
 
 from .robot_profile import ROBOTWIN_CAMERA_KEYS, RobotWinProfile
-
 
 ImageInput = Image.Image | np.ndarray | torch.Tensor | str | Path
 
@@ -71,11 +71,22 @@ def _image_to_chw_uint8(image: ImageInput) -> torch.Tensor:
 class LingBotVlaV2InputProcessor:
     """Prepare RobotWin images, task text, and canonical state tensors."""
 
-    def __init__(self, processor: Any, model_config: Any, robot_profile: RobotWinProfile) -> None:
+    def __init__(
+        self,
+        processor: Any,
+        model_config: Any,
+        robot_profile: RobotWinProfile,
+        *,
+        image_size: int = 256,
+    ) -> None:
         if processor is None or not hasattr(processor, "image_processor") or not hasattr(processor, "tokenizer"):
             raise TypeError("LingBot-VLA v2 requires a Qwen3-VL AutoProcessor")
         self.processor = processor
         self.robot_profile = robot_profile
+        if image_size <= 0:
+            raise ValueError(f"image_size must be positive, got {image_size}")
+        self.image_size = int(image_size)
+        self.image_resize = Resize((self.image_size, self.image_size), antialias=True)
         self.max_state_dim = int(getattr(model_config, "max_state_dim", 55))
         self.tokenizer_max_length = int(getattr(model_config, "tokenizer_max_length", 72))
         if self.max_state_dim != robot_profile.canonical_dim:
@@ -93,7 +104,8 @@ class LingBotVlaV2InputProcessor:
         processed_images: list[torch.Tensor] = []
         grids: list[torch.Tensor] = []
         for key in self.robot_profile.camera_keys:
-            output = self.processor.image_processor(_image_to_chw_uint8(images[key]))
+            image = self.image_resize(_image_to_chw_uint8(images[key]))
+            output = self.processor.image_processor(image)
             pixels = output["pixel_values"] if isinstance(output, dict) else output.pixel_values
             grid = output.get("image_grid_thw") if isinstance(output, dict) else getattr(output, "image_grid_thw", None)
             pixels = torch.as_tensor(pixels)

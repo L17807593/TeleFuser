@@ -46,6 +46,9 @@ class _Policy(nn.Module):
             max_action_dim=55,
             n_action_steps=4,
             tokenizer_max_length=6,
+            checkpoint_variant="base",
+            policy_verified=False,
+            verification_status="unverified_official_6b_base",
         )
 
     def sample_actions(self, **inputs) -> torch.Tensor:
@@ -54,7 +57,7 @@ class _Policy(nn.Module):
         return torch.zeros(1, self.config.n_action_steps, self.config.max_action_dim, device=self.anchor.device)
 
 
-def test_pipeline_returns_structured_robotwin_action_chunk() -> None:
+def test_pipeline_returns_normalized_canonical_action_chunk() -> None:
     policy = _Policy()
     processor = SimpleNamespace(image_processor=_ImageProcessor(), tokenizer=_Tokenizer())
     manager = ModuleManager(torch_dtype=torch.float32, device="cpu")
@@ -65,7 +68,7 @@ def test_pipeline_returns_structured_robotwin_action_chunk() -> None:
         manager,
         LingBotVlaV2PipelineConfig(
             policy_config=ModelRuntimeConfig(device_type="cpu", torch_dtype=torch.float32),
-            include_canonical_actions=True,
+            image_size=8,
         ),
     )
     observation = LingBotVlaV2Observation(
@@ -80,8 +83,8 @@ def test_pipeline_returns_structured_robotwin_action_chunk() -> None:
         pipeline.close()
 
     assert chunk.horizon == 4
-    assert chunk.raw_actions.shape == (4, 14)
-    assert chunk.fields["action.arm.position"].shape == (4, 12)
-    assert chunk.fields["action.effector.position"].shape == (4, 2)
-    assert chunk.canonical_normalized_actions is not None
+    assert chunk.action_dim == 55
+    assert chunk.canonical_normalized_actions.shape == (4, 55)
+    assert chunk.checkpoint_variant == "base"
     assert chunk.policy_verified is False
+    assert chunk.verification_status == "unverified_official_6b_base"

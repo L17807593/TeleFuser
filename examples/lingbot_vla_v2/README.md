@@ -1,8 +1,8 @@
-# LingBot-VLA v2 RobotWin SDK
+# LingBot-VLA v2 Base Model SDK
 
-This example loads the official LingBot-VLA v2 6B base checkpoint through TeleFuser and returns a structured
-RobotWin action chunk. The current integration verifies the SDK contract without claiming policy quality: every
-result is marked `policy_verified=False` and `verification_status="unverified_official_6b_base"`.
+This example loads the official LingBot-VLA v2 6B base checkpoint through TeleFuser and returns its normalized
+55-dimensional canonical action chunk. The RobotWin profile is used only to prepare the example observation; the
+result is not converted to physical RobotWin actions.
 
 ## Inputs
 
@@ -15,14 +15,13 @@ LingBot's 55-dimensional canonical state.
 
 ## Output
 
-The pipeline returns `LingBotVlaV2ActionChunk` with:
+The pipeline returns `LingBotVlaV2CanonicalActionChunk` with:
 
-- `fields["action.arm.position"]`: `[H, 12]`.
-- `fields["action.effector.position"]`: `[H, 2]`.
-- `raw_actions` and `fields["action"]`: reconstructed `[H, 14]` RobotWin actions.
-- `action_mask`: the 55-dimensional canonical RobotWin action mask.
+- `canonical_normalized_actions`: `[H, 55]` base-model output.
 - `horizon`: action chunk length, normally 50 for the official base config.
-- `canonical_normalized_actions`: optional `[H, 55]` debugging output.
+- `action_dim`: canonical action dimension, normally 55.
+- `checkpoint_variant`: `base`.
+- `policy_verified=False` and `verification_status="unverified_official_6b_base"`.
 
 ## Checkpoints
 
@@ -40,8 +39,8 @@ python examples/lingbot_vla_v2/lingbot_vla_v2_inference.py \
   --camera-right-wrist /data/cam_right_wrist.png \
   --task "pick up the red block" \
   --state-json '[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]' \
-  --output action_chunk.npz
+  --output canonical_action_chunk.npz
 ```
 
-The example saves named arrays and verification metadata in an `.npz` file. Do not send the output to a robot until
-the official 6B GPU smoke test and policy-level parity validation are complete.
+The example saves canonical actions and checkpoint metadata in an `.npz` file. The base output must not be sent to
+a robot without an embodiment-specific post-training checkpoint, action mapping, and policy validation.

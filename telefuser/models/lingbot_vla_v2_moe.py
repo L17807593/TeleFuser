@@ -553,6 +553,7 @@ class Qwen2TokenMoeBlock(nn.Module):
 
         # EP/fused support: choose expert storage based on moe_implementation
         self._moe_implementation = getattr(config, '_moe_implementation', None) or 'eager'
+        self._use_robby_moe_kernel = bool(getattr(config, "use_robby_moe_kernel", False))
         if self._moe_implementation == 'fused':
             self.experts = Qwen2FusedExperts(
                 self.num_experts,
@@ -604,7 +605,8 @@ class Qwen2TokenMoeBlock(nn.Module):
         # Expert computation: fused (group_gemm) or eager (per-expert loop)
         if self._moe_implementation == 'fused':
             use_robby_moe = (
-                robby_moe_forward is not None
+                self._use_robby_moe_kernel
+                and robby_moe_forward is not None
                 and hidden_flat.is_cuda
                 and not self.training
                 and not torch.is_grad_enabled()
@@ -825,5 +827,4 @@ def apply_lingbot_qwen2_patch():
     hf_qwen2.Qwen2PreTrainedModel = Qwen2PreTrainedModel
     hf_qwen2.Qwen2Model = Qwen2Model
     hf_qwen2.Qwen2ForCausalLM = Qwen2ForCausalLM
-
 

@@ -1571,9 +1571,10 @@ class LingBotVLAWeightLoader:
 
 
 OFFICIAL_6B_MODEL_CONFIG: dict[str, Any] = {
-    "post_training": True,
+    "post_training": False,
     "adanorm_time": True,
     "moe_implementation": "fused",
+    "use_robby_moe_kernel": False,
     "attention_implementation": "eager",
     "precompute_grid_thw": True,
     "vlm_causal": True,
@@ -1686,8 +1687,16 @@ def resolve_lingbot_vla_v2_shards(model_path: str | Path) -> list[str]:
     return [str(path) for path in shard_paths]
 
 
-def build_official_6b_config(qwen3vl_path: str | Path):
+def build_official_6b_config(
+    qwen3vl_path: str | Path,
+    *,
+    checkpoint_variant: str = "base",
+    checkpoint_path: str | Path | None = None,
+):
     from telefuser.models.lingbot_vla_v2 import LingbotVLAV2Config
+
+    if checkpoint_variant != "base":
+        raise ValueError(f"Unsupported LingBot-VLA v2 checkpoint variant: {checkpoint_variant!r}")
 
     qwen_path = Path(qwen3vl_path).expanduser().resolve()
     qwen_config = AutoConfig.from_pretrained(str(qwen_path), local_files_only=True)
@@ -1732,6 +1741,10 @@ def build_official_6b_config(qwen3vl_path: str | Path):
     config.tokenizer_path = str(qwen_path)
     config.use_cache = True
     config.attention_implementation = "eager"
+    config.checkpoint_variant = checkpoint_variant
+    config.checkpoint_path = None if checkpoint_path is None else str(Path(checkpoint_path).expanduser().resolve())
+    config.policy_verified = False
+    config.verification_status = "unverified_official_6b_base"
     return config
 
 
@@ -1749,12 +1762,23 @@ def validate_official_6b_checkpoint(state_dict):
 
 
 class LingBotVlaV2StateDictConverter:
-    def __init__(self, qwen3vl_path: str | Path):
+    def __init__(
+        self,
+        qwen3vl_path: str | Path,
+        checkpoint_variant: str = "base",
+        checkpoint_path: str | Path | None = None,
+    ):
         self.qwen3vl_path = Path(qwen3vl_path)
+        self.checkpoint_variant = checkpoint_variant
+        self.checkpoint_path = checkpoint_path
 
     def from_official(self, state_dict):
         validate_official_6b_checkpoint(state_dict)
-        config = build_official_6b_config(self.qwen3vl_path)
+        config = build_official_6b_config(
+            self.qwen3vl_path,
+            checkpoint_variant=self.checkpoint_variant,
+            checkpoint_path=self.checkpoint_path,
+        )
         return state_dict, {"config": config, "eval": True}
 
     def from_diffusers(self, state_dict):
@@ -1769,10 +1793,12 @@ def load_lingbot_vla_v2(
     *,
     torch_dtype=torch.bfloat16,
     device=None,
+    checkpoint_variant: str = "base",
 ):
     from telefuser.models.lingbot_vla_v2 import LingBotVlaV2Model
 
-    shard_paths = resolve_lingbot_vla_v2_shards(model_path)
+    checkpoint_path = resolve_lingbot_vla_v2_checkpoint(model_path).parent
+    shard_paths = resolve_lingbot_vla_v2_shards(checkpoint_path)
     module_manager.load_model(
         shard_paths,
         device=device,
@@ -1781,7 +1807,11 @@ def load_lingbot_vla_v2(
         name="lingbot_vla_v2",
         model_class=LingBotVlaV2Model,
         model_resource="official",
-        converter_kwargs={"qwen3vl_path": str(qwen3vl_path)},
+        converter_kwargs={
+            "qwen3vl_path": str(qwen3vl_path),
+            "checkpoint_variant": checkpoint_variant,
+            "checkpoint_path": str(checkpoint_path),
+        },
         strict=True,
     )
     return module_manager.fetch_module("lingbot_vla_v2")
