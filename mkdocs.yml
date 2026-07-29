@@ -136,6 +136,7 @@ plugins:
             CPU Offloading: CPU卸载
             Attention: 注意力机制
             Feature Cache: 特征缓存
+            Quantization: 量化
             Latent Cache: 潜空间缓存
             Adding New Model: 新增模型
             Adding New Stage: 新增阶段
@@ -170,6 +171,7 @@ nav:
       - TeleFuser and AIPerf: benchmark_aiperf.md
   - Configuration:
       - configuration.md
+      - Quantization: quantization.md
   - Parallel Inference:
       - parallel.md
       - attention.md

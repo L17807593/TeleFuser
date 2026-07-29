@@ -95,24 +95,23 @@ When `n_derivatives=0`, AdaTaylorCache reduces to simple residual caching (resid
 To enable AdaTaylorCache in your pipeline:
 
 ```python
-from telefuser.pipelines.wan_video.wan21_video import Wan21VideoPipeline
+from telefuser.core.config import FeatureCacheConfig
+from telefuser.pipelines.wan_video.wan21_video import Wan21VideoPipelineConfig
 
-# Create pipeline
-pipe = Wan21VideoPipeline(device="cuda", torch_dtype=torch.bfloat16)
-# ... initialize pipeline ...
-
-# Run with AdaTaylorCache enabled
-video = pipe(
-    prompt="A cat playing piano",
-    num_inference_steps=50,
-    enable_ada_taylor_cache=True,
-    ada_taylor_n_derivatives=1,  # Use Taylor expansion (set to 0 for residual only)
+pipe_config = Wan21VideoPipelineConfig()
+pipe_config.dit_config.feature_cache_config = FeatureCacheConfig(
+    enabled=True,
     model_type="Wan2.1-T2V-1.3B",
-    # ... other parameters ...
+    n_derivatives=1,
+    taylor_threshold=2,
 )
+# After loading modules and constructing the pipeline:
+pipe.init(module_manager, pipe_config)
 ```
 
-The `model_type` parameter specifies which pre-calibrated parameters to use. See available models in `telefuser/feature_cache/ada_taylor_cache/params/`.
+`FeatureCacheConfig` is part of pipeline initialization; it is not a pipeline call argument. The `model_type`
+selects a matching calibration JSON file. See
+`examples/wan_video/wan21_1_3b_text_to_video_ada_taylor_cache.py` for the maintained end-to-end setup.
 
 ---
 
@@ -142,38 +141,8 @@ The calibration process runs the pipeline once to collect residual statistics:
 ```bash
 python examples/wan_video/wan21_1_3b_text_to_video_cache_calibrate.py \
     --model_root /path/to/Wan2.1-T2V-1.3B/ \
-    --num_inference_steps 50 \
-    --sigma_shift 8.0 \
     --model_name "Wan2.1-T2V-1.3B" \
     --output_path ./my_cache_params.json
-```
-
-#### Programmatic Usage
-
-```python
-from telefuser.feature_cache import create_feature_cache
-
-# Create calibrator
-cache = create_feature_cache(
-    "calibrator",
-    num_inference_steps=50,
-    sigma_shift=8.0,
-    model_name="Wan2.1-T2V-1.3B",
-)
-
-# Set calibrator on the model
-pipeline.denoise_stage.dit.set_ada_taylor_cache_calibrator(
-    num_inference_steps=50,
-    sigma_shift=8.0,
-    model_name="Wan2.1-T2V-1.3B",
-)
-
-# Run pipeline (calibration happens automatically)
-video = pipeline(
-    prompt="A sample prompt",
-    num_inference_steps=50,
-    sigma_shift=8.0,
-)
 ```
 
 ### Calibration Output
@@ -212,12 +181,14 @@ For Wan2.1 1.3B models, recommended starting values:
 
 ### Parameter File Location
 
-By default, parameters are saved to:
+The loader reads the sanitized model name from:
+
 ```
 telefuser/feature_cache/ada_taylor_cache/params/{model_name}.json
 ```
 
-The model name is sanitized (dots and slashes replaced with underscores) for the filename.
+The repository does not bundle pre-calibrated JSON files. Generate a file with the matching calibration script and
+place it at this path, or pass `--output_path` and install the result there before enabling the cache.
 
 ---
 
@@ -240,8 +211,7 @@ The following parameters are loaded from the pre-calibrated params:
 python examples/wan_video/wan21_1_3b_text_to_video_ada_taylor_cache.py \
     --gpu_num 1 \
     --n_derivatives 1 \
-    --taylor_threshold 2 \
-    --num_inference_steps 40
+    --taylor_threshold 2
 ```
 
 ### When to Use Different Configurations
@@ -249,25 +219,6 @@ python examples/wan_video/wan21_1_3b_text_to_video_ada_taylor_cache.py \
 - **`n_derivatives=0`**: Simple residual caching, fastest, good for speed-critical scenarios
 - **`n_derivatives=1`**: Taylor expansion with hybrid fallback, best quality-speed balance
 - **`n_derivatives=2`**: Higher-order Taylor expansion, better accuracy at cost of memory
-
----
-
-## Available Pre-calibrated Models
-
-| Model | File | Default Steps |
-|-------|------|---------------|
-| Wan2.1-T2V-1.3B | `Wan2_1-T2V-1_3B.json` | 50 |
-| Wan2.1-T2V-14B | `Wan2_1-T2V-14B.json` | 50 |
-| Wan2.1-I2V-14B-480P | `Wan2_1-I2V-14B-480P.json` | 50 |
-| Wan2.1-I2V-14B-720P | `Wan2_1-I2V-14B-720P.json` | 50 |
-| Wan2.1-FL2V-14B-720P | `Wan2_1-FL2V-14B-720P.json` | 50 |
-| Wan2.2-T2V-A14B | `Wan2_2-T2V-A14B.json` | 50 |
-| Wan2.2-I2V-A14B | `Wan2_2-I2V-A14B.json` | 40 |
-| Wan2.2-FL2V-A14B | `Wan2_2-FL2V-A14B.json` | 40 |
-| HunyuanVideo-T2V | `HunyuanVideo-T2V.json` | 50 |
-| HunyuanVideo-I2V | `HunyuanVideo-I2V.json` | 50 |
-| Qwen-Image | `Qwen-Image.json` | 50 |
-| Qwen-Image-Edit-Plus | `Qwen-Image-Edit-Plus.json` | 40 |
 
 ---
 

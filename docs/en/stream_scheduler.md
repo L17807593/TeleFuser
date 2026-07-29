@@ -45,6 +45,24 @@ Edges and outputs have explicit capacities. When a downstream stage cannot accep
 backpressure rather than retaining unbounded tensors. Pipeline implementations must therefore treat submission as
 admission-controlled, not as an unbounded queue.
 
+## LingBot Condition Prefetch
+
+LingBot condition encoding is independent of the corresponding control input. The session therefore keeps a fixed
+lookahead of two conditions so VAE encode can overlap with earlier denoise and decode work:
+
+- Session startup admits `condition[0]` and `condition[1]` when bounded ingress has capacity.
+- After denoise completes for chunk `i`, the session refills the window, normally with `condition[i+2]`.
+- `next_condition_index` and `next_control_index` maintain
+  `0 <= next_condition_index - next_control_index <= 2`.
+- If backpressure prevented prefetch, the next control and its missing encode request are admitted atomically.
+
+Conditions and controls still join by session and sequence ID before denoise. The optimization changes scheduling,
+not model computation or causal cache ownership. `latency_anchor_artifact="control"` ensures condition-only
+prefetch does not start the control-to-output timer.
+
+This model-specific policy sits above the generic scheduler; edge capacities continue to bound retained tensors and
+session cleanup still runs through the owning actors.
+
 ## Actor Ownership and Session Lifecycle
 
 A state-owning worker has exactly one actor owner for its entire lifetime. In particular, one `ParallelWorker` must
@@ -59,8 +77,8 @@ Session shutdown is ordered as follows:
 4. Release scheduler artifact references and verify that no capacity slots remain allocated.
 5. Record cleanup failures and do not reuse partially released state.
 
-LingBot uses this lifecycle for offline chunked generation and bidirectional sessions over either LiveKit or the
-LiveKit transport. Transport reconnects never transfer actor-owned stage state between workers.
+LingBot uses this lifecycle for offline chunked generation and bidirectional LiveKit sessions. Transport reconnects
+never transfer actor-owned stage state between workers.
 
 ## Resource Groups and Placement
 

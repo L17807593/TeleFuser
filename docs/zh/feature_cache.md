@@ -95,24 +95,22 @@ AdaTaylorCache（自适应泰勒缓存）是一种特征缓存策略，结合了
 在您的 pipeline 中启用 AdaTaylorCache：
 
 ```python
-from telefuser.pipelines.wan_video.wan21_video import Wan21VideoPipeline
+from telefuser.core.config import FeatureCacheConfig
+from telefuser.pipelines.wan_video.wan21_video import Wan21VideoPipelineConfig
 
-# 创建 pipeline
-pipe = Wan21VideoPipeline(device="cuda", torch_dtype=torch.bfloat16)
-# ... 初始化 pipeline ...
-
-# 启用 AdaTaylorCache 运行
-video = pipe(
-    prompt="一只猫在弹钢琴",
-    num_inference_steps=50,
-    enable_ada_taylor_cache=True,
-    ada_taylor_n_derivatives=1,  # 使用泰勒展开（设置为 0 则仅使用残差）
+pipe_config = Wan21VideoPipelineConfig()
+pipe_config.dit_config.feature_cache_config = FeatureCacheConfig(
+    enabled=True,
     model_type="Wan2.1-T2V-1.3B",
-    # ... 其他参数 ...
+    n_derivatives=1,
+    taylor_threshold=2,
 )
+# 加载模型并构造管线后：
+pipe.init(module_manager, pipe_config)
 ```
 
-`model_type` 参数指定要使用的预校准参数。可在 `telefuser/feature_cache/ada_taylor_cache/params/` 中查看可用模型。
+`FeatureCacheConfig` 属于管线初始化配置，不是管线调用参数。`model_type` 用于选择匹配的校准 JSON 文件。
+完整且持续维护的配置见 `examples/wan_video/wan21_1_3b_text_to_video_ada_taylor_cache.py`。
 
 ---
 
@@ -142,38 +140,8 @@ AdaTaylorCache 需要模型特定的校准参数。使用校准器为新模型�
 ```bash
 python examples/wan_video/wan21_1_3b_text_to_video_cache_calibrate.py \
     --model_root /path/to/Wan2.1-T2V-1.3B/ \
-    --num_inference_steps 50 \
-    --sigma_shift 8.0 \
     --model_name "Wan2.1-T2V-1.3B" \
     --output_path ./my_cache_params.json
-```
-
-#### 编程方式使用
-
-```python
-from telefuser.feature_cache import create_feature_cache
-
-# 创建校准器
-cache = create_feature_cache(
-    "calibrator",
-    num_inference_steps=50,
-    sigma_shift=8.0,
-    model_name="Wan2.1-T2V-1.3B",
-)
-
-# 在模型上设置校准器
-pipeline.denoise_stage.dit.set_ada_taylor_cache_calibrator(
-    num_inference_steps=50,
-    sigma_shift=8.0,
-    model_name="Wan2.1-T2V-1.3B",
-)
-
-# 运行 pipeline（校准自动进行）
-video = pipeline(
-    prompt="一个示例提示词",
-    num_inference_steps=50,
-    sigma_shift=8.0,
-)
 ```
 
 ### 校准输出
@@ -212,12 +180,14 @@ video = pipeline(
 
 ### 参数文件位置
 
-默认情况下，参数保存到：
+加载器按清理后的模型名称读取：
+
 ```
 telefuser/feature_cache/ada_taylor_cache/params/{model_name}.json
 ```
 
-模型名称会被清理（点和斜杠替换为下划线）作为文件名。
+仓库不内置预校准 JSON 文件。请使用匹配的校准脚本生成文件并放到该路径；也可以通过
+`--output_path` 指定输出位置，再将结果安装到上述目录后启用缓存。
 
 ---
 
@@ -240,8 +210,7 @@ telefuser/feature_cache/ada_taylor_cache/params/{model_name}.json
 python examples/wan_video/wan21_1_3b_text_to_video_ada_taylor_cache.py \
     --gpu_num 1 \
     --n_derivatives 1 \
-    --taylor_threshold 2 \
-    --num_inference_steps 40
+    --taylor_threshold 2
 ```
 
 ### 何时使用不同配置
@@ -249,25 +218,6 @@ python examples/wan_video/wan21_1_3b_text_to_video_ada_taylor_cache.py \
 - **`n_derivatives=0`**：简单残差缓存，最快，适合速度关键场景
 - **`n_derivatives=1`**：泰勒展开配合混合回退，质量速度最佳平衡
 - **`n_derivatives=2`**：高阶泰勒展开，更好精度但内存消耗更大
-
----
-
-## 可用的预校准模型
-
-| 模型 | 文件 | 默认步数 |
-|-------|------|---------------|
-| Wan2.1-T2V-1.3B | `Wan2_1-T2V-1_3B.json` | 50 |
-| Wan2.1-T2V-14B | `Wan2_1-T2V-14B.json` | 50 |
-| Wan2.1-I2V-14B-480P | `Wan2_1-I2V-14B-480P.json` | 50 |
-| Wan2.1-I2V-14B-720P | `Wan2_1-I2V-14B-720P.json` | 50 |
-| Wan2.1-FL2V-14B-720P | `Wan2_1-FL2V-14B-720P.json` | 50 |
-| Wan2.2-T2V-A14B | `Wan2_2-T2V-A14B.json` | 50 |
-| Wan2.2-I2V-A14B | `Wan2_2-I2V-A14B.json` | 40 |
-| Wan2.2-FL2V-A14B | `Wan2_2-FL2V-A14B.json` | 40 |
-| HunyuanVideo-T2V | `HunyuanVideo-T2V.json` | 50 |
-| HunyuanVideo-I2V | `HunyuanVideo-I2V.json` | 50 |
-| Qwen-Image | `Qwen-Image.json` | 50 |
-| Qwen-Image-Edit-Plus | `Qwen-Image-Edit-Plus.json` | 40 |
 
 ---
 

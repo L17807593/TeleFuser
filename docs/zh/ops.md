@@ -348,7 +348,7 @@ model = convert_params_to_buffers(model)
 ```python
 import torch
 import torch.nn as nn
-from telefuser.ops.quantized_linear import replace_linear_layers, convert_params_to_buffer
+from telefuser.ops.quantized_linear import replace_linear_layers, convert_params_to_buffers
 
 # 加载模型
 model = load_my_model()

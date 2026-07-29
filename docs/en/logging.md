@@ -19,7 +19,7 @@ TeleFuser provides an industrial-grade logging system based on [loguru](https://
 
 ### Basic Usage
 
-Replace `from telefuser.utils.logging import logger` with:
+Import the shared logger with:
 
 ```python
 from telefuser.utils.logging import logger

@@ -314,7 +314,7 @@ model = shard_model_fsdp2(
 ### 使用方法
 
 ```python
-from telefuser.distributed import parallelize_module
+from telefuser.distributed.tp_parallelize import parallelize_module
 from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel
 
 tp_plan = {

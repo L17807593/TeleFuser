@@ -8,6 +8,21 @@ LiveKit terminates browser WebRTC connections and provides rooms, reconnect hand
 data messages. TeleFuser owns model workers, admission, session state, pipeline execution, and token issuance. A
 LiveKit Cloud project or a self-hosted LiveKit Server is therefore required.
 
+## Why LiveKit
+
+TeleFuser targets high-performance multimodal generation inference. Its streaming service must support continuous
+media output, bidirectional control, and long-running stateful model sessions. LiveKit's realtime transport
+capabilities align with these goals:
+
+- A room provides a stable transport boundary for a model session, keeping browser connections independent from
+  session-owned model state.
+- Media tracks carry progressive video and audio, while data topics carry controls, status, and bounded telemetry.
+- Scoped tokens distinguish controller, viewer, and worker roles, matching TeleFuser's session ownership and permission
+  model.
+- `ServerPushService` and `BidirectionalService` share one streaming entrypoint and client connection model.
+- LiveKit owns connections, reconnects, and media delivery so TeleFuser can focus on model workers, admission, pipeline
+  execution, and resource release.
+
 ## Install and start locally
 
 The LiveKit Python SDKs are included in the base TeleFuser installation:

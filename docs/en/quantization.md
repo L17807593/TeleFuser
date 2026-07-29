@@ -1,12 +1,12 @@
-# Quantizaiton
+# Quantization
 
 ## TeleFuser FP8 deployment for Qwen-Image
 
-Telefuser users torchao as its backend of FP8 weight-only linear quantization.
+TeleFuser uses TorchAO as the backend for FP8 weight-only linear quantization.
 
 First, install Telefuser as [here](https://github.com/Tele-AI/TeleFuser#install).
 
-Next, download `Qwen-Image-2512` model to your `TF_MODEL_ZOO_PATH` (or specify the model path to `--model_root`), and run the NF4 `Qwen-Image-2512` example:
+Next, download the `Qwen-Image-2512` model to `TF_MODEL_ZOO_PATH` (or pass `--model_root`), and run the FP8 example:
 
 ```bash
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \

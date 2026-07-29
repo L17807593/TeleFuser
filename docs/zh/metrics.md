@@ -219,18 +219,13 @@ disable_stage_metrics(my_stage)
 ### 使用装饰器
 
 ```python
-from telefuser.metrics import with_metrics, with_metrics_async
+from telefuser.metrics import with_metrics
 
 class MyStage(BaseStage):
     @with_metrics
     def process(self, data):
         # 执行时间、成功/失败自动追踪
         return self._do_work(data)
-
-    @with_metrics_async
-    async def process_async(self, data):
-        # 也支持异步方法
-        return await self._do_work_async(data)
 ```
 
 ### 阶段指标上下文
@@ -239,12 +234,9 @@ class MyStage(BaseStage):
 
 | 指标 | 类型 | 描述 |
 |------|------|------|
-| `stage_{name}_duration_seconds` | Histogram | 执行时长 |
-| `stage_{name}_total` | Counter | 总执行次数 |
-| `stage_{name}_errors_total` | Counter | 总错误数 |
-| `stage_{name}_active` | Gauge | 活跃执行数 |
-| `stage_{name}_input_size_bytes` | Histogram | 输入大小 |
-| `stage_{name}_output_size_bytes` | Histogram | 输出大小 |
+| `telefuser_stage_{name}_duration_seconds` | Histogram | 执行时长 |
+| `telefuser_stage_{name}_total` | Counter | 总执行次数 |
+| `telefuser_stage_{name}_errors_total` | Counter | 总错误数 |
 
 ```python
 from telefuser.metrics import enable_stage_metrics
@@ -255,15 +247,9 @@ context = enable_stage_metrics(my_stage)
 context.duration.observe(0.5)
 context.total.inc()
 context.errors.inc()
-context.active.inc()
 
 # 记录完整执行
-context.record_execution(
-    duration=0.5,
-    success=True,
-    input_size=1024,
-    output_size=2048,
-)
+context.record_execution(duration=0.5, success=True)
 ```
 
 ## 服务指标
@@ -344,22 +330,13 @@ async def main():
 
 ## Prometheus 集成
 
-### 暴露指标端点
+### 内置端点
 
-```python
-from fastapi import FastAPI, Response
-from telefuser.metrics import get_metrics_registry
+`telefuser serve` 无需额外应用代码即可暴露两种格式：
 
-app = FastAPI()
-
-@app.get("/metrics")
-async def metrics():
-    """Prometheus 指标端点。"""
-    registry = get_metrics_registry()
-    return Response(
-        content=registry.get_prometheus_format(),
-        media_type="text/plain",
-    )
+```bash
+curl http://localhost:8000/v1/service/metrics
+curl http://localhost:8000/v1/service/metrics/json
 ```
 
 ### Prometheus 配置
@@ -370,7 +347,7 @@ scrape_configs:
   - job_name: 'telefuser'
     static_configs:
       - targets: ['localhost:8000']
-    metrics_path: /metrics
+    metrics_path: /v1/service/metrics
 ```
 
 ### 示例输出
@@ -402,6 +379,37 @@ telefuser_task_duration_seconds_count 100
 telefuser_gpu_0_memory_used_bytes 8589934592
 ```
 
+## 运行时基准事实
+
+`telefuser.metrics.runtime` 测量同步后的目标侧阶段耗时，以及可选的 CUDA allocator 峰值。它只返回原始事实；
+AIPerf 负责排除 warmup、聚合、语义映射、产物和可视化。客户端交付指标（如 `stream_fps`）必须与目标计算指标
+（如 `chunk_compute_fps`）分开。
+
+```python
+from telefuser.metrics import (
+    finish_runtime_measurement,
+    start_runtime_measurement,
+)
+
+measurement = start_runtime_measurement(
+    ["cuda:0"],
+    capture_peak_memory=True,
+)
+
+# 执行待测目标侧阶段。
+result = run_phase()
+
+facts = finish_runtime_measurement(measurement)
+# {
+#   "seconds": ...,
+#   "memory": [{
+#       "device": "cuda:0",
+#       "peak_allocated_bytes": ...,
+#       "peak_reserved_bytes": ...,
+#   }],
+# }
+```
+
 ## 配置选项
 
 | 选项 | 类型 | 默认值 | 描述 |
@@ -417,8 +425,9 @@ telefuser_gpu_0_memory_used_bytes 8589934592
 | `namespace` | str | "telefuser" | 指标名前缀 |
 | `gpu_platform` | str | "auto" | GPU 平台 (nvidia/amd/auto) |
 
+`MetricsConfig.metrics_path` 对自定义集成默认使用 `/metrics`。内置服务路由是
+`/v1/service/metrics` 和 `/v1/service/metrics/json`。
 ## 高级用法
-
 ### 自定义收集器
 
 从外部源添加自定义指标：

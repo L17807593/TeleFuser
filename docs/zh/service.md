@@ -165,6 +165,8 @@ telefuser serve /path/to/pipeline --task i2v [选项]
 | `--security-level` | | choice | `strict` | 验证级别：none/basic/strict/sandbox。`sandbox` 是 best-effort 受限加载检查，不是运行时隔离。 |
 | `--skip-validation` | | flag | `False` | 跳过安全验证 |
 | `--validate-only` | | flag | `False` | 仅验证不启动 |
+| `--enable-latent-cache` / `--disable-latent-cache` | | flag | 未设置 | 覆盖管线的外部 CacheSeek latent cache 配置 |
+| `--cache-mode` | | choice | 未设置 | 覆盖 latent cache 模式：read_write/read_only/write_only |
 
 #### 示例
 
@@ -258,18 +260,17 @@ telefuser serve --help
 | `vc` | 视频续写: 继续现有视频 |
 | `t2i` | 文生图: 从文本生成图像 |
 | `i2i` | 图生图: 从输入图像和提示生成图像 |
+| `s2v` | 语音生视频：从语音生成视频 |
+| `vsr` | 视频超分辨率：放大输入视频 |
 
 ### 环境变量
 
 | 变量 | 描述 | 默认值 |
 |----------|-------------|---------|
-| `TELEFUSER_SECURITY_LEVEL` | 安全验证级别 | `STRICT` |
-| `TELEFUSER_ALLOW_UNSAFE` | 允许不安全管道 | `false` |
-| `TELEFUSER_MAX_PPL_SIZE` | 最大管道文件大小（字节） | `10485760` |
-| `TELEFUSER_TASK_TIMEOUT` | 任务超时（秒） | `3600` |
-| `TELEFUSER_HOST` | 服务器主机 | `127.0.0.1` |
-| `TELEFUSER_PORT` | 服务器端口 | `8000` |
-| `TELEFUSER_RATE_LIMIT_ENABLED` | 启用速率限制 | `true` |
+| `TELEFUSER_ALLOW_UNSAFE_PIPELINES` | 允许不安全管道 | `false` |
+| `TELEFUSER_MAX_PPL_FILE_SIZE` | 最大管道文件大小（字节） | `1048576` |
+| `TELEFUSER_TASK_TIMEOUT` | 任务超时（秒） | `1200` |
+| `TELEFUSER_ENABLE_RATE_LIMIT` | 启用速率限制 | `true` |
 | `TELEFUSER_RATE_LIMIT_REQUESTS_PER_MINUTE` | 每分钟请求限制 | `60` |
 | `TELEFUSER_TRUST_FORWARDED_FOR` | 是否信任 `X-Forwarded-For` 作为限流身份。仅应在可信反向代理后启用。 | `false` |
 | `TELEFUSER_ARTIFACT_STORAGE_BACKEND` | Artifact 后端。当前只实现 `local`。 | `local` |
@@ -284,13 +285,14 @@ telefuser serve --help
 
 ### 配置文件示例
 
-创建 `.env` 文件:
+`serve` 的 `--host`、`--port`、`--security-level`、`--enable-latent-cache` 和 `--cache-mode` 是命令行启动时的最终配置；这些值应通过 CLI 选项设置，而不是环境变量。
+
+创建 `.env` 文件：
+
 
 ```env
-TELEFUSER_SECURITY_LEVEL=STRICT
-TELEFUSER_PORT=8080
-TELEFUSER_HOST=0.0.0.0
-TELEFUSER_RATE_LIMIT_ENABLED=true
+TELEFUSER_TASK_TIMEOUT=1200
+TELEFUSER_ENABLE_RATE_LIMIT=true
 TELEFUSER_RATE_LIMIT_REQUESTS_PER_MINUTE=100
 ```
 
@@ -1203,8 +1205,8 @@ task = client.create_i2i_task(
 ### 速率限制
 
 - **限制**: 每个 IP 每分钟 60 个请求
-- **突发**: 10 个请求
-- **豁免路径**: `/v1/service/health`
+- **窗口**: 默认 60 秒
+- **范围**: 高开销的任务创建、生成、下载和流协商路径前缀
 
 ---
 

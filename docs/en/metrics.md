@@ -219,18 +219,13 @@ disable_stage_metrics(my_stage)
 ### Using Decorators
 
 ```python
-from telefuser.metrics import with_metrics, with_metrics_async
+from telefuser.metrics import with_metrics
 
 class MyStage(BaseStage):
     @with_metrics
     def process(self, data):
         # Execution time, success/failure automatically tracked
         return self._do_work(data)
-
-    @with_metrics_async
-    async def process_async(self, data):
-        # Also works for async methods
-        return await self._do_work_async(data)
 ```
 
 ### Stage Metric Context
@@ -239,12 +234,9 @@ Each stage gets the following metrics automatically:
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `stage_{name}_duration_seconds` | Histogram | Execution duration |
-| `stage_{name}_total` | Counter | Total executions |
-| `stage_{name}_errors_total` | Counter | Total errors |
-| `stage_{name}_active` | Gauge | Active executions |
-| `stage_{name}_input_size_bytes` | Histogram | Input size |
-| `stage_{name}_output_size_bytes` | Histogram | Output size |
+| `telefuser_stage_{name}_duration_seconds` | Histogram | Execution duration |
+| `telefuser_stage_{name}_total` | Counter | Total executions |
+| `telefuser_stage_{name}_errors_total` | Counter | Total errors |
 
 ```python
 from telefuser.metrics import enable_stage_metrics
@@ -255,15 +247,9 @@ context = enable_stage_metrics(my_stage)
 context.duration.observe(0.5)
 context.total.inc()
 context.errors.inc()
-context.active.inc()
 
 # Record a complete execution
-context.record_execution(
-    duration=0.5,
-    success=True,
-    input_size=1024,
-    output_size=2048,
-)
+context.record_execution(duration=0.5, success=True)
 ```
 
 ## Service Metrics
@@ -344,22 +330,13 @@ async def main():
 
 ## Prometheus Integration
 
-### Expose Metrics Endpoint
+### Built-in Endpoints
 
-```python
-from fastapi import FastAPI
-from telefuser.metrics import get_metrics_registry
+`telefuser serve` exposes both formats without additional application code:
 
-app = FastAPI()
-
-@app.get("/metrics")
-async def metrics():
-    """Prometheus metrics endpoint."""
-    registry = get_metrics_registry()
-    return Response(
-        content=registry.get_prometheus_format(),
-        media_type="text/plain",
-    )
+```bash
+curl http://localhost:8000/v1/service/metrics
+curl http://localhost:8000/v1/service/metrics/json
 ```
 
 ### Prometheus Configuration
@@ -370,7 +347,7 @@ scrape_configs:
   - job_name: 'telefuser'
     static_configs:
       - targets: ['localhost:8000']
-    metrics_path: /metrics
+    metrics_path: /v1/service/metrics
 ```
 
 ### Example Output
@@ -402,6 +379,38 @@ telefuser_task_duration_seconds_count 100
 telefuser_gpu_0_memory_used_bytes 8589934592
 ```
 
+## Runtime Benchmark Facts
+
+`telefuser.metrics.runtime` measures synchronized target-side phase duration and optional CUDA allocator peaks.
+It returns raw facts; AIPerf owns warmup exclusion, aggregation, semantic mapping, artifacts, and visualization.
+Client delivery metrics such as `stream_fps` must remain separate from target compute metrics such as
+`chunk_compute_fps`.
+
+```python
+from telefuser.metrics import (
+    finish_runtime_measurement,
+    start_runtime_measurement,
+)
+
+measurement = start_runtime_measurement(
+    ["cuda:0"],
+    capture_peak_memory=True,
+)
+
+# Run the measured target-side phase.
+result = run_phase()
+
+facts = finish_runtime_measurement(measurement)
+# {
+#   "seconds": ...,
+#   "memory": [{
+#       "device": "cuda:0",
+#       "peak_allocated_bytes": ...,
+#       "peak_reserved_bytes": ...,
+#   }],
+# }
+```
+
 ## Configuration Options
 
 | Option | Type | Default | Description |
@@ -417,8 +426,9 @@ telefuser_gpu_0_memory_used_bytes 8589934592
 | `namespace` | str | "telefuser" | Metric name prefix |
 | `gpu_platform` | str | "auto" | GPU platform (nvidia/amd/auto) |
 
+`MetricsConfig.metrics_path` defaults to `/metrics` for custom integrations. The built-in service routes are
+`/v1/service/metrics` and `/v1/service/metrics/json`.
 ## Advanced Usage
-
 ### Custom Collectors
 
 Add custom metrics from external sources:

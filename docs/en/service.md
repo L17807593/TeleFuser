@@ -165,6 +165,8 @@ telefuser serve /path/to/pipeline --task i2v [OPTIONS]
 | `--security-level` | | choice | `strict` | Validation level: none/basic/strict/sandbox. `sandbox` is a best-effort restricted-load check, not runtime isolation. |
 | `--skip-validation` | | flag | `False` | Skip security validation |
 | `--validate-only` | | flag | `False` | Only validate without starting |
+| `--enable-latent-cache` / `--disable-latent-cache` | | flag | unset | Override the pipeline's external CacheSeek latent-cache setting |
+| `--cache-mode` | | choice | unset | Override latent-cache mode: read_write/read_only/write_only |
 
 #### Examples
 
@@ -258,18 +260,17 @@ telefuser serve --help
 | `vc` | Video Continue: Continue an existing video |
 | `t2i` | Text-to-Image: Generate image from text prompt |
 | `i2i` | Image-to-Image: Generate image from input image and prompt |
+| `s2v` | Speech-to-Video: Generate video from speech |
+| `vsr` | Video Super-Resolution: Upscale an input video |
 
 ### Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `TELEFUSER_SECURITY_LEVEL` | Security validation level | `STRICT` |
-| `TELEFUSER_ALLOW_UNSAFE` | Allow unsafe pipelines | `false` |
-| `TELEFUSER_MAX_PPL_SIZE` | Max pipeline file size (bytes) | `10485760` |
-| `TELEFUSER_TASK_TIMEOUT` | Task timeout (seconds) | `3600` |
-| `TELEFUSER_HOST` | Server host | `127.0.0.1` |
-| `TELEFUSER_PORT` | Server port | `8000` |
-| `TELEFUSER_RATE_LIMIT_ENABLED` | Enable rate limiting | `true` |
+| `TELEFUSER_ALLOW_UNSAFE_PIPELINES` | Allow unsafe pipelines | `false` |
+| `TELEFUSER_MAX_PPL_FILE_SIZE` | Maximum pipeline file size (bytes) | `1048576` |
+| `TELEFUSER_TASK_TIMEOUT` | Task timeout (seconds) | `1200` |
+| `TELEFUSER_ENABLE_RATE_LIMIT` | Enable rate limiting | `true` |
 | `TELEFUSER_RATE_LIMIT_REQUESTS_PER_MINUTE` | Requests per minute limit | `60` |
 | `TELEFUSER_TRUST_FORWARDED_FOR` | Trust `X-Forwarded-For` for rate-limit identity. Enable only behind trusted proxies. | `false` |
 | `TELEFUSER_ARTIFACT_STORAGE_BACKEND` | Artifact backend. Only `local` is implemented currently. | `local` |
@@ -284,13 +285,14 @@ telefuser serve --help
 
 ### Configuration File Example
 
-Create `.env` file:
+The `serve` options `--host`, `--port`, `--security-level`, `--enable-latent-cache`, and `--cache-mode`
+are authoritative for command-line startup. Configure those values with CLI options rather than environment variables.
+
+Create a `.env` file:
 
 ```env
-TELEFUSER_SECURITY_LEVEL=STRICT
-TELEFUSER_PORT=8080
-TELEFUSER_HOST=0.0.0.0
-TELEFUSER_RATE_LIMIT_ENABLED=true
+TELEFUSER_TASK_TIMEOUT=1200
+TELEFUSER_ENABLE_RATE_LIMIT=true
 TELEFUSER_RATE_LIMIT_REQUESTS_PER_MINUTE=100
 ```
 
@@ -1208,8 +1210,8 @@ task = client.create_i2i_task(
 ### Rate Limiting
 
 - **Limit**: 60 requests per minute per IP
-- **Burst**: 10 requests
-- **Exempt paths**: `/v1/service/health`
+- **Window**: 60 seconds by default
+- **Scope**: Expensive task creation, generation, download, and stream-negotiation path prefixes
 
 ---
 

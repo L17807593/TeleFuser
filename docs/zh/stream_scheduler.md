@@ -42,6 +42,23 @@ CUDA device placement 本身不代表串行执行或资源所有权。
 edge 和输出均有显式容量。下游 stage 无法继续接收任务时，调度器施加 backpressure，而不是无限保留 tensor。
 因此管线实现必须把提交视为受准入控制的操作，而不是无界队列。
 
+## LingBot Condition 预取
+
+LingBot 的 condition encode 不依赖对应 control，因此 session 使用固定深度为 2 的 lookahead，让 VAE encode
+与较早 chunk 的 denoise、decode 重叠：
+
+- session 启动时，在有界 ingress 有容量的前提下提交 `condition[0]` 和 `condition[1]`；
+- chunk `i` 的 denoise 完成后补满窗口，正常情况下提交 `condition[i+2]`；
+- `next_condition_index` 与 `next_control_index` 始终满足
+  `0 <= next_condition_index - next_control_index <= 2`；
+- 若 backpressure 导致预取缺失，下一个 control 会与缺失的 encode request 原子准入。
+
+condition 与 control 仍按 session 和 sequence ID 在 denoise 前汇合。该优化只调整调度，不改变模型计算或 causal
+cache 所有权。`latency_anchor_artifact="control"` 保证单独预取 condition 不会启动 control-to-output 计时。
+
+这一模型专属策略位于通用 scheduler 之上；edge capacity 继续约束 tensor 保留量，session 清理仍通过 owning
+actor 执行。
+
 ## Actor 所有权与 Session 生命周期
 
 一个有状态 worker 在整个生命周期内只能有一个 actor owner。特别是，一个 `ParallelWorker` 不得由 session
@@ -103,6 +120,3 @@ LingBot 的 `vae_encode_config` 和 `vae_decode_config` 是两个独立且完整
 - session state 必须隔离，并通过 owning actor 释放。
 - 只为真实且明确的部署约束声明 resource group。
 - 应验证 session 交错、backpressure、取消、actor failure 和 cleanup failure。
-
-LingBot-World-Fast 的完整 condition/control 流水、最终时序和本次优化前后对比见
-[LingBot-World-Fast Condition 预取流水设计](design_lingbot_condition_prefetch.md)。

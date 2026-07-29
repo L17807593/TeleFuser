@@ -6,6 +6,17 @@ TeleFuser 仅使用 LiveKit 作为流式传输后端。`telefuser stream-serve` 
 LiveKit 负责浏览器 WebRTC 连接、room、重连、媒体传输和可靠数据消息；TeleFuser 负责模型 worker、准入、
 session 状态、pipeline 执行和 token 签发。因此必须使用 LiveKit Cloud 或自托管 LiveKit Server。
 
+## 为什么选择 LiveKit
+
+TeleFuser 面向高性能多模态生成模型推理，流式服务需要同时支持持续媒体输出、双向控制和长时间运行的
+有状态模型 session。LiveKit 提供的实时传输能力与这些目标相契合：
+
+- room 为模型 session 提供稳定的传输边界，使浏览器连接与 session 自有的模型状态相互独立；
+- 媒体轨道承载渐进式视频和音频，data topic 承载控制、状态与有界 telemetry；
+- 受限 token 区分 controller、viewer 和 worker，适配 TeleFuser 的 session 所有权与权限模型；
+- `ServerPushService` 和 `BidirectionalService` 共用一个流式入口和客户端连接模型；
+- LiveKit 负责连接、重连和媒体交付，TeleFuser 可以专注于模型 worker、准入、pipeline 执行和资源释放。
+
 ## 本地安装与启动
 
 LiveKit Python SDK 已包含在 TeleFuser 基础依赖中：
