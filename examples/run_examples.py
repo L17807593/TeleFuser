@@ -801,6 +801,13 @@ def _extract_ppl_config_default(module: ModuleType, key: str) -> str | None:
     return config.get(key)
 
 
+def _forward_config_parameters(params: list[str], config: dict, kwargs: dict) -> None:
+    """Forward configured values accepted by the target function."""
+    for param_name in params:
+        if param_name not in kwargs and config.get(param_name) is not None:
+            kwargs[param_name] = config[param_name]
+
+
 def _call_get_pipeline(module: ModuleType, config: dict) -> object:
     """Call get_pipeline() with arguments matched by signature inspection."""
     func = module.get_pipeline
@@ -828,6 +835,8 @@ def _call_get_pipeline(module: ModuleType, config: dict) -> object:
         vae_filename = getattr(module, "VAE_FILENAME", None)
         if vae_filename and model_root:
             kwargs["vae_path"] = os.path.join(model_root, vae_filename)
+
+    _forward_config_parameters(params, config, kwargs)
 
     return func(**kwargs)
 
@@ -860,7 +869,9 @@ def _call_run(module: ModuleType, pipeline: object, config: dict) -> object:
 
     # Negative prompt
     if "negative_prompt" in params:
-        kwargs["negative_prompt"] = get_param("negative_prompt", "")
+        negative_prompt = get_param("negative_prompt")
+        if negative_prompt is not None:
+            kwargs["negative_prompt"] = negative_prompt
 
     if "seed" in params:
         kwargs["seed"] = config.get("seed", 42)
@@ -924,6 +935,8 @@ def _call_run(module: ModuleType, pipeline: object, config: dict) -> object:
     if "input_video" in kwargs and "scale" in kwargs:
         return _call_run_flashvsr_chunked(func, kwargs)
 
+    _forward_config_parameters(params, config, kwargs)
+
     return func(**kwargs)
 
 
@@ -977,6 +990,16 @@ def _save_output(
     output_filename = filename or default_name
 
     if output_type == "video":
+        if isinstance(output, torch.Tensor):
+            if output.ndim != 5 or output.shape[0] < 1 or output.shape[1] != 3:
+                raise ValueError("Tensor video output must have shape [batch, 3, frames, height, width]")
+            video = output[0].detach().float().clamp(0.0, 1.0).permute(1, 2, 3, 0).cpu().numpy()
+            output_path = os.path.join(output_dir, output_filename)
+            from telefuser.utils.video import save_video
+
+            save_video(list((video * 255).round().astype(np.uint8)), output_path, fps=fps, quality=6)
+            frame_count, height, width, _ = video.shape
+            return output_path, frame_count, f"{width}x{height}"
         if isinstance(output, (list, tuple)) and len(output) > 0:
             # Unpack tuple from longcat pipelines: (frames, latents)
             frames = output
@@ -1151,7 +1174,7 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
         num_steps = ppl_config.get("num_inference_steps")
         if isinstance(num_steps, list):
             num_steps = sum(num_steps)
-        output_fps = ppl_config.get("target_fps", 15)
+        output_fps = ppl_config.get("target_fps", ppl_config.get("fps", 15))
 
         # First save to temp location to get resolution
         temp_dir = os.path.join(output_root, "temp", timestamp)

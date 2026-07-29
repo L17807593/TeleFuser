@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from types import ModuleType
 
+import numpy as np
 import pytest
+import torch
 
 import examples.run_examples as run_examples
 from examples.run_examples import _close_pipeline
@@ -86,3 +88,55 @@ def test_run_single_closes_pipeline_for_all_post_load_failures(
         run_examples._run_single("test", None, str(output_dir))
 
     assert pipeline.close_calls == 1
+
+
+def test_save_output_writes_tensor_video(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    saved_frames: list[np.ndarray] = []
+
+    def capture_save_video(frames: list[np.ndarray], path: str, fps: float, quality: int) -> None:
+        assert path == str(tmp_path / "output.mp4")
+        assert fps == 24
+        assert quality == 6
+        saved_frames.extend(frames)
+
+    from telefuser.utils import video as video_utils
+
+    monkeypatch.setattr(video_utils, "save_video", capture_save_video)
+    output = torch.zeros(1, 3, 2, 4, 6)
+
+    path, frames, resolution = run_examples._save_output(output, str(tmp_path), "video", fps=24)
+
+    assert path == str(tmp_path / "output.mp4")
+    assert frames == 2
+    assert resolution == "6x4"
+    assert len(saved_frames) == 2
+    assert saved_frames[0].shape == (4, 6, 3)
+    assert saved_frames[0].dtype == np.uint8
+
+
+def test_call_get_pipeline_forwards_matching_config_overrides() -> None:
+    module = ModuleType("pipeline_config_example")
+
+    def get_pipeline(parallelism: int, expert_backend: str, refiner_batch_cfg: bool) -> tuple[int, str, bool]:
+        return parallelism, expert_backend, refiner_batch_cfg
+
+    module.get_pipeline = get_pipeline
+
+    assert run_examples._call_get_pipeline(
+        module,
+        {"gpu_count": 4, "expert_backend": "sorted", "refiner_batch_cfg": True},
+    ) == (4, "sorted", True)
+
+
+def test_call_run_preserves_missing_negative_prompt_default() -> None:
+    module = ModuleType("negative_prompt_example")
+
+    def run(
+        pipeline: object, negative_prompt: str | None = None, target_video_length: int | None = None
+    ) -> tuple[str | None, int | None]:
+        del pipeline
+        return negative_prompt, target_video_length
+
+    module.run = run
+
+    assert run_examples._call_run(module, object(), {"target_video_length": 2}) == (None, 2)

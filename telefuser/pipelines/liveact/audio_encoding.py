@@ -14,6 +14,7 @@ audio-video alignment.
 
 from __future__ import annotations
 
+import soundfile as sf
 import torch
 import torchaudio
 import torchaudio.transforms as T
@@ -329,7 +330,11 @@ class AudioEncodingStage(BaseStage):
         original_audio = None
         original_sr = sr
         if audio_path is not None:
-            audio, sr = torchaudio.load(audio_path)
+            try:
+                audio, sr = torchaudio.load(audio_path)
+            except (ImportError, RuntimeError):
+                samples, sr = sf.read(audio_path, dtype="float32", always_2d=True)
+                audio = torch.from_numpy(samples.T)
             original_audio = audio
             original_sr = sr
 

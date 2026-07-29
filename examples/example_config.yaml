@@ -105,16 +105,21 @@ pipelines:
   # lingbot_world_fast - Image to Video
   # ============================================================
 
-  lingbot_world_fast_i2v:
-    script: lingbot/lingbot_world_fast_image_to_video_h100.py
-    gpu_count: 1
+  lingbot_world_v2_i2v:
+    script: lingbot/lingbot_world_v2_image_to_video_h100.py
+    gpu_count: 4
     output_type: video
     input_image_path: examples/data/lingbot_world_fast/image.jpg
     timeout_seconds: 3600
     resolution: "480p"
-    ppl_config_overrides:
-      attn_impl: TORCH_SDPA
-      frame_num: 13
+
+  lingbot_world_fast_i2v:
+    script: lingbot/lingbot_world_fast_image_to_video_h100.py
+    gpu_count: 4
+    output_type: video
+    input_image_path: examples/data/lingbot_world_fast/image.jpg
+    timeout_seconds: 3600
+    resolution: "480p"
 
   # ============================================================
   # lingbot_video — Fixed Dense and MoE examples
@@ -122,7 +127,7 @@ pipelines:
 
   lingbot_video_dense_1_3b_t2v:
     script: lingbot_video/lingbot_video_dense_1_3b.py
-    gpu_count: 1
+    gpu_count: 4
     output_type: video
     timeout_seconds: 1800
     resolution: "480p"
@@ -133,6 +138,10 @@ pipelines:
     output_type: video
     timeout_seconds: 3600
     resolution: "480p"
+    ppl_config_overrides:
+      # Validated 4-GPU H100 MoE/refiner configuration.
+      refiner_co_resident: false
+      expert_backend: sorted
 
   # ============================================================
   # hunyuan_video
