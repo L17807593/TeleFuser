@@ -9,8 +9,9 @@ if not FP4_AVAILABLE:
         allow_module_level=True,
     )
 
-from flashinfer import (scaled_fp4_grouped_quantize,
-                        silu_and_mul_scaled_nvfp4_experts_quantize)
+flashinfer = pytest.importorskip("flashinfer")
+scaled_fp4_grouped_quantize = flashinfer.scaled_fp4_grouped_quantize
+silu_and_mul_scaled_nvfp4_experts_quantize = flashinfer.silu_and_mul_scaled_nvfp4_experts_quantize
 
 from tf_kernel import scaled_fp4_quant, silu_and_mul
 

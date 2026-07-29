@@ -32,6 +32,8 @@ make build-auto PYTHON=/path/to/venv/bin/python
 
 `build-auto` 会检测本机 GPU 架构。Makefile 在 `dist/` 下构建带有正确 tag 的 wheel，并安装到 `PYTHON`
 指定的解释器。该流程不会安装或依赖 TeleFuser Python 包。
+本机构建使用 `linux_*` platform tag。只有容器构建在检查 wheel 的 ELF 符号版本满足对应基线后，才会标记
+为 `manylinux_2_28`。
 
 如需可复现的指定架构构建，请使用对应 target：
 
@@ -85,17 +87,26 @@ print("RMSNorm smoke test: OK")
 PY
 ```
 
-FP4 算子要求 SM100 或更高架构，因此在 Ampere 和 Hopper 上出现 FP4 不可用提示属于预期行为。当前验证的
-H100 build 在架构选择的 SM90 SageAttention 路径存在已知错误；专项 GPU 测试通过前请使用其他 TeleFuser
-注意力后端。
+FP4 算子要求 SM100 或更高架构，因此 Ampere 和 Hopper 不支持 FP4。安装 SM90 wheel 后，H100 上的
+`sageattn()` 和 TeleFuser `SAGE_ATTN_2_8_8_SM90` 都会使用已验证的 SM90 FP8 实现。
+wheel 导入时会校验构建时记录的 PyTorch 公共版本、PyTorch CUDA 版本、C++11 ABI 和目标 GPU 架构族。
+一个进程只能暴露同一架构族的 GPU。SageAttention v2 当前仅对 SM80、SM86、SM89、SM90、SM120 和
+SM121 启用自动分派；其他 compute capability 会明确报错，不会进入未经验证的后端。
 
 ## 开发
 
 ```bash
-make test PYTHON=/path/to/venv/bin/python
+make test-cpu PYTHON=/path/to/venv/bin/python
+make test-smoke PYTHON=/path/to/venv/bin/python
+make test PYTHON=/path/to/venv/bin/python       # 有界 GPU 测试
+make test-full PYTHON=/path/to/venv/bin/python  # 全量测试矩阵
+make test-wheel PYTHON=/path/to/venv/bin/python
 make format-check PYTHON=/path/to/venv/bin/python
 make docs PYTHON=/path/to/venv/bin/python
 ```
+
+GPU 测试会先把 wheel 安装到隔离的临时目录，再开始收集用例，避免误从源码目录或其他环境导入
+`tf_kernel`。
 
 开发和未来发布流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。兼容性、API 示例和常见问题见
 [完整安装与使用指南](../docs/zh/tf_kernel.md)。

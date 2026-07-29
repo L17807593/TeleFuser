@@ -207,7 +207,7 @@ pipe_config.dit_config.attention_config = config
 | `FLASH_ATTN_2` | Flash Attention 2 | `flash_attn` package |
 | `FLASH_ATTN_3` | Flash Attention 3 | `flash_attn_interface` package |
 | `FLASH_ATTN_4` | Flash Attention 4 | `flash_attn` package (with `cute` submodule) |
-| `SAGE_ATTN_*` | SageAttention variants | `sageattention` package |
+| `SAGE_ATTN_*` | SageAttention variants | `tf-kernel` or `sageattention` package |
 | `SPARGE_ATTN` | Sparge Attention | `spas_sage_attn` package |
 
 **Note on Flash Attention 4**: Flash Attention 4 is optimized for **Hopper (SM90, H100)** and **Blackwell (SM100+, B100/B200)** GPUs. It provides significant performance improvements on these architectures. For older GPUs (Ampere, Ada Lovelace), use Flash Attention 2 or 3 instead.
@@ -394,8 +394,8 @@ Source builds require Python 3.10+, PyTorch 2.11.0, CUDA Toolkit 12.8+, and CMak
 on SM100+. See the [tf-kernel installation and usage guide](./tf_kernel.md) for the complete compatibility matrix,
 H100 build command, installation verification, usage examples, and troubleshooting.
 
-The currently validated H100 wheel has a known `misaligned address` failure in the architecture-selected SM90
-SageAttention path. Use another attention backend until the focused SM90 GPU test passes on the deployed wheel.
+The SM90 path is validated on H100 through both tf-kernel and the TeleFuser public ops layer. The focused GPU test
+synchronizes the kernel and covers causal output and log-sum-exp results.
 
 ### Checking Available Backends
 

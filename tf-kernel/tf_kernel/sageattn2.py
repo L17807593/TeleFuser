@@ -15,12 +15,17 @@ limitations under the License.
 """
 
 import functools
+import logging
 import re
 import subprocess
 import warnings
 from typing import Any, Optional
 
 import torch
+
+from tf_kernel.capabilities import sage_attention_backend
+
+logger = logging.getLogger(__name__)
 
 # Try to import triton modules (from sageattention package or local)
 try:
@@ -55,8 +60,8 @@ def get_cuda_version():
         if match:
             major, minor = int(match.group(1)), int(match.group(2))
             return major, minor
-    except Exception as e:
-        print("Failed to get CUDA version:", e)
+    except Exception as error:
+        logger.debug("Failed to get CUDA version: %s", error)
     return None, None
 
 
@@ -74,18 +79,6 @@ def get_cuda_arch_versions():
         major, minor = torch.cuda.get_device_capability(i)
         cuda_archs.append(f"sm{major}{minor}")
     return tuple(cuda_archs)  # Use tuple for hashability
-
-
-@functools.lru_cache(maxsize=8)
-def _get_arch_for_device(device_index: int) -> str:
-    """Get CUDA architecture for a specific device index.
-
-    This is cached separately to avoid creating lists during torch.compile.
-    """
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is not available")
-    major, minor = torch.cuda.get_device_capability(device_index)
-    return f"sm{major}{minor}"
 
 
 # ==============================================================================
@@ -476,8 +469,9 @@ def sageattn(
     - All tensors must be on the same cuda device.
     """
 
-    arch = _get_arch_for_device(q.device.index)
-    if arch == "sm80":
+    major, minor = torch.cuda.get_device_capability(q.device)
+    backend = sage_attention_backend(major, minor)
+    if backend == "cuda_fp16":
         return sageattn_qk_int8_pv_fp16_cuda(
             q,
             k,
@@ -488,7 +482,7 @@ def sageattn(
             return_lse=return_lse,
             pv_accum_dtype="fp32",
         )
-    elif arch == "sm86":
+    if backend == "triton_fp16":
         return sageattn_qk_int8_pv_fp16_triton(
             q,
             k,
@@ -498,7 +492,7 @@ def sageattn(
             sm_scale=sm_scale,
             return_lse=return_lse,
         )
-    elif arch == "sm89":
+    if backend == "cuda_fp8_thread":
         return sageattn_qk_int8_pv_fp8_cuda(
             q,
             k,
@@ -509,7 +503,7 @@ def sageattn(
             return_lse=return_lse,
             pv_accum_dtype="fp32+fp16",
         )
-    elif arch == "sm90":
+    if backend == "cuda_fp8_sm90":
         return sageattn_qk_int8_pv_fp8_cuda_sm90(
             q,
             k,
@@ -518,9 +512,8 @@ def sageattn(
             is_causal=is_causal,
             sm_scale=sm_scale,
             return_lse=return_lse,
-            pv_accum_dtype="fp32+fp32",
         )
-    elif arch == "sm120":
+    if backend == "cuda_fp8_warp":
         return sageattn_qk_int8_pv_fp8_cuda(
             q,
             k,
@@ -532,20 +525,6 @@ def sageattn(
             return_lse=return_lse,
             pv_accum_dtype="fp32+fp16",
         )
-    elif arch == "sm121":
-        return sageattn_qk_int8_pv_fp8_cuda(
-            q,
-            k,
-            v,
-            tensor_layout=tensor_layout,
-            is_causal=is_causal,
-            qk_quant_gran="per_warp",
-            sm_scale=sm_scale,
-            return_lse=return_lse,
-            pv_accum_dtype="fp32+fp16",
-        )
-    else:
-        raise ValueError(f"Unsupported CUDA architecture: {arch}")
 
 
 def sageattn_qk_int8_pv_fp16_triton(
@@ -1471,7 +1450,7 @@ def sageattn_qk_int8_pv_fp8_cuda_sm90(
     **kwargs: Any,
 ) -> torch.Tensor:
     """
-    SageAttention with INT8 quantization for Q and K, FP8 PV with FP32 accumulation, implemented using CUDA for SM90.
+    SageAttention implementation using Hopper TMA and WGMMA instructions.
 
     Parameters
     ----------

@@ -32,6 +32,8 @@ make build-auto PYTHON=/path/to/venv/bin/python
 
 `build-auto` detects the local GPU architecture. The Makefile builds a correctly tagged wheel under `dist/` and
 installs it into the interpreter selected by `PYTHON`. This does not install or depend on the TeleFuser Python package.
+Local builds use a `linux_*` platform tag. Only the container build may emit `manylinux_2_28` after checking the
+wheel's ELF symbol versions against that policy.
 
 Use an explicit architecture target for reproducible builds:
 
@@ -85,17 +87,27 @@ print("RMSNorm smoke test: OK")
 PY
 ```
 
-FP4 operators require SM100 or newer, so an FP4-unavailable import message is expected on Ampere and Hopper. The
-currently validated H100 build has a known failure in the architecture-selected SM90 SageAttention path; use another
-TeleFuser attention backend until its focused GPU test passes.
+FP4 operators require SM100 or newer, so FP4 is unavailable on Ampere and Hopper. On H100, `sageattn()`
+and TeleFuser `SAGE_ATTN_2_8_8_SM90` use the validated SM90 FP8 implementation when the SM90 wheel is installed.
+At import time, the wheel verifies the PyTorch public version, PyTorch CUDA version, C++11 ABI, and target GPU family
+recorded during its build. A process must expose GPUs from only one architecture family. SageAttention v2 dispatch is
+currently enabled for SM80, SM86, SM89, SM90, SM120, and SM121; other compute capabilities fail explicitly instead of
+selecting an unvalidated backend.
 
 ## Development
 
 ```bash
-make test PYTHON=/path/to/venv/bin/python
+make test-cpu PYTHON=/path/to/venv/bin/python
+make test-smoke PYTHON=/path/to/venv/bin/python
+make test PYTHON=/path/to/venv/bin/python       # bounded GPU suite
+make test-full PYTHON=/path/to/venv/bin/python  # exhaustive matrix
+make test-wheel PYTHON=/path/to/venv/bin/python
 make format-check PYTHON=/path/to/venv/bin/python
 make docs PYTHON=/path/to/venv/bin/python
 ```
+
+GPU targets install the wheel into an isolated temporary directory before collection, so tests cannot accidentally
+import `tf_kernel` from the source checkout or another environment.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development and future release procedures. See the
 [full installation and usage guide](../docs/en/tf_kernel.md) for compatibility, API examples, and troubleshooting.

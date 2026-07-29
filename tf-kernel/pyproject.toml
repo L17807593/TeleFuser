@@ -35,6 +35,7 @@ dev = [
   "tf-kernel[test,docs,lint]",
 ]
 test = [
+  "einops>=0.8",
   "pytest>=7.0",
   "pytest-cov>=4.0",
 ]
@@ -79,6 +80,7 @@ addopts = [
 ]
 markers = [
   "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+  "smoke: marks the bounded synchronized smoke suite",
   "gpu: marks tests that require GPU (deselect with '-m \"not gpu\"')",
   "sm80: marks tests that require SM80+ GPU",
   "sm90: marks tests that require SM90+ GPU",
@@ -87,6 +89,18 @@ markers = [
 
 [tool.isort]
 known_first_party = ["tf_kernel"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+ignore = ["E741"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/test_block_sparse_attn.py" = ["F541", "F841"]
+"tests/test_block_sparse_attn_simple.py" = ["F541"]
+"tests/test_fp4_quantize.py" = ["E402"]
+"tf_kernel/__init__.py" = ["E402", "F401"]
 
 [tool.coverage.run]
 source = ["tf_kernel"]

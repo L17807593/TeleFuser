@@ -81,6 +81,10 @@ telefuser/
   dependency to published project metadata.
 - Do not add GitHub Actions workflows that compile or publish `tf-kernel`. Kernel wheels require an explicitly
   provisioned CUDA/NVCC build host and manual validation.
+- Load only the wheel extension matching the single visible GPU architecture family. Keep build/runtime compatibility
+  facts in `tf_kernel._build_info` and validated SageAttention dispatch in `tf_kernel.capabilities`.
+- `telefuser.ops.attention` prefers the optional `tf_kernel` SageAttention backend and falls back to the standalone
+  `sageattention` package. Model code must continue calling the public ops layer rather than either package directly.
 
 ### LingBot Streaming State
 

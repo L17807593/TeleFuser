@@ -1,14 +1,13 @@
+import logging
+
 import torch
 
-from tf_kernel.load_utils import (_load_architecture_specific_ops,
-                                  _preload_cuda_library)
+from tf_kernel.load_utils import _load_architecture_specific_ops
+
+logger = logging.getLogger(__name__)
 
 # Initialize the ops library based on current GPU
 common_ops = _load_architecture_specific_ops()
-
-# Preload the CUDA library to avoid the issue of libcudart.so.12 not found
-if torch.version.cuda is not None:
-    _preload_cuda_library()
 
 # Check if FP4 is available (compiled with ENABLE_NVFP4)
 try:
@@ -16,9 +15,9 @@ try:
     _ = torch.ops.tf_kernel.cutlass_scaled_fp4_mm
     _ = torch.ops.tf_kernel.scaled_fp4_quant
     FP4_AVAILABLE = True
-except AttributeError as e:
+except AttributeError as error:
     FP4_AVAILABLE = False
-    print(f"no fp4 operator avaliable {e}")
+    logger.debug("FP4 operators are unavailable: %s", error)
 
 from tf_kernel.elementwise import (FusedSetKVBufferArg,
                                    apply_rope_with_cos_sin_cache_inplace,
@@ -53,11 +52,11 @@ from tf_kernel.sageattn2 import (sageattn, sageattn_qk_int8_pv_fp8_cuda,
 # Import SageAttention3 (FP4 Blackwell) if available
 if FP4_AVAILABLE:
     from tf_kernel.sageattn3 import (
+        blockscaled_fp4_attn,
         sageattn3_blackwell,
         scale_and_quant_fp4,
         scale_and_quant_fp4_permute,
         scale_and_quant_fp4_transpose,
-        blockscaled_fp4_attn,
     )
 
 from tf_kernel.block_sparse_attn import (block_sparse_attn_func,

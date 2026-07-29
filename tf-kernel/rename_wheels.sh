@@ -3,7 +3,7 @@ set -euxo pipefail
 
 WHEEL_DIR="${WHEEL_DIR:-dist}"
 PYTHON_BIN="${PYTHON:-python3}"
-MANYLINUX_TAG="${MANYLINUX_TAG:-manylinux_2_28}"
+PLATFORM_POLICY="${1:-local}"
 
 torch_version=$("${PYTHON_BIN}" -c "import torch; print(torch.__version__.split('+')[0])")
 torch_tag="${torch_version//[^a-zA-Z0-9]/_}"
@@ -29,10 +29,19 @@ for wheel in "${wheel_files[@]}"; do
     [ -f "${wheel}" ] || continue
 
     case "${wheel}" in
-        *-linux_x86_64.whl) platform_tag="${MANYLINUX_TAG}_x86_64" ;;
-        *-linux_aarch64.whl) platform_tag="${MANYLINUX_TAG}_aarch64" ;;
+        *-linux_x86_64.whl | *-manylinux_*_x86_64.whl) machine_tag="x86_64" ;;
+        *-linux_aarch64.whl | *-manylinux_*_aarch64.whl) machine_tag="aarch64" ;;
         *)
             echo "Unsupported wheel platform tag: ${wheel}" >&2
+            exit 1
+            ;;
+    esac
+
+    case "${PLATFORM_POLICY}" in
+        local) platform_tag="linux_${machine_tag}" ;;
+        manylinux_2_28) platform_tag="manylinux_2_28_${machine_tag}" ;;
+        *)
+            echo "Unsupported wheel platform policy: ${PLATFORM_POLICY}" >&2
             exit 1
             ;;
     esac

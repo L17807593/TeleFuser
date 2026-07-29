@@ -2,6 +2,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from tf_kernel import FP4_AVAILABLE
+
 
 def torch_sageattn_self_attention(
     q: torch.Tensor,
@@ -50,11 +52,20 @@ def _create_self_attention_tensors(batch_size, num_heads, seq_len, head_dim, dty
     return x, x.clone(), x.clone()
 
 
-# Skip all tests if not on Blackwell (SM120+) or FP4 is not available
-pytestmark = pytest.mark.skipif(
-    hasattr(torch.ops.tf_kernel, "sageattn3_fp4_attn"),
-    reason="sageattn3_blackwell is only supported on SM120+ (Blackwell) with FP4 support",
+SAGEATTN3_AVAILABLE = (
+    FP4_AVAILABLE
+    and torch.cuda.is_available()
+    and torch.cuda.get_device_capability() >= (10, 0)
+    and hasattr(torch.ops.tf_kernel, "sageattn3_fp4_attn")
 )
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.sm100,
+    pytest.mark.skipif(
+        not SAGEATTN3_AVAILABLE,
+        reason="SageAttention3 requires a Blackwell wheel with FP4 operators",
+    ),
+]
 
 
 @pytest.mark.parametrize("batch_size", [1, 2, 4])

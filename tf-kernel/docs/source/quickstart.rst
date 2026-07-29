@@ -87,13 +87,11 @@ following generic FP8 path passes the current H100 smoke test:
    )
    assert output.shape == q.shape
 
-.. warning::
+.. note::
 
-   In the currently validated H100 build, the architecture-selected
-   ``tf_kernel.sageattn()`` path chooses the SM90-specific FP8 implementation
-   and can fail with ``CUDA error: misaligned address``. Do not enable that
-   backend in production until its focused GPU test passes on the deployed
-   wheel.
+   On H100, ``tf_kernel.sageattn()`` selects the validated SM90 FP8
+   implementation. TeleFuser selects the same implementation for
+   ``SAGE_ATTN_2_8_8_SM90`` when the SM90 wheel is installed.
 
 Performance Tips
 ----------------

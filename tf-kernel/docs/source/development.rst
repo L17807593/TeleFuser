@@ -115,23 +115,34 @@ Format Python files:
 Running Tests
 -------------
 
-Run all tests:
-
-.. code-block:: bash
-
-   make test
-
-Run with coverage:
-
-.. code-block:: bash
-
-   make test-cov
-
-Run tests that don't require GPU:
+Run pure-Python build and capability tests without importing GPU modules:
 
 .. code-block:: bash
 
    make test-cpu
+
+Run the synchronized wheel smoke suite, then the bounded GPU suite:
+
+.. code-block:: bash
+
+   make test-smoke
+   make test
+
+Run the exhaustive GPU matrix only on a dedicated validation host:
+
+.. code-block:: bash
+
+   make test-full
+
+Run wheel architecture and symbol checks:
+
+.. code-block:: bash
+
+   make test-wheel
+
+The GPU targets install the selected ``WHEEL`` into an isolated temporary
+directory before test collection. This prevents the source checkout or a
+different installed package from shadowing the artifact under test.
 
 Building Documentation
 ----------------------

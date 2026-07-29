@@ -38,17 +38,19 @@ enable_language(CUDA)
 find_package(CUDAToolkit REQUIRED)
 set_property(GLOBAL PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
-message(STATUS "Detected CUDA_VERSION=${CUDA_VERSION}")
-if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "13.0")
-    message("CUDA_VERSION ${CUDA_VERSION} >= 13.0")
-elseif ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.8")
-    message("CUDA_VERSION ${CUDA_VERSION} >= 12.8")
-elseif ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.4")
-    message("CUDA_VERSION ${CUDA_VERSION} >= 12.4")
-elseif ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.1")
-    message("CUDA_VERSION ${CUDA_VERSION} >= 12.1")
-elseif ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "11.8")
-    message("CUDA_VERSION ${CUDA_VERSION} >= 11.8")
+message(STATUS "Detected CUDAToolkit_VERSION=${CUDAToolkit_VERSION}")
+if ("${CUDAToolkit_VERSION}" VERSION_LESS "12.8")
+    message(FATAL_ERROR "tf-kernel requires CUDA toolkit 12.8 or newer, found ${CUDAToolkit_VERSION}")
+elseif ("${CUDAToolkit_VERSION}" VERSION_GREATER_EQUAL "13.0")
+    message("CUDAToolkit_VERSION ${CUDAToolkit_VERSION} >= 13.0")
+elseif ("${CUDAToolkit_VERSION}" VERSION_GREATER_EQUAL "12.8")
+    message("CUDAToolkit_VERSION ${CUDAToolkit_VERSION} >= 12.8")
+elseif ("${CUDAToolkit_VERSION}" VERSION_GREATER_EQUAL "12.4")
+    message("CUDAToolkit_VERSION ${CUDAToolkit_VERSION} >= 12.4")
+elseif ("${CUDAToolkit_VERSION}" VERSION_GREATER_EQUAL "12.1")
+    message("CUDAToolkit_VERSION ${CUDAToolkit_VERSION} >= 12.1")
+elseif ("${CUDAToolkit_VERSION}" VERSION_GREATER_EQUAL "11.8")
+    message("CUDAToolkit_VERSION ${CUDAToolkit_VERSION} >= 11.8")
 endif()
 
 # Torch
@@ -107,8 +109,10 @@ if(TF_KERNEL_TARGET_SM STREQUAL "AUTO")
         message(STATUS "Auto-detected GPU SM architecture: ${DETECTED_SM}")
         set(TF_KERNEL_TARGET_SM "${DETECTED_SM}")
     else()
-        message(WARNING "Could not auto-detect GPU architecture, falling back to ALL_SM")
-        set(TF_KERNEL_TARGET_SM "ALL_SM")
+        message(FATAL_ERROR
+            "Could not auto-detect a single supported local GPU architecture. "
+            "Use an explicit Make target such as build-sm80, build-sm90, or build-sm100."
+        )
     endif()
 endif()
 
@@ -120,16 +124,6 @@ if(CCACHE_FOUND AND ENABLE_CCACHE AND DEFINED ENV{CCACHE_DIR})
     set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "ccache")
     set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK "ccache")
 endif()
-
-# Configure gencode below SM90
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-    set(DEFAULT_ENABLE_BELOW_SM90 OFF)
-    message(STATUS "For aarch64, disable gencode below SM90 by default")
-else()
-    set(DEFAULT_ENABLE_BELOW_SM90 ON)
-endif()
-
-option(ENABLE_BELOW_SM90 "Enable gencode below SM90" ${DEFAULT_ENABLE_BELOW_SM90})
 
 include_directories(
     ${PROJECT_SOURCE_DIR}/include
@@ -174,6 +168,18 @@ set(TF_KERNEL_SM90_CUDA_FLAGS
     "-gencode=arch=compute_90a,code=sm_90a"
 )
 
+# SM80-family gencode flags. The SM80 target must always contain device code,
+# including on aarch64 hosts where Jetson SM87 is also supported.
+set(TF_KERNEL_SM80_CUDA_FLAGS
+    "-gencode=arch=compute_80,code=sm_80"
+    "-gencode=arch=compute_89,code=sm_89"
+)
+if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+    list(APPEND TF_KERNEL_SM80_CUDA_FLAGS
+        "-gencode=arch=compute_87,code=sm_87"
+    )
+endif()
+
 # SM100+ specific gencode flags (sm_100a and above)
 set(TF_KERNEL_SM100_CUDA_FLAGS
     "-gencode=arch=compute_100a,code=sm_100a"
@@ -193,7 +199,7 @@ function(tf_kernel_configure_device_link target cuda_flags_var)
     endforeach()
 endfunction()
 
-set(TF_KERNEL_COMPILE_THREADS 32 CACHE STRING "Set compilation threads, default 32")
+set(TF_KERNEL_COMPILE_THREADS 2 CACHE STRING "NVCC threads used by each compilation job")
 
 # When TF_KERNEL_COMPILE_THREADS value is less than 1, set it to 1
 if (NOT TF_KERNEL_COMPILE_THREADS MATCHES "^[0-9]+$")
@@ -210,8 +216,6 @@ list(APPEND TF_KERNEL_CUDA_FLAGS
 option(TF_KERNEL_ENABLE_BF16             "Enable BF16"             ON)
 option(TF_KERNEL_ENABLE_FP8              "Enable FP8"              ON)
 option(TF_KERNEL_ENABLE_FP4              "Enable FP4"              ON)
-option(TF_KERNEL_ENABLE_SM90A            "Enable SM90A"            OFF)
-option(TF_KERNEL_ENABLE_SM100A           "Enable SM100A"           OFF)
 
 if (TF_KERNEL_ENABLE_BF16)
     list(APPEND TF_KERNEL_CUDA_FLAGS
@@ -227,49 +231,27 @@ if (TF_KERNEL_ENABLE_FP8)
     )
 endif()
 
-# Below SM90 gencode flags (shared by both targets)
-set(TF_KERNEL_BELOW_SM90_FLAGS)
-if (ENABLE_BELOW_SM90)
-    list(APPEND TF_KERNEL_BELOW_SM90_FLAGS
-        "-gencode=arch=compute_80,code=sm_80"
-        "-gencode=arch=compute_89,code=sm_89"
+# SM100+ additional gencode flags
+if ("${CUDAToolkit_VERSION}" VERSION_GREATER_EQUAL "13.0")
+    # Refer to the sm_121, sm_110 and sm_101 definitions in
+    # https://github.com/pytorch/pytorch/pull/156176.
+    list(APPEND TF_KERNEL_SM100_CUDA_FLAGS
+        "-gencode=arch=compute_103a,code=sm_103a"
+        "--compress-mode=size"
     )
     if (CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
-        list(APPEND TF_KERNEL_BELOW_SM90_FLAGS
-            "-gencode=arch=compute_87,code=sm_87"
-        )
-    endif()
-endif()
-
-# SM90a feature flag (CUDA 12.4+)
-if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.4")
-    set(TF_KERNEL_ENABLE_FA3 ON)
-endif()
-
-# SM100+ additional gencode flags
-if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.8" OR TF_KERNEL_ENABLE_SM100A)
-    # refer sm_121, sm_110 and sm_101 description  https://github.com/pytorch/pytorch/pull/156176
-    if ("${CUDA_VERSION}" VERSION_GREATER_EQUAL "13.0")
         list(APPEND TF_KERNEL_SM100_CUDA_FLAGS
-            "-gencode=arch=compute_103a,code=sm_103a"
-            "--compress-mode=size"
+            "-gencode=arch=compute_110a,code=sm_110a"
+            "-gencode=arch=compute_121a,code=sm_121a"
         )
-        if (CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
-            list(APPEND TF_KERNEL_SM100_CUDA_FLAGS
-                "-gencode=arch=compute_110a,code=sm_110a"
-                "-gencode=arch=compute_121a,code=sm_121a"
-            )
-        endif()
-    else()
-        if (CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
-            list(APPEND TF_KERNEL_SM100_CUDA_FLAGS
-                "-gencode=arch=compute_101a,code=sm_101a"
-            )
-        endif()
     endif()
+elseif (CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+    list(APPEND TF_KERNEL_SM100_CUDA_FLAGS
+        "-gencode=arch=compute_101a,code=sm_101a"
+    )
 endif()
 
-if (TF_KERNEL_ENABLE_FP4 AND "${CUDA_VERSION}" VERSION_GREATER_EQUAL "12.8")
+if (TF_KERNEL_ENABLE_FP4 AND "${CUDAToolkit_VERSION}" VERSION_GREATER_EQUAL "12.8")
     set(ENABLE_NVFP4 ON)
     list(APPEND TF_KERNEL_CUDA_FLAGS
         "-DENABLE_NVFP4=1"
@@ -436,11 +418,18 @@ if(BUILD_SM90)
     message(STATUS "Building SM90 target")
     Python_add_library(common_ops_sm90_build MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${SOURCES} ${SM_90_SOURCES} ${BLOCK_SPARSE_ATTN_SOURCES})
 
-    # SM90 target: only use sm_90/sm_90a + below_sm90 flags, NOT sm_100+
+    # Hopper TMA kernels pass CUtensorMap values through __grid_constant__
+    # kernel parameters. Match the validated upstream SageAttention build by
+    # compiling this target without relocatable device code.
+    set_target_properties(common_ops_sm90_build PROPERTIES
+        CUDA_ARCHITECTURES OFF
+        CUDA_SEPARABLE_COMPILATION OFF
+    )
+
+    # SM90 target: only use sm_90a flags, not sm_100+.
     target_compile_options(common_ops_sm90_build PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:${TF_KERNEL_CUDA_FLAGS}  ${TF_KERNEL_SM90_CUDA_FLAGS} -use_fast_math>
     )
-    tf_kernel_configure_device_link(common_ops_sm90_build TF_KERNEL_SM90_CUDA_FLAGS)
     target_include_directories(common_ops_sm90_build PRIVATE ${INCLUDES})
     # Set output name and separate build directory to avoid conflicts
     set_target_properties(common_ops_sm90_build PROPERTIES
@@ -454,11 +443,11 @@ if(BUILD_SM80)
     message(STATUS "Building SM80 target")
     Python_add_library(common_ops_sm80_build MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${SOURCES} ${SM_80_SOURCES} ${BLOCK_SPARSE_ATTN_SOURCES})
 
-    # SM80 target: use below_sm90 flags only (for sm80-89)
+    # SM80 target: use SM80-family flags only.
     target_compile_options(common_ops_sm80_build PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:${TF_KERNEL_CUDA_FLAGS} ${TF_KERNEL_BELOW_SM90_FLAGS}>
+        $<$<COMPILE_LANGUAGE:CUDA>:${TF_KERNEL_CUDA_FLAGS} ${TF_KERNEL_SM80_CUDA_FLAGS}>
     )
-    tf_kernel_configure_device_link(common_ops_sm80_build TF_KERNEL_BELOW_SM90_FLAGS)
+    tf_kernel_configure_device_link(common_ops_sm80_build TF_KERNEL_SM80_CUDA_FLAGS)
     target_include_directories(common_ops_sm80_build PRIVATE ${INCLUDES})
     # Set output name and separate build directory to avoid conflicts
     set_target_properties(common_ops_sm80_build PROPERTIES
@@ -485,9 +474,8 @@ if(BUILD_SM100)
     )
 endif()
 
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
 execute_process(
-    COMMAND ${Python3_EXECUTABLE} -c "import torch; print(int(torch._C._GLIBCXX_USE_CXX11_ABI))"
+    COMMAND ${Python_EXECUTABLE} -c "import torch; print(int(torch._C._GLIBCXX_USE_CXX11_ABI))"
     OUTPUT_VARIABLE TORCH_CXX11_ABI
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
@@ -500,6 +488,25 @@ else()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
 endif()
+
+execute_process(
+    COMMAND ${Python_EXECUTABLE} -c "import torch; print(torch.__version__); print(torch.version.cuda or '')"
+    OUTPUT_VARIABLE TF_KERNEL_TORCH_INFO
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE TF_KERNEL_TORCH_INFO_RESULT
+)
+if(NOT TF_KERNEL_TORCH_INFO_RESULT EQUAL 0)
+    message(FATAL_ERROR "Could not read PyTorch build information")
+endif()
+string(REPLACE "\n" ";" TF_KERNEL_TORCH_INFO "${TF_KERNEL_TORCH_INFO}")
+list(GET TF_KERNEL_TORCH_INFO 0 TF_KERNEL_TORCH_VERSION)
+list(GET TF_KERNEL_TORCH_INFO 1 TF_KERNEL_TORCH_CUDA_VERSION)
+configure_file(
+    "${PROJECT_SOURCE_DIR}/cmake/build_info.py.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/_build_info.py"
+    @ONLY
+)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/_build_info.py" DESTINATION tf_kernel)
 
 # Link libraries to main targets and install
 if(BUILD_SM90)

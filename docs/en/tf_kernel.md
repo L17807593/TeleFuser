@@ -23,17 +23,19 @@ are implemented. Install `tf-kernel` when a pipeline uses one of its optimized C
 | CMake | 3.26 or newer for source builds |
 | GPU targets | SM80, SM90, and SM100 |
 
-Kernel availability depends on the selected build target. FP4 kernels require Blackwell (SM100 or newer); seeing
-`no fp4 operator available` on Ampere or Hopper is expected. Core operations are currently validated with Python
-3.11, PyTorch 2.11.0+cu128, CUDA 12.8, and H100 (SM90a). Other targets and operation families should be validated on
-their target GPU before production use.
+Kernel availability depends on the selected build target. FP4 kernels require Blackwell (SM100 or newer), and
+`tf_kernel.FP4_AVAILABLE` is false without an import-time warning on Ampere and Hopper. Core operations are currently
+validated with Python 3.11, PyTorch 2.11.0+cu128, CUDA 12.8, and H100 (SM90a). Other targets and operation families
+should be validated on their target GPU before production use.
 
-!!! warning "Current H100 SageAttention limitation"
+The wheel records and verifies its PyTorch public version, PyTorch CUDA version, C++11 ABI, and target GPU family at
+import. A process exposing GPUs from different architecture families is rejected. SageAttention v2 auto-dispatch is
+enabled only for SM80, SM86, SM89, SM90, SM120, and SM121.
 
-    In the currently validated H100 build, the architecture-selected `tf_kernel.sageattn()` path chooses the
-    SM90-specific FP8 kernel and can fail with `CUDA error: misaligned address`. RMSNorm, fused activations, FP8
-    quantization, and the generic FP8 SageAttention path pass smoke tests. Do not enable the SM90-specific SageAttention
-    backend in production until its focused GPU test passes on the wheel being deployed.
+!!! note "H100 SageAttention dispatch"
+
+    On H100, `tf_kernel.sageattn()` selects the validated SM90 FP8 implementation. TeleFuser uses the same kernel
+    when `SAGE_ATTN_2_8_8_SM90` is configured and `tf-kernel` is available.
 
 ## Build and install from source
 
@@ -54,6 +56,9 @@ make build-auto PYTHON=/path/to/venv/bin/python
 The local build is independent of the TeleFuser installation. Make builds a correctly tagged wheel and installs it
 into `PYTHON`. Direct `pip install .` and `pip install -e .` source builds fail with instructions to use Make; pip
 package-index installation is not available.
+
+Local builds use a `linux_*` platform tag. The container build may use `manylinux_2_28` only after checking every
+shared object's GLIBC symbol versions against that policy.
 
 For a reproducible target-specific build:
 
@@ -111,6 +116,10 @@ PY
 An H100-specific wheel should load its common extension from an `sm90` package directory. Also run
 `python -m pip check` to expose dependency conflicts in the environment.
 
+For development validation, run `make test-cpu`, `make test-smoke`, and `make test-wheel`. The smoke and GPU targets
+install the wheel into an isolated temporary directory before collecting tests. `make test` is the bounded GPU suite;
+reserve the 6,000+ case `make test-full` matrix for a dedicated validation host.
+
 ## Usage
 
 TeleFuser users should call the public ops layer; it selects `tf-kernel` for supported eager CUDA paths and keeps the
@@ -137,18 +146,18 @@ x = torch.randn(8, 1024, device="cuda", dtype=torch.float16)
 weight = torch.ones(1024, device="cuda", dtype=torch.float16)
 y = tf_kernel.rmsnorm(x, weight, eps=1e-6)
 
-# H100-tested generic FP8 SageAttention path.
+# H100-tested SM90 FP8 SageAttention path.
 # HND layout: [batch, heads, sequence, head_dim]
 q = torch.randn(1, 8, 128, 64, device="cuda", dtype=torch.float16)
 k = torch.randn_like(q)
 v = torch.randn_like(q)
-attn_output = tf_kernel.sageattn_qk_int8_pv_fp8_cuda(
+attn_output = tf_kernel.sageattn_qk_int8_pv_fp8_cuda_sm90(
     q,
     k,
     v,
     tensor_layout="HND",
     is_causal=False,
-    pv_accum_dtype="fp32",
+    pv_accum_dtype="fp32+fp32",
 )
 ```
 
@@ -186,12 +195,11 @@ Check `nvcc --version`, set `CUDA_HOME` to the CUDA 12.8+ toolkit, and put `$CUD
 Rebuild with `make build-auto` on the target machine or use the explicit `build-sm80`, `build-sm90`, or
 `build-sm100` target. Architecture-specific wheels cannot provide kernels that were omitted at build time.
 
-### SageAttention fails with `misaligned address` on H100
+### Validate an SM90 SageAttention deployment
 
-The architecture selector currently routes H100 to the SM90-specific FP8 implementation. Treat a failure in that
-path as an unsupported backend for the current wheel; select another TeleFuser attention implementation instead of
-continuing in the CUDA process after the asynchronous error. The generic FP8 function shown above is useful for
-isolated validation, but production enablement still requires parity and workload benchmarks.
+The SM90-specific kernel is enabled on H100. After building the wheel, run the synchronized tf-kernel smoke test and
+the TeleFuser public-ops GPU integration test before deploying that artifact on a new host.
+
 
 ### The build exhausts CPU or memory
 

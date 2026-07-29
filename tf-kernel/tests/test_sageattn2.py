@@ -230,6 +230,7 @@ def test_sageattn_qk_int8_pv_fp8_cuda_sm90_self_attention(
         is_causal=is_causal,
         pv_accum_dtype="fp32+fp32",
     )
+    torch.cuda.synchronize(q.device)
 
     # Run reference implementation
     o_ref = torch_sageattn_self_attention(

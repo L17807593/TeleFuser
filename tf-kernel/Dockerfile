@@ -85,7 +85,7 @@ RUN --mount=type=cache,id=tf-kernel-pip,target=/root/.cache/pip \
       *) echo "Unsupported CUDA version: ${CUDA_VERSION}; expected 12.8, 12.9, or 13.0" >&2; exit 1 ;; \
     esac; \
     ${PYTHON_ROOT_PATH}/bin/pip install torch==${TORCH_VER} --index-url https://${PYTORCH_MIRROR}/whl/${CU_TAG}; \
-    ${PYTHON_ROOT_PATH}/bin/pip install ninja setuptools==75.0.0 wheel==0.41.0 numpy uv scikit-build-core --index-url ${PIP_DEFAULT_INDEX}
+    ${PYTHON_ROOT_PATH}/bin/pip install auditwheel ninja setuptools==75.0.0 wheel==0.41.0 numpy uv scikit-build-core --index-url ${PIP_DEFAULT_INDEX}
 
 # Build stage: copy source and build wheel
 FROM deps AS build
@@ -128,8 +128,16 @@ RUN --mount=type=cache,id=tf-kernel-ccache,target=/ccache \
       echo "CMake profiling enabled - will save to /tf-kernel/cmake-profile.json"; \
       export CMAKE_ARGS="--profiling-output=/tf-kernel/cmake-profile.json --profiling-format=google-trace"; \
     fi; \
-    ${PYTHON_ROOT_PATH}/bin/python -m uv build --wheel -Cbuild-dir=build . --color=always --no-build-isolation; \
-    PYTHON=${PYTHON_ROOT_PATH}/bin/python ./rename_wheels.sh; \
+    make validate-build-env \
+      PYTHON=${PYTHON_ROOT_PATH}/bin/python \
+      TF_KERNEL_TARGET_SM=ALL; \
+    make build-wheel \
+      PYTHON=${PYTHON_ROOT_PATH}/bin/python \
+      TF_KERNEL_TARGET_SM=ALL \
+      UV_BUILD_DIR=build; \
+    ${PYTHON_ROOT_PATH}/bin/python -m auditwheel show dist/*.whl; \
+    ${PYTHON_ROOT_PATH}/bin/python scripts/check_manylinux.py --policy manylinux_2_28 dist/*.whl; \
+    PYTHON=${PYTHON_ROOT_PATH}/bin/python ./rename_wheels.sh manylinux_2_28; \
     if [ -n "${ENABLE_BUILD_PROFILE:-}" ] && [ -f /tf-kernel/build/.ninja_log ]; then \
       echo "Ninja build profiling enabled - will save to /tf-kernel/build-trace.json"; \
       wget --progress=dot https://raw.githubusercontent.com/cradleapps/ninjatracing/084212eaf68f25c70579958a2ed67fb4ec2a9ca4/ninjatracing -O /tmp/ninjatracing; \

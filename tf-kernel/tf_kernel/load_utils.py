@@ -1,242 +1,131 @@
-import ctypes
+"""Load the tf-kernel extension matching the visible CUDA devices."""
+
 import glob
 import importlib.util
 import logging
-import os
-import shutil
+from importlib import import_module
 from pathlib import Path
-from typing import List
+from types import ModuleType
+from typing import Protocol
 
 import torch
+
+from tf_kernel.capabilities import (ArchitectureFamily, architecture_family,
+                                    build_target_for_family, capability_label)
 
 logger = logging.getLogger(__name__)
 
 
-def _preload_block_sparse_attn():
-    """Preload block_sparse_attn_shared.so to make symbols available."""
+class _BuildInfo(Protocol):
+    TORCH_VERSION: str
+    TORCH_CUDA_VERSION: str
+    CXX11_ABI: int
+    TARGET_SM: str
+
+
+def _public_version(version: str) -> str:
+    return version.split("+", maxsplit=1)[0]
+
+
+def _visible_architecture_family() -> tuple[ArchitectureFamily, tuple[int, int]]:
+    if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
+        raise ImportError("tf-kernel is CUDA-only, but no CUDA device is available")
+
+    capabilities = [torch.cuda.get_device_capability(index) for index in range(torch.cuda.device_count())]
+    families = {architecture_family(major, minor) for major, minor in capabilities}
+    if len(families) != 1:
+        labels = ", ".join(capability_label(major, minor) for major, minor in capabilities)
+        raise ImportError(
+            "tf-kernel does not support loading one process across heterogeneous "
+            f"architecture families; visible devices: {labels}"
+        )
+
+    current_capability = torch.cuda.get_device_capability(torch.cuda.current_device())
+    return families.pop(), current_capability
+
+
+def _read_build_info() -> ModuleType | None:
     try:
-        tf_kernel_dir = Path(__file__).parent
-        block_sparse_path = tf_kernel_dir / "block_sparse_attn_shared.so"
-
-        if block_sparse_path.exists():
-            # Use RTLD_GLOBAL to make symbols available to other libraries
-            ctypes.CDLL(str(block_sparse_path), mode=ctypes.RTLD_GLOBAL)
-            logger.debug(f"[tf_kernel] Preloaded {block_sparse_path}")
-        else:
-            logger.debug(f"[tf_kernel] block_sparse_attn_shared.so not found at {block_sparse_path}")
-    except Exception as e:
-        logger.debug(f"[tf_kernel] Failed to preload block_sparse_attn_shared.so: {e}")
-
-
-def _get_compute_capability():
-    """Get the compute capability of the current GPU."""
-    if not torch.cuda.is_available():
+        return import_module("tf_kernel._build_info")
+    except ModuleNotFoundError as error:
+        if error.name != "tf_kernel._build_info":
+            raise
+        logger.warning(
+            "tf-kernel build metadata is missing; compatibility checks are unavailable "
+            "for this legacy or source-tree installation"
+        )
         return None
 
-    # Get the current device
-    device = torch.cuda.current_device()
-    properties = torch.cuda.get_device_properties(device)
 
-    # Return as integer (major * 10 + minor)
-    return properties.major * 10 + properties.minor
+def _validate_build_info(build_info: _BuildInfo, family: ArchitectureFamily) -> None:
+    errors: list[str] = []
+
+    built_torch = str(build_info.TORCH_VERSION)
+    if _public_version(built_torch) != _public_version(torch.__version__):
+        errors.append(f"PyTorch {built_torch} was used to build the wheel, but runtime is {torch.__version__}")
+
+    built_cuda = str(build_info.TORCH_CUDA_VERSION)
+    runtime_cuda = torch.version.cuda or ""
+    if built_cuda != runtime_cuda:
+        runtime_cuda_label = runtime_cuda or "CPU-only"
+        errors.append(f"PyTorch CUDA {built_cuda} was used to build the wheel, but runtime is {runtime_cuda_label}")
+
+    built_abi = int(build_info.CXX11_ABI)
+    runtime_abi = int(torch._C._GLIBCXX_USE_CXX11_ABI)
+    if built_abi != runtime_abi:
+        errors.append(f"C++11 ABI {built_abi} was used to build the wheel, but runtime is {runtime_abi}")
+
+    target_sm = str(build_info.TARGET_SM).upper()
+    expected_target = build_target_for_family(family)
+    if target_sm not in {"ALL", expected_target}:
+        errors.append(f"wheel target is {target_sm}, but the current GPU requires {expected_target}")
+
+    if errors:
+        details = "\n- ".join(errors)
+        raise ImportError(f"tf-kernel wheel is incompatible with this runtime:\n- {details}")
 
 
-def _filter_compiled_extensions(file_list):
-    """Filter and prioritize compiled extensions over Python source files."""
-    compiled_extensions = [".so", ".pyd", ".dll"]  # Common compiled extension suffixes
-    compiled_files = []
-    other_files = []
-
-    for file_path in file_list:
-        path = Path(file_path)
-        # Check if it's a compiled extension (including complex names like .abi3.so, .cpython-312.so)
-        if any(str(path).endswith(ext) or ext in str(path) for ext in compiled_extensions):
-            compiled_files.append(file_path)
-        else:
-            other_files.append(file_path)
-
-    # Return compiled files first, then others
-    return compiled_files + other_files
+def _compiled_extensions(pattern: str) -> list[Path]:
+    return sorted(
+        Path(file_path)
+        for file_path in glob.glob(pattern)
+        if Path(file_path).suffix in {".so", ".pyd", ".dll"}
+    )
 
 
-def _load_architecture_specific_ops():
-    """Load the appropriate common_ops library based on GPU architecture."""
-    # Preload block_sparse_attn_shared.so to make symbols available
-    _preload_block_sparse_attn()
+def _load_extension(path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location("common_ops", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not create an extension module spec for {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
-    compute_capability = _get_compute_capability()
-    logger.debug(f"[tf_kernel] GPU Detection: compute_capability = {compute_capability}")
 
-    # Get the directory where tf_kernel is installed
+def _load_architecture_specific_ops() -> ModuleType:
+    """Load the extension for the single visible CUDA architecture family."""
+    family, capability = _visible_architecture_family()
+    build_info = _read_build_info()
+    if build_info is not None:
+        _validate_build_info(build_info, family)
+
     tf_kernel_dir = Path(__file__).parent
-    logger.debug(f"[tf_kernel] tf_kernel directory: {tf_kernel_dir}")
+    pattern = str(tf_kernel_dir / family / "common_ops.*")
+    matching_files = _compiled_extensions(pattern)
+    label = capability_label(*capability)
+    logger.debug("Loading tf-kernel %s extension for %s from %s", family, label, pattern)
 
-    # Determine which version to load based on GPU architecture
-    # sm80: for compute capability 80-89 (Ampere + Ada)
-    # sm90: for compute capability 90 (Hopper)
-    # sm100: for compute capability 100+ (Blackwell)
-    if compute_capability == 90:
-        ops_subdir = "sm90"
-        variant_name = "SM90 (Hopper/H100 with fast math optimization)"
-    elif compute_capability is not None and compute_capability >= 100:
-        ops_subdir = "sm100"
-        variant_name = f"SM{compute_capability} (Blackwell with precise math)"
-    elif compute_capability is not None and compute_capability >= 80:
-        ops_subdir = "sm80"
-        variant_name = f"SM{compute_capability} (Ampere/Ada with precise math)"
-    else:
-        # Fallback: use sm80 as default for unknown/CPU
-        ops_subdir = "sm80"
-        variant_name = "CPU/No GPU detected (using sm80 for compatibility)"
+    if len(matching_files) != 1:
+        raise ImportError(
+            f"Expected exactly one tf-kernel {family} extension for {label}, "
+            f"but found {len(matching_files)} at {pattern}. Rebuild and install the wheel through the Makefile."
+        )
 
-    # Look for the compiled module with any valid extension
-
-    ops_pattern = str(tf_kernel_dir / ops_subdir / "common_ops.*")
-    raw_matching_files = glob.glob(ops_pattern)
-    matching_files = _filter_compiled_extensions(raw_matching_files)
-
-    logger.debug(f"[tf_kernel] Attempting to load {variant_name}")
-    logger.debug(f"[tf_kernel] Looking for library matching pattern: {ops_pattern}")
-    logger.debug(f"[tf_kernel] Found files: {raw_matching_files}")
-    logger.debug(f"[tf_kernel] Prioritized files: {matching_files}")
-
-    previous_import_errors: List[Exception] = []
-
-    # Try to load from the architecture-specific directory
-    if matching_files:
-        ops_path = Path(matching_files[0])  # Use the first prioritized file
-        logger.debug(f"[tf_kernel] Found architecture-specific library: {ops_path}")
-        try:
-            # Load the module from specific path using importlib
-            spec = importlib.util.spec_from_file_location("common_ops", str(ops_path))
-            if spec is None:
-                raise ImportError(f"Could not create module spec for {ops_path}")
-
-            common_ops = importlib.util.module_from_spec(spec)
-            if spec.loader is None:
-                raise ImportError(f"Module spec has no loader for {ops_path}")
-
-            logger.debug(f"[tf_kernel] Loading module from {ops_path}...")
-            spec.loader.exec_module(common_ops)
-            logger.debug(f"[tf_kernel] ✓ Successfully loaded {variant_name}")
-            logger.debug(f"[tf_kernel] ✓ Module file: {common_ops.__file__}")
-            return common_ops
-
-        except Exception as e:
-            previous_import_errors.append(e)
-            logger.debug(f"[tf_kernel] ✗ Failed to load from {ops_path}: {type(e).__name__}: {e}")
-            # Continue to fallback
-    else:
-        logger.debug(f"[tf_kernel] ✗ Architecture-specific library not found matching pattern: {ops_pattern}")
-
-    # Try alternative directory (in case installation structure differs)
-    alt_pattern = str(tf_kernel_dir / "common_ops.*")
-    raw_alt_files = glob.glob(alt_pattern)
-    alt_matching_files = _filter_compiled_extensions(raw_alt_files)
-    logger.debug(f"[tf_kernel] Attempting fallback: looking for pattern {alt_pattern}")
-    logger.debug(f"[tf_kernel] Found fallback files: {raw_alt_files}")
-    logger.debug(f"[tf_kernel] Prioritized fallback files: {alt_matching_files}")
-
-    if alt_matching_files:
-        alt_path = Path(alt_matching_files[0])  # Use the first prioritized file
-        logger.debug(f"[tf_kernel] Found fallback library: {alt_path}")
-        try:
-            spec = importlib.util.spec_from_file_location("common_ops", str(alt_path))
-            if spec is None:
-                raise ImportError(f"Could not create module spec for {alt_path}")
-
-            common_ops = importlib.util.module_from_spec(spec)
-            if spec.loader is None:
-                raise ImportError(f"Module spec has no loader for {alt_path}")
-
-            logger.debug(f"[tf_kernel] Loading fallback module from {alt_path}...")
-            spec.loader.exec_module(common_ops)
-            logger.debug("[tf_kernel] ✓ Successfully loaded fallback library")
-            logger.debug(f"[tf_kernel] ✓ Module file: {common_ops.__file__}")
-            return common_ops
-
-        except Exception as e:
-            previous_import_errors.append(e)
-            logger.debug(f"[tf_kernel] ✗ Failed to load fallback from {alt_path}: {type(e).__name__}: {e}")
-    else:
-        logger.debug(f"[tf_kernel] ✗ Fallback library not found matching pattern: {alt_pattern}")
-
-    # Final attempt: try standard Python import (for backward compatibility)
-    logger.debug("[tf_kernel] Final attempt: trying standard Python import 'common_ops'")
+    path = matching_files[0]
     try:
-        import common_ops
+        module = _load_extension(path)
+    except Exception as error:
+        raise ImportError(f"Failed to load tf-kernel {family} extension at {path}: {error}") from error
 
-        logger.debug("[tf_kernel] ✓ Successfully imported via standard Python import")
-        logger.debug(f"[tf_kernel] ✓ Module file: {common_ops.__file__}")
-        return common_ops
-    except ImportError as e:
-        previous_import_errors.append(e)
-        logger.debug(f"[tf_kernel] ✗ Standard Python import failed: {e}")
-
-    attempt_error_msg = "\n".join(f"- {type(err).__name__}: {err}" for err in previous_import_errors)
-
-    # All attempts failed
-    error_msg = f"""
-[tf_kernel] CRITICAL: Could not load any common_ops library!
-
-Attempted locations:
-1. Architecture-specific pattern: {ops_pattern} - found files: {matching_files}
-2. Fallback pattern: {alt_pattern} - found files: {alt_matching_files}
-3. Standard Python import: common_ops - failed
-
-GPU Info:
-- Compute capability: {compute_capability}
-- Expected variant: {variant_name}
-
-Build and install the local source through its Makefile, for example:
-make build-auto PYTHON=/path/to/venv/bin/python
-
-Error details from previous import attempts:
-{attempt_error_msg}
-"""
-    logger.debug(error_msg)
-    raise ImportError(error_msg)
-
-
-# copy & modify from torch/utils/cpp_extension.py
-def _find_cuda_home():
-    """Find the CUDA install path."""
-    # Guess #1
-    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
-    if cuda_home is None:
-        # Guess #2
-        nvcc_path = shutil.which("nvcc")
-        if nvcc_path is not None:
-            cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
-        else:
-            # Guess #3
-            cuda_home = "/usr/local/cuda"
-    return cuda_home
-
-
-def _preload_cuda_library():
-    """Preload the CUDA runtime library to help avoid 'libcudart.so.12 not found' issues."""
-    cuda_home = Path(_find_cuda_home())
-
-    candidate_dirs = [
-        cuda_home / "lib",
-        cuda_home / "lib64",
-        Path("/usr/lib/x86_64-linux-gnu"),
-        Path("/usr/lib/aarch64-linux-gnu"),
-        Path("/usr/lib64"),
-        Path("/usr/lib"),
-    ]
-
-    for base in candidate_dirs:
-        candidate = base / "libcudart.so.12"
-        if candidate.exists():
-            try:
-                cuda_runtime_lib = candidate.resolve()
-                ctypes.CDLL(str(cuda_runtime_lib), mode=ctypes.RTLD_GLOBAL)
-                logger.debug(f"Preloaded CUDA runtime under {cuda_runtime_lib}")
-                return
-            except Exception as e:
-                logger.debug(f"Failed to load {candidate}: {e}")
-                continue
-
-    logger.debug("[tf_kernel] Could not preload CUDA runtime library")
+    logger.debug("Loaded tf-kernel extension from %s", path)
+    return module

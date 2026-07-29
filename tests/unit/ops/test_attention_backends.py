@@ -4,21 +4,49 @@ from unittest.mock import patch
 from telefuser.ops.attention import backends
 
 
-def test_sage_attention_uses_standalone_package() -> None:
+def test_sage_attention_prefers_tf_kernel() -> None:
+    imported_modules: list[str] = []
+    tf_kernel_module = ModuleType("tf_kernel")
+    sageattention_module = ModuleType("sageattention")
+    previous_available = backends.SAGE_ATTN_AVAILABLE
+    previous_backend = backends.sageattention
+    modules = {"tf_kernel": tf_kernel_module, "sageattention": sageattention_module}
+
+    def import_module(name: str) -> ModuleType:
+        imported_modules.append(name)
+        return modules[name]
+
+    try:
+        with (
+            patch("telefuser.ops.attention.backends.importlib.util.find_spec", return_value=object()),
+            patch("telefuser.ops.attention.backends.importlib.import_module", side_effect=import_module),
+        ):
+            backends._try_import_sage_attn()
+
+        assert imported_modules == ["tf_kernel"]
+        assert backends.SAGE_ATTN_AVAILABLE is True
+        assert backends.sageattention is tf_kernel_module
+    finally:
+        backends.SAGE_ATTN_AVAILABLE = previous_available
+        backends.sageattention = previous_backend
+
+
+def test_sage_attention_falls_back_to_standalone_package() -> None:
     imported_modules: list[str] = []
     sageattention_module = ModuleType("sageattention")
     previous_available = backends.SAGE_ATTN_AVAILABLE
     previous_backend = backends.sageattention
+
+    def find_spec(name: str) -> object | None:
+        return None if name == "tf_kernel" else object()
 
     def import_module(name: str) -> ModuleType:
         imported_modules.append(name)
         return sageattention_module
 
     try:
-        backends.SAGE_ATTN_AVAILABLE = False
-        backends.sageattention = None
         with (
-            patch("telefuser.ops.attention.backends.importlib.util.find_spec", return_value=object()),
+            patch("telefuser.ops.attention.backends.importlib.util.find_spec", side_effect=find_spec),
             patch("telefuser.ops.attention.backends.importlib.import_module", side_effect=import_module),
         ):
             backends._try_import_sage_attn()
@@ -29,3 +57,58 @@ def test_sage_attention_uses_standalone_package() -> None:
     finally:
         backends.SAGE_ATTN_AVAILABLE = previous_available
         backends.sageattention = previous_backend
+
+
+def test_sage_attention_falls_back_when_tf_kernel_cannot_load() -> None:
+    imported_modules: list[str] = []
+    sageattention_module = ModuleType("sageattention")
+    previous_available = backends.SAGE_ATTN_AVAILABLE
+    previous_backend = backends.sageattention
+
+    def import_module(name: str) -> ModuleType:
+        imported_modules.append(name)
+        if name == "tf_kernel":
+            raise ImportError("incompatible tf-kernel wheel")
+        return sageattention_module
+
+    try:
+        with (
+            patch("telefuser.ops.attention.backends.importlib.util.find_spec", return_value=object()),
+            patch("telefuser.ops.attention.backends.importlib.import_module", side_effect=import_module),
+        ):
+            backends._try_import_sage_attn()
+
+        assert imported_modules == ["tf_kernel", "sageattention"]
+        assert backends.SAGE_ATTN_AVAILABLE is True
+        assert backends.sageattention is sageattention_module
+    finally:
+        backends.SAGE_ATTN_AVAILABLE = previous_available
+        backends.sageattention = previous_backend
+
+
+def test_ring_lse_support_recognizes_sage_attention_names() -> None:
+    previous_available = backends.SAGE_ATTN_AVAILABLE
+    try:
+        backends.SAGE_ATTN_AVAILABLE = True
+        assert backends.supports_return_lse("SAGE_ATTN_2_8_8_SM90") is True
+    finally:
+        backends.SAGE_ATTN_AVAILABLE = previous_available
+
+
+def test_ring_config_converts_fallback_name() -> None:
+    from telefuser.core.config import AttentionConfig, AttnImplType
+    from telefuser.ops.attention.attention_impl import _get_ring_attn_config
+
+    config = AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA)
+    with (
+        patch("telefuser.ops.attention.attention_impl.supports_return_lse", return_value=False),
+        patch(
+            "telefuser.ops.attention.attention_impl.get_lse_fallback_impl",
+            return_value="SAGE_ATTN_2_8_8_SM90",
+        ),
+    ):
+        result = _get_ring_attn_config(config, scale=0.125, is_causal=True)
+
+    assert result.attn_impl is AttnImplType.SAGE_ATTN_2_8_8_SM90
+    assert result.scale == 0.125
+    assert result.is_causal is True

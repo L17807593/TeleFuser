@@ -1,8 +1,9 @@
 import pytest
 import torch
-from utils import is_sm10x
 
 from tf_kernel import int8_scaled_mm
+
+from .utils import is_sm10x
 
 
 def to_int8(tensor: torch.Tensor) -> torch.Tensor:

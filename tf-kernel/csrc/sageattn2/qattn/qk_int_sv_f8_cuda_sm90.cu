@@ -20,6 +20,7 @@
 #include <cuda.h>
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
+#include <c10/cuda/CUDAException.h>
 #include <torch/all.h>
 #include <torch/library.h>
 #include <torch/torch.h>
@@ -66,7 +67,10 @@ CUtensorMap create_tensor_map_4D(T* gmem_ptr, int d1, int d2, int d3, int d4, in
       promotion_mode,
       CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
 
-  assert(result == CUDA_SUCCESS);
+  TORCH_CHECK(
+      result == CUDA_SUCCESS,
+      "cuTensorMapEncodeTiled failed with CUDA driver error code ",
+      static_cast<int>(result));
 
   return tma_map;
 }
@@ -721,7 +725,7 @@ torch::Tensor qk_int8_sv_f8_accum_f32_attn_inst_buf(
                 false>;
             size_t sMemSize = CTA_Q * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t) +
                               CTA_K * HEAD_DIM * sizeof(int8_t);
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sMemSize);
+            C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sMemSize));
 
             dim3 grid(div_ceil(qo_len, CTA_Q), num_qo_heads, batch_size);
             kernel<<<grid, NUM_THREADS, sMemSize>>>(
@@ -740,6 +744,7 @@ torch::Tensor qk_int8_sv_f8_accum_f32_attn_inst_buf(
                 kv_len,
                 num_kv_groups,
                 sm_scale);
+            C10_CUDA_KERNEL_LAUNCH_CHECK();
           });
         });
       });
@@ -938,7 +943,7 @@ torch::Tensor qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf(
                 true>;
             size_t sMemSize = CTA_Q * HEAD_DIM * sizeof(int8_t) + CTA_K * HEAD_DIM * sizeof(int8_t) +
                               CTA_K * HEAD_DIM * sizeof(int8_t);
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sMemSize);
+            C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sMemSize));
 
             dim3 grid(div_ceil(qo_len, CTA_Q), num_qo_heads, batch_size);
             kernel<<<grid, NUM_THREADS, sMemSize>>>(
@@ -957,6 +962,7 @@ torch::Tensor qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf(
                 kv_len,
                 num_kv_groups,
                 sm_scale);
+            C10_CUDA_KERNEL_LAUNCH_CHECK();
           });
         });
       });

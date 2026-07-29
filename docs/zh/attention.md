@@ -207,7 +207,7 @@ pipe_config.dit_config.attention_config = config
 | `FLASH_ATTN_2` | Flash Attention 2 | `flash_attn` 包 |
 | `FLASH_ATTN_3` | Flash Attention 3 | `flash_attn_interface` 包 |
 | `FLASH_ATTN_4` | Flash Attention 4 | `flash_attn` 包（含 `cute` 子模块） |
-| `SAGE_ATTN_*` | SageAttention 变体 | `sageattention` 包 |
+| `SAGE_ATTN_*` | SageAttention 变体 | `tf-kernel` 或 `sageattention` 包 |
 | `SPARGE_ATTN` | Sparge Attention | `spas_sage_attn` 包 |
 
 **Flash Attention 4 说明**: Flash Attention 4 针对 **Hopper (SM90, H100)** 和 **Blackwell (SM100+, B100/B200)** GPU 架构进行了优化，在这些架构上提供显著的性能提升。对于旧版 GPU（Ampere、Ada Lovelace），请使用 Flash Attention 2 或 3。
@@ -393,8 +393,8 @@ make build-sm100 PYTHON=/path/to/venv/bin/python  # Blackwell
 可用。完整兼容矩阵、H100 编译命令、安装验证、使用示例和常见问题见
 [tf-kernel 安装与使用指南](./tf_kernel.md)。
 
-当前验证的 H100 wheel 在架构选择的 SM90 SageAttention 路径存在已知 `misaligned address` 错误；部署的
-wheel 通过专项 SM90 GPU 测试前，应选择其他注意力后端。
+SM90 路径已在 H100 上通过 tf-kernel 和 TeleFuser 公共 ops 层验证。专项 GPU 测试会同步内核，并覆盖
+causal 输出和 log-sum-exp 结果。
 
 ### 检查可用后端
 

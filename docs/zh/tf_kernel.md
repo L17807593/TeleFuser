@@ -22,15 +22,18 @@ TeleFuser 不安装 `tf-kernel` 也可以运行：对于已经实现回退的算
 | CMake | 从源码编译要求 3.26 或更高版本 |
 | GPU 目标 | SM80、SM90 和 SM100 |
 
-具体可用内核取决于编译目标。FP4 内核要求 Blackwell（SM100 或更高）；在 Ampere 或 Hopper 上看到
-`no fp4 operator available` 属于预期行为。目前核心算子已在 Python 3.11、PyTorch 2.11.0+cu128、
-CUDA 12.8 和 H100（SM90a）组合上验证。其他目标和算子族用于生产前仍应在目标 GPU 上验证。
+具体可用内核取决于编译目标。FP4 内核要求 Blackwell（SM100 或更高）；在 Ampere 或 Hopper 上
+`tf_kernel.FP4_AVAILABLE` 为 false，导入时不会打印提示。目前核心算子已在 Python 3.11、PyTorch
+2.11.0+cu128、CUDA 12.8 和 H100（SM90a）组合上验证。其他目标和算子族用于生产前仍应在目标 GPU 上验证。
 
-!!! warning "当前 H100 SageAttention 限制"
+wheel 导入时会校验构建时记录的 PyTorch 公共版本、PyTorch CUDA 版本、C++11 ABI 和目标 GPU 架构族。
+一个进程暴露不同架构族的 GPU 时会明确失败。SageAttention v2 自动分派目前仅支持 SM80、SM86、
+SM89、SM90、SM120 和 SM121。
 
-    当前验证的 H100 build 中，架构选择接口 `tf_kernel.sageattn()` 会进入 SM90 专用 FP8 内核，并可能报
-    `CUDA error: misaligned address`。RMSNorm、融合激活、FP8 量化和通用 FP8 SageAttention 路径已通过
-    smoke test。在部署 wheel 的专项 GPU 测试通过前，不应在生产环境启用 SM90 专用 SageAttention 后端。
+!!! note "H100 SageAttention 分派"
+
+    H100 上的 `tf_kernel.sageattn()` 会选择已验证的 SM90 FP8 实现。配置 `SAGE_ATTN_2_8_8_SM90` 且
+    `tf-kernel` 可用时，TeleFuser 会使用同一个内核。
 
 ## 从源码编译和安装
 
@@ -49,6 +52,9 @@ make build-auto PYTHON=/path/to/venv/bin/python
 
 本地构建独立于 TeleFuser 安装。Make 会构建带有正确 tag 的 wheel，并将其安装到 `PYTHON` 指定的解释器。
 直接执行 `pip install .` 或 `pip install -e .` 会失败并提示改用 Make；当前不提供 pip 包索引安装。
+
+本地构建使用 `linux_*` platform tag。容器构建只有在检查所有共享库的 GLIBC 符号版本满足策略后，
+才可以使用 `manylinux_2_28` tag。
 
 需要可复现的指定架构编译时：
 
@@ -105,6 +111,10 @@ PY
 H100 专用 wheel 的 common extension 应从 `sm90` 包目录加载。还应运行 `python -m pip check` 检查环境中的
 依赖冲突。
 
+开发验证依次运行 `make test-cpu`、`make test-smoke` 和 `make test-wheel`。smoke 与 GPU target 会先将
+wheel 安装到隔离的临时目录再收集用例。`make test` 是有界 GPU 测试；超过 6,000 条用例的
+`make test-full` 应只在专用验证机器执行。
+
 ## 使用示例
 
 TeleFuser 用户应调用公共 ops 层；它会在支持的 eager CUDA 路径选择 `tf-kernel`，同时保留框架回退：
@@ -130,18 +140,18 @@ x = torch.randn(8, 1024, device="cuda", dtype=torch.float16)
 weight = torch.ones(1024, device="cuda", dtype=torch.float16)
 y = tf_kernel.rmsnorm(x, weight, eps=1e-6)
 
-# 已在 H100 验证的通用 FP8 SageAttention 路径。
+# 已在 H100 验证的 SM90 FP8 SageAttention 路径。
 # HND 布局：[batch, heads, sequence, head_dim]
 q = torch.randn(1, 8, 128, 64, device="cuda", dtype=torch.float16)
 k = torch.randn_like(q)
 v = torch.randn_like(q)
-attn_output = tf_kernel.sageattn_qk_int8_pv_fp8_cuda(
+attn_output = tf_kernel.sageattn_qk_int8_pv_fp8_cuda_sm90(
     q,
     k,
     v,
     tensor_layout="HND",
     is_causal=False,
-    pv_accum_dtype="fp32",
+    pv_accum_dtype="fp32+fp32",
 )
 ```
 
@@ -179,11 +189,10 @@ PyTorch 版本，请在干净环境中安装 TeleFuser 和 `tf-kernel`。除非�
 在目标机器使用 `make build-auto` 重新编译，或显式选择 `build-sm80`、`build-sm90`、`build-sm100`。
 指定架构 wheel 无法提供编译时未包含的内核。
 
-### H100 上 SageAttention 报 `misaligned address`
+### 验证 SM90 SageAttention 部署
 
-当前架构选择接口会把 H100 路由到 SM90 专用 FP8 实现。如果该路径失败，应将其视为当前 wheel 不支持的
-后端并选择其他 TeleFuser 注意力实现；异步 CUDA 错误发生后不要继续复用该进程。上文的通用 FP8 函数
-可用于独立验证，但生产启用仍需要完成精度对齐和目标工作负载 benchmark。
+SM90 专用内核已在 H100 上启用。构建 wheel 后，应在新的部署主机上运行带同步的 tf-kernel smoke test
+和 TeleFuser 公共 ops GPU 集成测试。
 
 ### 编译耗尽 CPU 或内存
 

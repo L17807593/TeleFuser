@@ -251,6 +251,7 @@ def attention(
                 k,
                 v,
                 attn_mask=attn_mask,
+                is_causal=is_causal,
                 sm_scale=scale,
                 tensor_layout=sage_tensor_layout,
                 pv_accum_dtype="fp32+fp32",
@@ -263,6 +264,7 @@ def attention(
                 k,
                 v,
                 attn_mask=attn_mask,
+                is_causal=is_causal,
                 sm_scale=scale,
                 tensor_layout=sage_tensor_layout,
                 pv_accum_dtype="fp32",
@@ -275,6 +277,7 @@ def attention(
                 k,
                 v,
                 attn_mask=attn_mask,
+                is_causal=is_causal,
                 sm_scale=scale,
                 tensor_layout=sage_tensor_layout,
                 pv_accum_dtype="fp32+fp32",
@@ -425,12 +428,12 @@ def _get_ring_attn_config(
     """Get attention config with LSE support for ring attention."""
     attn_impl = attention_config.attn_impl if attention_config else AttnImplType.TORCH_SDPA
 
-    if not supports_return_lse(attn_impl.value):
+    if not supports_return_lse(attn_impl.name):
         fallback = get_lse_fallback_impl()
         if fallback is None:
             raise RuntimeError("Ring attention requires LSE support. Install flash-attn or sageattention.")
         logger.info(f"Ring attention: falling back to {fallback}")
-        return AttentionConfig(attn_impl=AttnImplType(fallback), scale=scale, is_causal=is_causal)
+        return AttentionConfig(attn_impl=AttnImplType[fallback], scale=scale, is_causal=is_causal)
 
     return attention_config
 

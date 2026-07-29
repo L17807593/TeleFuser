@@ -34,6 +34,10 @@ Local source compilation is supported only through the Makefile. Direct
 during CMake configuration. Make builds a correctly tagged wheel and installs
 that artifact into the selected interpreter.
 
+Local Make builds use the native ``linux_*`` platform tag. A
+``manylinux_2_28`` tag is reserved for the container build, which checks the
+wheel's ELF symbol versions against that policy before retagging it.
+
 Build an Architecture-Specific Wheel
 ------------------------------------
 
@@ -102,6 +106,9 @@ Run the smoke test with the interpreter that will load the package:
 
 Run ``python -m pip check`` afterward to find dependency conflicts. An H100
 wheel should load its common extension from an ``sm90`` package directory.
+Import also checks the build-time PyTorch public version, PyTorch CUDA version,
+C++11 ABI, and target GPU family against the runtime. A process exposing GPUs
+from different architecture families is rejected explicitly.
 
 Troubleshooting
 ---------------
@@ -132,17 +139,23 @@ Reduce ``MAX_JOBS``, ``CMAKE_BUILD_PARALLEL_LEVEL``, and
 ``TF_KERNEL_COMPILE_THREADS``. Building one SM target also reduces compilation
 time and wheel size.
 
-FP4 Warning on Ampere or Hopper
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FP4 Availability on Ampere or Hopper
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The import-time message that FP4 operators are unavailable is expected on
-SM80 and SM90. FP4 kernels are built only for SM100 and newer GPUs.
+FP4 kernels are built only for SM100 and newer GPUs. On SM80 and SM90,
+``tf_kernel.FP4_AVAILABLE`` is false; import does not print a warning.
 
-SageAttention Misaligned Address on H100
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Unvalidated SageAttention Architecture
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The architecture-selected ``sageattn`` entry point currently routes H100 to
-the SM90-specific FP8 implementation, which can fail with a CUDA misaligned
-address in the validated build. Select another TeleFuser attention backend
-until the focused SM90 GPU test passes on the deployed wheel. Restart the
-process after this asynchronous CUDA error before running other kernels.
+SageAttention v2 auto-dispatch is enabled for SM80, SM86, SM89, SM90, SM120,
+and SM121. Other compute capabilities raise an explicit unsupported-backend
+error instead of selecting an implementation that has not been validated.
+
+Validated SM90 SageAttention Kernel
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The automatic ``sageattn`` entry point selects the validated SM90 FP8
+implementation on H100. TeleFuser selects the same implementation for
+``SAGE_ATTN_2_8_8_SM90`` when ``tf-kernel`` is available. Run the synchronized
+smoke and public-ops GPU integration tests on each newly built wheel.

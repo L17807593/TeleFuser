@@ -85,16 +85,23 @@ def _try_import_sdpa() -> None:
 
 
 def _try_import_sage_attn() -> None:
-    """Import Sage Attention."""
+    """Import SageAttention, preferring the optional tf-kernel package."""
     global SAGE_ATTN_AVAILABLE, sageattention
 
-    try:
-        if importlib.util.find_spec("sageattention") is not None:
-            sageattention = importlib.import_module("sageattention")
-            SAGE_ATTN_AVAILABLE = True
-            logger.debug("Sage Attention available")
-    except (ModuleNotFoundError, ImportError):
-        pass
+    SAGE_ATTN_AVAILABLE = False
+    sageattention = None
+    for module_name in ("tf_kernel", "sageattention"):
+        try:
+            if importlib.util.find_spec(module_name) is None:
+                continue
+            sageattention = importlib.import_module(module_name)
+        except (ModuleNotFoundError, ImportError) as error:
+            logger.debug("SageAttention backend %s unavailable: %s", module_name, error)
+            continue
+
+        SAGE_ATTN_AVAILABLE = True
+        logger.debug("SageAttention loaded from %s", module_name)
+        return
 
 
 def _try_import_sparge_attn() -> None:
