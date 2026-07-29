@@ -200,7 +200,7 @@ python examples/run_examples.py --all --gpus 0,1,2,3
 
 - **Explicit registry**: `example_config.yaml` lists all pipelines — no auto-discovery
 - **Subprocess isolation**: Each pipeline runs in its own process with pinned `CUDA_VISIBLE_DEVICES`
-- **Baseline management**: First run auto-saves as baseline; `--update-baseline` refreshes
+- **Baseline management**: `--update-baseline` explicitly creates or refreshes baselines
 - **Regression metrics**: PSNR + SSIM for video, pixel diff for image
 - **GPU memory tracking**: Peak VRAM usage per pipeline
 - **Output validation**: NaN/Inf detection

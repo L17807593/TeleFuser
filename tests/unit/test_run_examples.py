@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import ModuleType
 
@@ -140,3 +141,132 @@ def test_call_run_preserves_missing_negative_prompt_default() -> None:
     module.run = run
 
     assert run_examples._call_run(module, object(), {"target_video_length": 2}) == (None, 2)
+
+
+def test_video_metrics_rejects_mismatched_frame_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    from telefuser.utils import video as video_utils
+
+    class FakeVideoData:
+        def __init__(self, video_file: str) -> None:
+            self.width = 8
+            self.height = 8
+            self._frame_count = 2 if video_file == "baseline.mp4" else 1
+
+        def __len__(self) -> int:
+            return self._frame_count
+
+        def fps(self) -> float:
+            return 24.0
+
+    monkeypatch.setattr(video_utils, "VideoData", FakeVideoData)
+
+    with pytest.raises(ValueError, match="frame count mismatch"):
+        run_examples.compute_video_metrics("baseline.mp4", "current.mp4")
+
+
+def test_comparison_requires_an_explicit_baseline_initialization(tmp_path: Path) -> None:
+    current = tmp_path / "current.png"
+    current.write_bytes(b"image")
+
+    result = run_examples.compare_against_baseline(
+        str(tmp_path), "qwen/example.py", 1, str(current), "image", 25.0, 0.85, 0.02
+    )
+
+    assert not result["passed"]
+    assert not result["baseline_exists"]
+    assert not (tmp_path / "baseline").exists()
+
+    initialized = run_examples.compare_against_baseline(
+        str(tmp_path), "qwen/example.py", 1, str(current), "image", 25.0, 0.85, 0.02, update_baseline=True
+    )
+
+    assert initialized["passed"]
+    assert (tmp_path / "baseline" / current.name).is_file()
+
+
+@pytest.mark.parametrize("metrics", [{}, {"psnr": 30.0}])
+def test_video_comparison_rejects_missing_metrics(
+    metrics: dict[str, float], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    baseline = tmp_path / "baseline.mp4"
+    current = tmp_path / "current.mp4"
+    baseline.write_bytes(b"baseline")
+    current.write_bytes(b"current")
+    monkeypatch.setattr(run_examples, "_get_baseline_path", lambda *_args: str(baseline))
+    monkeypatch.setattr(run_examples, "compute_video_metrics", lambda *_args: metrics)
+
+    result = run_examples.compare_against_baseline(
+        str(tmp_path), "wan/example.py", 1, str(current), "video", 25.0, 0.85, 0.02
+    )
+
+    assert not result["passed"]
+    assert result["message"] == "Video comparison produced no PSNR/SSIM metrics"
+
+
+def test_video_comparison_rejects_unavailable_dependencies(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    baseline = tmp_path / "baseline.mp4"
+    current = tmp_path / "current.mp4"
+    baseline.write_bytes(b"baseline")
+    current.write_bytes(b"current")
+    monkeypatch.setattr(run_examples, "_get_baseline_path", lambda *_args: str(baseline))
+
+    def raise_missing_dependency(*_args: object) -> dict[str, float]:
+        raise ModuleNotFoundError("skimage")
+
+    monkeypatch.setattr(run_examples, "compute_video_metrics", raise_missing_dependency)
+
+    result = run_examples.compare_against_baseline(
+        str(tmp_path), "wan/example.py", 1, str(current), "video", 25.0, 0.85, 0.02
+    )
+
+    assert not result["passed"]
+    assert "Comparison unavailable" in result["message"]
+
+
+def test_resume_only_skips_recorded_passes_with_output(tmp_path: Path) -> None:
+    pipelines = {
+        "passed": run_examples.PipelineConfig(script="wan/passed.py", output_type="image"),
+        "failed": run_examples.PipelineConfig(script="wan/failed.py", output_type="image"),
+        "unreported": run_examples.PipelineConfig(script="wan/unreported.py", output_type="image"),
+    }
+    for name in pipelines:
+        (tmp_path / f"wan__{name}_1gpu_1x1.png").write_bytes(b"output")
+    (tmp_path / "example_report.json").write_text(
+        json.dumps({"results": {"passed": {"status": "PASS"}, "failed": {"status": "FAIL"}}}),
+        encoding="utf-8",
+    )
+
+    assert run_examples._get_completed_pipelines(str(tmp_path), pipelines) == {"passed"}
+
+
+def test_scheduler_records_insufficient_gpu_as_skip(tmp_path: Path) -> None:
+    scheduler = run_examples.PipelineScheduler(
+        run_examples.GPUPool([0]),
+        {"requires_two": run_examples.PipelineConfig(script="wan/example.py", gpu_count=2)},
+        str(tmp_path),
+    )
+
+    assert not scheduler.has_pending()
+    assert len(scheduler.results) == 1
+    assert scheduler.results[0].status == "SKIP"
+    assert scheduler.results[0].error_category == "INSUFFICIENT_GPUS"
+
+
+def test_main_fails_when_the_requested_matrix_is_resource_incomplete(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = run_examples.Config(
+        output_root=str(tmp_path),
+        pipelines={"requires_two": run_examples.PipelineConfig(script="wan/example.py", gpu_count=2)},
+    )
+    output_dir = tmp_path / "results"
+    monkeypatch.setattr(run_examples, "load_config", lambda _path: config)
+    monkeypatch.setattr(run_examples, "_get_date_dir", lambda _root: str(output_dir))
+    monkeypatch.setattr(run_examples.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(run_examples.sys, "argv", ["run_examples.py", "--all"])
+
+    with pytest.raises(SystemExit, match="1"):
+        run_examples.main()
+
+    report = json.loads((output_dir / "example_report.json").read_text(encoding="utf-8"))
+    assert report["results"]["requires_two"]["status"] == "SKIP"

@@ -419,9 +419,9 @@ pixel_diff_max: 0.02 # Range [0, 1], lower = stricter
 
 #### Baseline Management
 
-- First run: Output automatically saved as baseline
+- Missing baseline: Fails the regression run until explicitly initialized
 - Subsequent runs: Compared against baseline
-- Update baseline: `--update-baseline` flag
+- Create or update baseline: `--update-baseline` flag
 
 ### Error Classification
 
@@ -474,7 +474,7 @@ pixel_diff_max: 0.02 # Range [0, 1], lower = stricter
 - **Subprocess isolation**: Each pipeline runs in isolated process with pinned GPUs
 - **Parallel execution**: Run multiple pipelines simultaneously across GPU pool (use `--gpus`)
 - **Intelligent scheduling**: Greedy allocation prioritizes larger tasks, maximizes GPU utilization
-- **Baseline management**: Auto-save first run, update with flag
+- **Baseline management**: Explicitly create or update with `--update-baseline`
 - **Regression metrics**: PSNR/SSIM for video, pixel diff for image
 - **GPU memory tracking**: Peak VRAM usage per pipeline
 - **Output validation**: NaN/Inf detection
@@ -496,5 +496,5 @@ pipelines:
 
 3. Run to generate baseline:
 ```bash
-python examples/run_examples.py --pipeline my_new_pipeline
+python examples/run_examples.py --pipeline my_new_pipeline --update-baseline
 ```

@@ -334,22 +334,30 @@ class PipelineScheduler:
         self.config_path = config_path
         self.update_baseline = update_baseline
         self.verbose = verbose
+        self.results: list[Result] = []
 
-        # Filter pipelines that require more GPUs than available in pool
+        # Record unschedulable pipelines so an incomplete regression matrix cannot pass.
         total_gpus = gpu_pool.total_count()
-        skipped_pipelines: list[tuple[str, int]] = []  # (name, required_gpu_count)
         valid_pipelines: dict[str, PipelineConfig] = {}
 
         for name, ppl_cfg in pipelines.items():
             if ppl_cfg.gpu_count > total_gpus:
-                skipped_pipelines.append((name, ppl_cfg.gpu_count))
+                self.results.append(
+                    Result(
+                        name=name,
+                        status="SKIP",
+                        script=ppl_cfg.script,
+                        reproduce_command=self._build_reproduce_cmd(name),
+                        error_category="INSUFFICIENT_GPUS",
+                        error_message=f"Requires {ppl_cfg.gpu_count} GPUs, but pool has {total_gpus}",
+                        note=f"Requires {ppl_cfg.gpu_count} GPUs, but pool has {total_gpus}",
+                    )
+                )
             else:
                 valid_pipelines[name] = ppl_cfg
 
-        # Log skipped pipelines
-        if skipped_pipelines:
-            for name, required in skipped_pipelines:
-                print(f"  [SKIP] {name}: requires {required} GPUs, but pool has {total_gpus}")
+        for result in self.results:
+            print(f"  [SKIP] {result.name}: {result.note}")
 
         # Sort pipelines by gpu_count descending for greedy scheduling
         sorted_pipelines = sorted(
@@ -360,7 +368,6 @@ class PipelineScheduler:
         self.pending: list[tuple[str, PipelineConfig]] = list(sorted_pipelines)
 
         self.running: dict[int, RunningJob] = {}  # job_id -> RunningJob
-        self.results: list[Result] = []
 
     def has_pending(self) -> bool:
         """Check if there are pending pipelines."""
@@ -574,13 +581,14 @@ class PipelineScheduler:
                 job.ppl_cfg.psnr_min,
                 job.ppl_cfg.ssim_min,
                 job.ppl_cfg.pixel_diff_max,
+                self.update_baseline,
             )
             result.regression_metrics = cmp.get("metrics", {})
             result.note = cmp["message"]
-            if cmp["baseline_exists"] and not cmp["passed"]:
+            if not cmp["passed"]:
                 result.status = "FAIL"
 
-            if self.update_baseline and output_path and os.path.exists(output_path):
+            if self.update_baseline and cmp["baseline_exists"] and output_path and os.path.exists(output_path):
                 _update_baseline(self.output_root, output_path)
                 result.note += " [baseline updated]"
 
@@ -1249,16 +1257,22 @@ def compute_video_metrics(baseline_path: str, current_path: str) -> dict[str, fl
 
     from telefuser.utils.video import VideoData
 
-    try:
-        video_true = VideoData(video_file=baseline_path)
-        video_test = VideoData(video_file=current_path)
-    except Exception:
-        return {}
+    video_true = VideoData(video_file=baseline_path)
+    video_test = VideoData(video_file=current_path)
 
-    # Compare up to the shorter video length
-    n_frames = min(len(video_true), len(video_test))
+    if len(video_true) != len(video_test):
+        raise ValueError(f"Video frame count mismatch: baseline={len(video_true)}, current={len(video_test)}")
+    if (video_true.width, video_true.height) != (video_test.width, video_test.height):
+        raise ValueError(
+            "Video resolution mismatch: "
+            f"baseline={video_true.width}x{video_true.height}, current={video_test.width}x{video_test.height}"
+        )
+    if not np.isclose(video_true.fps(), video_test.fps(), rtol=0.0, atol=1e-3):
+        raise ValueError(f"Video FPS mismatch: baseline={video_true.fps()}, current={video_test.fps()}")
+
+    n_frames = len(video_true)
     if n_frames == 0:
-        return {}
+        raise ValueError("Video output contains no frames")
 
     psnr_sum, ssim_sum, n = 0.0, 0.0, 0
     for i in range(n_frames):
@@ -1316,7 +1330,7 @@ def _check_output_exists(output_dir: str, script: str, gpu_count: int, output_ty
 
 
 def _get_completed_pipelines(output_dir: str, pipelines: dict[str, PipelineConfig]) -> set[str]:
-    """Get set of pipeline names that already have output files in the specified directory.
+    """Get pipeline names with a recorded PASS result and existing output file.
 
     Args:
         output_dir: Target output directory (date-based folder) to check.
@@ -1325,9 +1339,13 @@ def _get_completed_pipelines(output_dir: str, pipelines: dict[str, PipelineConfi
     Returns:
         Set of pipeline names with existing output files.
     """
+    existing_results = _load_existing_results(output_dir)
     completed = set()
     for name, cfg in pipelines.items():
-        if _check_output_exists(output_dir, cfg.script, cfg.gpu_count, cfg.output_type):
+        result = existing_results.get(name, {})
+        if result.get("status") == "PASS" and _check_output_exists(
+            output_dir, cfg.script, cfg.gpu_count, cfg.output_type
+        ):
             completed.add(name)
     return completed
 
@@ -1396,15 +1414,21 @@ def compare_against_baseline(
     psnr_min: float,
     ssim_min: float,
     pixel_diff_max: float,
+    update_baseline: bool = False,
 ) -> dict:
     """Compare current output against baseline. Returns dict with passed, metrics, message."""
     baseline_path = _get_baseline_path(output_root, script, gpu_count, output_type)
 
     if baseline_path is None:
-        if current_path and os.path.exists(current_path):
+        if update_baseline and current_path and os.path.exists(current_path):
             saved = _update_baseline(output_root, current_path)
             return {"passed": True, "baseline_exists": False, "metrics": {}, "message": f"Saved as baseline: {saved}"}
-        return {"passed": True, "baseline_exists": False, "metrics": {}, "message": "No baseline (first run)"}
+        return {
+            "passed": False,
+            "baseline_exists": False,
+            "metrics": {},
+            "message": "No baseline found; rerun with --update-baseline to create one",
+        }
 
     if not current_path or not os.path.exists(current_path):
         return {"passed": False, "baseline_exists": True, "metrics": {}, "message": "No output file produced"}
@@ -1413,6 +1437,13 @@ def compare_against_baseline(
         if output_type == "video":
             m = compute_video_metrics(baseline_path, current_path)
             psnr, ssim = m.get("psnr"), m.get("ssim")
+            if not isinstance(psnr, (int, float)) or not isinstance(ssim, (int, float)):
+                return {
+                    "passed": False,
+                    "baseline_exists": True,
+                    "metrics": m,
+                    "message": "Video comparison produced no PSNR/SSIM metrics",
+                }
             passed = True
             msgs = []
             if psnr is not None and psnr < psnr_min:
@@ -1431,7 +1462,7 @@ def compare_against_baseline(
             msg = f"pixel_diff={diff:.6f}" + ("" if passed else f" > {pixel_diff_max}")
             return {"passed": passed, "baseline_exists": True, "metrics": {"pixel_diff": diff}, "message": msg}
     except (ImportError, ModuleNotFoundError) as e:
-        return {"passed": True, "baseline_exists": True, "metrics": {}, "message": f"Comparison skipped ({e})"}
+        return {"passed": False, "baseline_exists": True, "metrics": {}, "message": f"Comparison unavailable ({e})"}
     except Exception as e:
         return {"passed": False, "baseline_exists": True, "metrics": {}, "message": f"Comparison error: {e}"}
 
@@ -1701,13 +1732,14 @@ def run_pipeline(
             ppl_cfg.psnr_min,
             ppl_cfg.ssim_min,
             ppl_cfg.pixel_diff_max,
+            update_baseline,
         )
         result.regression_metrics = cmp.get("metrics", {})
         result.note = cmp["message"]
-        if cmp["baseline_exists"] and not cmp["passed"]:
+        if not cmp["passed"]:
             result.status = "FAIL"
 
-        if update_baseline and output_path and os.path.exists(output_path):
+        if update_baseline and cmp["baseline_exists"] and output_path and os.path.exists(output_path):
             _update_baseline(output_root, output_path)
             result.note += " [baseline updated]"
 
@@ -1954,20 +1986,20 @@ def main() -> None:
     print(f"Output directory: {output_dir}")
     print(f"Baseline directory: {os.path.join(output_root, 'baseline')}")
 
-    # Load completed pipelines for resume (check output file existence)
+    # Resume only previously verified output, never a file left by an interrupted run.
     completed_pipelines = set()
     if args.resume:
         completed_pipelines = _get_completed_pipelines(output_dir, to_run)
         if completed_pipelines:
             print(f"Resuming from: {output_dir}")
-            print(f"Skipping {len(completed_pipelines)} pipelines with existing output: {sorted(completed_pipelines)}")
+            print(f"Skipping {len(completed_pipelines)} pipelines with verified output: {sorted(completed_pipelines)}")
             print("-" * 60)
 
             # Filter out completed pipelines
             to_run = {k: v for k, v in to_run.items() if k not in completed_pipelines}
 
             if not to_run:
-                print("All pipelines already have output files. Nothing to run.")
+                print("All pipelines have verified output. Nothing to run.")
                 return
 
     # Determine GPU pool
@@ -2053,6 +2085,17 @@ def main() -> None:
         for name, ppl_cfg in to_run.items():
             if ppl_cfg.gpu_count > total_gpus:
                 print(f"  [SKIP] {name}: requires {ppl_cfg.gpu_count} GPUs, but only {total_gpus} available")
+                results.append(
+                    Result(
+                        name=name,
+                        status="SKIP",
+                        script=ppl_cfg.script,
+                        reproduce_command=_build_reproduce_cmd(name, args.config),
+                        error_category="INSUFFICIENT_GPUS",
+                        error_message=f"Requires {ppl_cfg.gpu_count} GPUs, but only {total_gpus} available",
+                        note=f"Requires {ppl_cfg.gpu_count} GPUs, but only {total_gpus} available",
+                    )
+                )
             else:
                 filtered_to_run[name] = ppl_cfg
 
@@ -2094,7 +2137,7 @@ def main() -> None:
     report_path = save_report_json(output_dir, results, existing_results)
     print(f"\nJSON report: {report_path}")
 
-    fail_count = sum(1 for r in all_results if r.status in ("FAIL", "ERROR", "TIMEOUT"))
+    fail_count = sum(1 for r in all_results if r.status != "PASS")
     if fail_count > 0:
         sys.exit(1)
 

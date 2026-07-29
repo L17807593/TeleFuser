@@ -419,9 +419,9 @@ pixel_diff_max: 0.02 # 范围 [0, 1]，越低越严格
 
 #### Baseline 管理
 
-- 首次运行：输出自动保存为 baseline
+- 缺少 baseline：回归运行失败，需显式初始化
 - 后续运行：与 baseline 对比
-- 更新 baseline：使用 `--update-baseline` 参数
+- 创建或更新 baseline：使用 `--update-baseline` 参数
 
 ### 错误分类
 
@@ -474,7 +474,7 @@ pixel_diff_max: 0.02 # 范围 [0, 1]，越低越严格
 - **进程隔离**：每个 pipeline 在独立进程中运行，GPU 绑定
 - **并行执行**：在 GPU 资源池上并行运行多个 pipeline（使用 `--gpus`）
 - **智能调度**：贪心分配优先调度大任务，最大化 GPU 利用率
-- **Baseline 管理**：首次运行自动保存，支持更新
+- **Baseline 管理**：使用 `--update-baseline` 显式创建或更新
 - **回归指标**：视频使用 PSNR/SSIM，图像使用像素差异
 - **GPU 内存追踪**：记录每个 pipeline 的峰值显存
 - **输出验证**：NaN/Inf 检测
@@ -496,5 +496,5 @@ pipelines:
 
 3. 运行生成 baseline：
 ```bash
-python examples/run_examples.py --pipeline my_new_pipeline
+python examples/run_examples.py --pipeline my_new_pipeline --update-baseline
 ```
