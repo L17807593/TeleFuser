@@ -62,9 +62,10 @@ For development:
 pip install -e ".[dev]"
 ```
 
-TeleFuser does not require `tf-kernel` to run. No prebuilt tf-kernel package is currently published; the optional
-extension is built from source with the Makefile under `tf-kernel/`. See the [tf-kernel README](tf-kernel/README.md)
-and [installation and usage guide](docs/en/tf_kernel.md) for build, verification, and compatibility details.
+TeleFuser does not require `tf-kernel` to run. The project does not publish prebuilt tf-kernel wheels or a source
+distribution to a public package index. Build the optional extension with the Makefile under `tf-kernel/`; a locally
+built wheel may be distributed only to compatible environments. See the [tf-kernel README](tf-kernel/README.md) and
+[installation and usage guide](docs/en/tf_kernel.md) for build, verification, and artifact compatibility details.
 
 The base installation includes the LiveKit Python SDKs used by `telefuser stream-serve`. A LiveKit Cloud project or
 self-hosted LiveKit Server is operated separately.

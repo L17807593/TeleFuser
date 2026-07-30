@@ -76,8 +76,11 @@ telefuser stream-serve /path/to/pipeline.py --port 8088
 
 - `telefuser` and `tf-kernel` are independent Python distributions with separate metadata, versions, wheels, tests,
   and releases.
-- No prebuilt `tf-kernel` package or TeleFuser `kernel` extra is currently provided.
+- Do not publish prebuilt `tf-kernel` wheels or a source distribution to a public package index, and do not add a
+  TeleFuser `kernel` extra.
 - Local `tf-kernel` source builds use its Makefile. Direct and editable pip builds are intentionally rejected.
+- Locally built wheels may be shared only through direct artifacts or scoped artifact repositories for compatible
+  environments. Keep different target SM families isolated because the wheel filename does not encode the SM target.
 - Do not make the TeleFuser build invoke pip or compile `tf-kernel`, and do not publish a local-path dependency or a
   TeleFuser `kernel` extra.
 - Do not add GitHub Actions workflows that compile or publish `tf-kernel`; kernel wheels require an explicitly

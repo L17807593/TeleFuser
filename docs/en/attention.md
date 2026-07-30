@@ -380,8 +380,9 @@ pip install -e .
 ### tf-kernel
 
 `tf-kernel` is TeleFuser's optional CUDA extension package and provides optimized SageAttention and block-sparse
-attention implementations. No prebuilt package is currently published. For an architecture-specific source build,
-run one of these commands from the `tf-kernel/` directory:
+attention implementations. The project does not publish prebuilt wheels or a source distribution to a public package
+index. Build it from source, or install an exact locally built wheel that matches the target environment. For an
+architecture-specific source build, run one of these commands from the `tf-kernel/` directory:
 
 ```bash
 make build-auto PYTHON=/path/to/venv/bin/python
@@ -392,7 +393,8 @@ make build-sm100 PYTHON=/path/to/venv/bin/python  # Blackwell
 
 Source builds require Python 3.10+, PyTorch 2.11.0, CUDA Toolkit 12.8+, and CMake 3.26+. FP4 kernels are available only
 on SM100+. See the [tf-kernel installation and usage guide](./tf_kernel.md) for the complete compatibility matrix,
-H100 build command, installation verification, usage examples, and troubleshooting.
+local wheel distribution contract, H100 build command, installation verification, usage examples, and
+troubleshooting.
 
 The SM90 path is validated on H100 through both tf-kernel and the TeleFuser public ops layer. The focused GPU test
 synchronizes the kernel and covers causal output and log-sum-exp results.

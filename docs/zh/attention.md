@@ -379,8 +379,9 @@ pip install -e .
 
 ### tf-kernel
 
-`tf-kernel` 是 TeleFuser 的可选 CUDA 扩展包，提供优化的 SageAttention 和块稀疏注意力实现。目前没有
-发布预编译包。需要指定架构源码编译时，在 `tf-kernel/` 目录执行：
+`tf-kernel` 是 TeleFuser 的可选 CUDA 扩展包，提供优化的 SageAttention 和块稀疏注意力实现。项目不向
+公共包索引发布预编译 wheel 或源码分发包。应从源码构建，或安装与目标环境匹配的明确本地 wheel 制品。
+需要指定架构源码编译时，在 `tf-kernel/` 目录执行：
 
 ```bash
 make build-auto PYTHON=/path/to/venv/bin/python
@@ -390,7 +391,7 @@ make build-sm100 PYTHON=/path/to/venv/bin/python  # Blackwell
 ```
 
 源码编译要求 Python 3.10+、PyTorch 2.11.0、CUDA Toolkit 12.8+ 和 CMake 3.26+；FP4 内核仅在 SM100+
-可用。完整兼容矩阵、H100 编译命令、安装验证、使用示例和常见问题见
+可用。完整兼容矩阵、本地 wheel 分发契约、H100 编译命令、安装验证、使用示例和常见问题见
 [tf-kernel 安装与使用指南](./tf_kernel.md)。
 
 SM90 路径已在 H100 上通过 tf-kernel 和 TeleFuser 公共 ops 层验证。专项 GPU 测试会同步内核，并覆盖
