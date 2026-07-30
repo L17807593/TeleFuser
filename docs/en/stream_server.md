@@ -50,9 +50,26 @@ request routing; their registries, queues, health, and session state are indepen
 | `ServerPushService` | Starts from request configuration and publishes progressive video/audio without room controls. | Exactly one; startup rejects `max_sessions_per_worker > 1`. |
 | `BidirectionalService` | Creates per-user state, accepts normalized controls, and yields output chunks. | May exceed one only when the implementation isolates state and defines safe cross-session execution. |
 
-`max_sessions_per_worker` is an admission limit, not a replica count, batch size, or graph-edge capacity. The
+`max_sessions_per_worker` is an admission limit, not a replica count, batch size, or graph-edge capacity. Its default
+value, `auto`, calculates capacity after pipeline warmup from worker-local free GPU memory, steady-state transient
+peaks, and a 5% safety margin with a 2 GiB minimum per device. Transient allocations replaced by the fixed DiT pool
+are excluded from the steady-state peak. An explicit integer only lowers that result; it never forces admission
+beyond the calculated safe capacity. The
+reusable mechanism lives in `telefuser.cache.session_memory`: stages capture raw device snapshots, while each
+pipeline supplies role-specific retained-memory budgets and owns its concrete tensor layout. The module calculates
+capacity and manages storage-agnostic slot leases, so other streaming pipelines can reuse it without depending on
+LingBot.
+
+The
 checked-in LingBot-World-Fast and LingBot-World v2 services support multiple retained sessions and serialize their
 model chunks with a shared execution lease. Other bidirectional services must provide their own concurrency policy.
+
+Before admission starts, LingBot allocates fixed DiT self/cross-attention KV slots and VAE encoder/decoder temporal
+cache slots for the calculated capacity. Warmup records the VAE cache-entry layouts; each fixed VAE slot includes 10%
+shape headroom. Creating and closing a session only acquires and returns slots, so retained cache storage is not
+freed and reallocated. The per-device safety margin covers smaller untracked state and allocator fragmentation.
+Service metadata reports the raw per-device facts, reusable allocator reservations, role-specific retained bytes,
+pool profiles, limiting device, and effective capacity under `session_capacity`.
 
 ## Local development stack
 
@@ -339,7 +356,7 @@ Use `telefuser stream-serve --help` for the complete option list. The options wi
 | `--host`, `--port` | `0.0.0.0`, `8088` | HTTP bind address |
 | `--num-workers` | `1` | Must remain `1` in the current runtime |
 | `--worker-gpu-map` | unset | One logical GPU group for the current worker, for example `0,1,2,3` |
-| `--max-sessions-per-worker` | `1` | Retained bidirectional sessions; not replicas |
+| `--max-sessions-per-worker` | `auto` | Hardware-calculated retained sessions; an integer is a safety ceiling |
 | `--queue-size` | `0` | HTTP admission FIFO length; zero rejects at capacity |
 | `--control-idle-timeout` | `10` | LingBot lease idle threshold when another session waits |
 | `--session-timeout` | `1800` | Records `expires_at`; not currently enforced |

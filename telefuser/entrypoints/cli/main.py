@@ -148,8 +148,9 @@ def serve(
 @click.option(
     "--max-sessions-per-worker",
     default=None,
-    type=int,
-    help="Maximum retained sessions per model worker",
+    type=str,
+    callback=lambda _ctx, _param, value: None if value is None else (value if value.lower() == "auto" else int(value)),
+    help="Hardware-calculated retained sessions ('auto') or an integer ceiling",
 )
 @click.option(
     "--worker-gpu-map", default=None, type=str, help="GPU group for the current worker, for example '0,1,2,3'"

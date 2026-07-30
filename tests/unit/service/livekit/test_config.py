@@ -9,6 +9,8 @@ def test_worker_gpu_groups_default_to_empty_groups() -> None:
     config = LiveKitServeConfig(num_workers=2)
 
     assert config.worker_gpu_groups() == [[], []]
+    assert config.max_sessions_per_worker == "auto"
+    assert config.session_capacity_limit() is None
 
 
 def test_worker_gpu_groups_parse_semicolon_map() -> None:
@@ -38,4 +40,5 @@ def test_multi_session_settings_load_from_environment(monkeypatch: pytest.Monkey
     config = LiveKitServeConfig()
 
     assert config.max_sessions_per_worker == 3
+    assert config.session_capacity_limit() == 3
     assert config.control_idle_timeout == 7.5

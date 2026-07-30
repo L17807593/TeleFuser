@@ -217,19 +217,36 @@ class CachedCrossAttention(nn.Module):
         self,
         x: torch.Tensor,
         context: torch.Tensor,
-        cache: dict[str, torch.Tensor | bool] | None,
+        cache: dict[str, torch.Tensor | bool | int] | None,
     ) -> torch.Tensor:
         q = rearrange(self.norm_q(self.q(x)), "b s (n d) -> b s n d", n=self.num_heads)
 
         if cache is not None and bool(cache.get("is_init", False)):
-            k = cache["k"]
-            v = cache["v"]
+            sequence_length = int(cache.get("sequence_length", cache["k"].shape[1]))
+            k = cache["k"][:, :sequence_length]
+            v = cache["v"][:, :sequence_length]
         else:
             k = rearrange(self.norm_k(self.k(context)), "b s (n d) -> b s n d", n=self.num_heads)
             v = rearrange(self.v(context), "b s (n d) -> b s n d", n=self.num_heads)
             if cache is not None:
-                cache["k"] = k
-                cache["v"] = v
+                cache_k = cache.get("k")
+                cache_v = cache.get("v")
+                if (
+                    isinstance(cache_k, torch.Tensor)
+                    and isinstance(cache_v, torch.Tensor)
+                    and cache_k.shape[0] == k.shape[0]
+                    and cache_k.shape[1] >= k.shape[1]
+                    and cache_k.shape[2:] == k.shape[2:]
+                    and cache_v.shape == cache_k.shape
+                ):
+                    cache_k[:, : k.shape[1]].copy_(k)
+                    cache_v[:, : v.shape[1]].copy_(v)
+                    k = cache_k[:, : k.shape[1]]
+                    v = cache_v[:, : v.shape[1]]
+                else:
+                    cache["k"] = k
+                    cache["v"] = v
+                cache["sequence_length"] = k.shape[1]
                 cache["is_init"] = True
 
         out = attn_func(
@@ -298,7 +315,7 @@ class LingBotWorldFastBlock(nn.Module):
         freqs_sin: torch.Tensor,
         grid_size: tuple[int, int, int],
         kv_cache: dict[str, torch.Tensor | int],
-        crossattn_cache: dict[str, torch.Tensor | bool],
+        crossattn_cache: dict[str, torch.Tensor | bool | int],
         current_start: int,
         max_attention_size: int,
         control_tokens: torch.Tensor | None = None,
@@ -518,7 +535,7 @@ class LingBotWorldFastDiT(BaseModel):
         y: torch.Tensor | None = None,
         control_tensor: torch.Tensor | None = None,
         kv_cache: list[dict[str, torch.Tensor | int]] | None = None,
-        crossattn_cache: list[dict[str, torch.Tensor | bool]] | None = None,
+        crossattn_cache: list[dict[str, torch.Tensor | bool | int]] | None = None,
         current_start: int = 0,
         max_attention_size: int = 1_000_000,
     ) -> torch.Tensor:

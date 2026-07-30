@@ -28,6 +28,7 @@ class WorkerEventSink(Protocol):
     """Callbacks used by a worker to report lifecycle changes."""
 
     def on_worker_status(self, worker_id: str, status: str) -> None: ...
+    def on_worker_capacity(self, worker_id: str, capacity: int, profile: dict[str, object] | None = None) -> None: ...
     def on_session_status(self, session_id: str, status: SessionStatus, error: str | None = None) -> None: ...
     def on_pipeline_session(self, session_id: str, pipeline_session_id: str) -> None: ...
     def on_session_finished(self, worker_id: str, session_id: str, error: str | None = None) -> None: ...
@@ -37,6 +38,9 @@ class NullWorkerEventSink:
     """No-op worker event sink for tests and isolated worker use."""
 
     def on_worker_status(self, worker_id: str, status: str) -> None:
+        return None
+
+    def on_worker_capacity(self, worker_id: str, capacity: int, profile: dict[str, object] | None = None) -> None:
         return None
 
     def on_session_status(self, session_id: str, status: SessionStatus, error: str | None = None) -> None:

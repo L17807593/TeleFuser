@@ -211,6 +211,43 @@ def test_cache_initialization_failure_triggers_global_cleanup() -> None:
     pipeline.denoise_stage.release_cache.assert_called_once_with(0)
 
 
+def test_vae_capacity_rejection_rolls_back_partial_initialization() -> None:
+    pipeline = _build_runtime_pipeline()
+    pipeline.vae_decode_worker.initialize_cache.return_value = False
+
+    with pytest.raises(RuntimeError, match="capacity is exhausted at VAE decode"):
+        pipeline._create_initialized_session(
+            LingBotWorldFastSessionConfig(
+                prompt="baseline",
+                image=Image.new("RGB", (16, 16)),
+                frame_num=9,
+            )
+        )
+
+    pipeline.vae_encode_worker.release_cache.assert_called_once_with(0, sync=True)
+    pipeline.vae_decode_worker.release_cache.assert_called_once_with(0, sync=True)
+    pipeline.denoise_stage.release_cache.assert_called_once_with(0)
+    pipeline.denoise_stage.initialize_cache.assert_not_called()
+
+
+def test_denoise_capacity_rejection_rolls_back_vae_initialization() -> None:
+    pipeline = _build_runtime_pipeline()
+    pipeline.denoise_stage.initialize_cache.return_value = False
+
+    with pytest.raises(RuntimeError, match="capacity is exhausted at denoise"):
+        pipeline._create_initialized_session(
+            LingBotWorldFastSessionConfig(
+                prompt="baseline",
+                image=Image.new("RGB", (16, 16)),
+                frame_num=9,
+            )
+        )
+
+    pipeline.vae_encode_worker.release_cache.assert_called_once_with(0, sync=True)
+    pipeline.vae_decode_worker.release_cache.assert_called_once_with(0, sync=True)
+    pipeline.denoise_stage.release_cache.assert_called_once_with(0)
+
+
 def test_runtime_passes_reproducible_noise_rng_state_to_denoise_actor() -> None:
     first_pipeline, first = _create_runtime(frame_num=21, seed=7)
     repeated_pipeline, repeated = _create_runtime(frame_num=21, seed=7)

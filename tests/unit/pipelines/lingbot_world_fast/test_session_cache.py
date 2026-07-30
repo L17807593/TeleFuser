@@ -18,10 +18,10 @@ def _cache_stage() -> LingBotWorldFastDenoisingStage:
     return stage
 
 
-def _initialize_cache(stage: LingBotWorldFastDenoisingStage, cache_handle: int) -> None:
+def _initialize_cache(stage: LingBotWorldFastDenoisingStage, cache_handle: int) -> bool:
     generator_state = torch.Generator(device="cpu").manual_seed(cache_handle).get_state().tolist()
     noise_generator_state = torch.Generator(device="cpu").manual_seed(cache_handle + 100).get_state().tolist()
-    LingBotWorldFastDenoisingStage.initialize_cache.__wrapped__(
+    return LingBotWorldFastDenoisingStage.initialize_cache.__wrapped__(
         stage,
         cache_handle=cache_handle,
         batch_size=1,
@@ -51,6 +51,34 @@ def test_worker_cache_registry_isolates_handles_and_releases_idempotently() -> N
     assert stage.release_cache(11) is True
     assert stage.release_cache(11) is False
     assert stage.list_cache_handles() == (12,)
+
+
+def test_preallocated_cache_pool_exhausts_and_reuses_slots() -> None:
+    stage = LingBotWorldFastDenoisingStage.__new__(LingBotWorldFastDenoisingStage)
+    stage.device = torch.device("cpu")
+    stage.torch_dtype = torch.float32
+    stage.dit = SimpleNamespace(dim=8, num_heads=2, num_layers=2, device_mesh=None)
+    stage._cache_registry = {}
+    stage._cache_pool = None
+
+    profile = stage.configure_cache_pool(capacity=2, batch_size=1, kv_size=4, max_sequence_length=8)
+    _initialize_cache(stage, 11)
+    _initialize_cache(stage, 12)
+
+    assert profile.capacity == 2
+    assert profile.allocated_bytes == 2 * profile.bytes_per_session
+    assert profile.bytes_per_session == stage.estimate_session_cache_bytes(1, 4, 8)
+    assert {stage._cache_registry[handle].pool_slot for handle in (11, 12)} == {0, 1}
+    assert _initialize_cache(stage, 13) is False
+    assert not stage.has_cache(13)
+
+    released_slot = stage._cache_registry[11].pool_slot
+    stage._cache_registry[11].self_kv_cache[0]["global_end_index"].fill_(7)
+    assert stage.release_cache(11) is True
+    _initialize_cache(stage, 13)
+
+    assert stage._cache_registry[13].pool_slot == released_slot
+    assert stage._cache_registry[13].self_kv_cache[0]["global_end_index"].item() == 0
 
 
 def test_worker_rejects_unknown_cache_handle() -> None:

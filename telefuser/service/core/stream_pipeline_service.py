@@ -287,6 +287,22 @@ class StreamPipelineService:
     def close_session(self, session_id: str) -> None:
         self._ensure_bidirectional().close_session(session_id)
 
+    def configure_session_capacity(self, max_sessions: int | None) -> dict[str, object] | None:
+        """Configure an optional model-specific retained-session capacity planner."""
+        service = self._ensure_bidirectional()
+        configure = getattr(service, "configure_session_capacity", None)
+        if not callable(configure):
+            return None
+        return configure(max_sessions)
+
+    def session_capacity_profile(self) -> dict[str, object] | None:
+        """Return optional model-specific capacity facts."""
+        service = self._ensure_bidirectional()
+        get_profile = getattr(service, "session_capacity_profile", None)
+        if not callable(get_profile):
+            return None
+        return get_profile()
+
     def has_session(self, session_id: str) -> bool:
         """Check if a bidirectional session exists (duck-typed)."""
         if self.stream_mode != STREAM_MODE_BIDIRECTIONAL or self.service is None:
@@ -315,6 +331,10 @@ class StreamPipelineService:
             metadata["performance"] = {"phases": [startup_measurement]}
         if runtime_environment:
             metadata["environment"] = runtime_environment
+        if self.stream_mode == STREAM_MODE_BIDIRECTIONAL and self.service is not None:
+            get_profile = getattr(self.service, "session_capacity_profile", None)
+            if callable(get_profile) and (capacity_profile := get_profile()) is not None:
+                metadata["session_capacity"] = capacity_profile
         return metadata
 
     # -- internals -----------------------------------------------------------

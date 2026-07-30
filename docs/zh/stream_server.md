@@ -50,9 +50,24 @@ flowchart LR
 | `ServerPushService` | 根据请求配置启动，无需 room control，渐进发布视频/音频。 | 只能为 1；`max_sessions_per_worker > 1` 时启动失败。 |
 | `BidirectionalService` | 创建用户独立状态，接收规范化 control，并持续输出 chunk。 | 只有在实现隔离状态并定义安全的跨 session 执行策略时才可大于 1。 |
 
-`max_sessions_per_worker` 是准入上限，不是副本数、batch size 或 graph edge capacity。仓库内
+`max_sessions_per_worker` 是准入上限，不是副本数、batch size 或 graph edge capacity。默认值 `auto` 在
+pipeline warmup 后根据各 stage worker 的 GPU 空闲显存、稳态临时峰值和每张设备 5%（最低 2 GiB）的安全余量
+计算容量；固定 DiT pool 已替代的动态分配不会重复计入稳态峰值。显式整数只会降低计算结果，不会强制接受超出
+安全容量的 session。
+
+通用机制位于 `telefuser.cache.session_memory`：stage 采集原始设备画像，各 pipeline 提供按角色拆分的
+常驻显存预算并拥有具体张量布局。该模块只负责容量计算和与 storage 无关的 slot 租约，因此其他流式 pipeline
+无需依赖 LingBot 即可复用。
+
+仓库内
 LingBot-World-Fast 和 LingBot-World v2 支持多个常驻 session，并通过共享 execution lease 串行执行模型
 chunk。其他双向服务必须自行提供跨 session 并发策略。
+
+LingBot 在开始准入前一次性申请计算容量对应的 DiT self/cross-attention KV slot，以及 VAE
+encoder/decoder 时序 cache slot。warmup 会记录 VAE cache entry 布局，每个固定 VAE slot 额外保留 10%
+形状余量。session 创建和关闭只领取和归还 slot，不再释放并重新申请常驻 cache storage。每张设备的安全余量
+覆盖较小的未跟踪状态和 allocator 碎片。服务 metadata 的 `session_capacity` 字段包含每张设备的原始画像、
+可复用 allocator reservation、按角色拆分的常驻字节、pool profile、限制设备和最终容量。
 
 ## 本地开发链路
 
@@ -335,7 +350,7 @@ telefuser stream-serve PIPE_PATH [OPTIONS]
 | `--host`、`--port` | `0.0.0.0`、`8088` | HTTP 监听地址 |
 | `--num-workers` | `1` | 当前 runtime 必须保持为 `1` |
 | `--worker-gpu-map` | 未设置 | 当前 worker 的一个逻辑 GPU group，例如 `0,1,2,3` |
-| `--max-sessions-per-worker` | `1` | 常驻双向 session 数，不是副本数 |
+| `--max-sessions-per-worker` | `auto` | 按硬件计算常驻 session 数；整数表示安全上限 |
 | `--queue-size` | `0` | HTTP 准入 FIFO 长度；零表示容量满时拒绝 |
 | `--control-idle-timeout` | `10` | 有其他 session 等待时，LingBot lease 的控制空闲阈值 |
 | `--session-timeout` | `1800` | 记录 `expires_at`，当前尚未执行 |

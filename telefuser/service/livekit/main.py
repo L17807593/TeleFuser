@@ -25,7 +25,7 @@ def run_stream_server(
     livekit_api_key: str | None = None,
     livekit_api_secret: str | None = None,
     num_workers: int | None = None,
-    max_sessions_per_worker: int | None = None,
+    max_sessions_per_worker: int | str | None = None,
     worker_gpu_map: str | None = None,
     queue_size: int | None = None,
     control_idle_timeout: float | None = None,

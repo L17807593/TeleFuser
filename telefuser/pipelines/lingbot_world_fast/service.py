@@ -97,10 +97,78 @@ class LingBotWorldFastService:
         self._sessions: dict[str, LingBotWorldFastSessionState] = {}
         self._sessions_lock = threading.RLock()
         self._lease_manager = ExecutionLeaseManager()
+        self._session_capacity_profile: dict[str, object] | None = None
 
     def start(self) -> None:
+        self.pipeline.reset_stage_memory_peaks()
         self.pipeline.warmup(self._warmup_session_config())
         logger.info("LingBotWorldFastService started")
+
+    def configure_session_capacity(self, max_sessions: int | None = None) -> dict[str, object]:
+        """Plan and preallocate retained-session KV capacity after warmup."""
+        with self._sessions_lock:
+            if self._sessions:
+                raise RuntimeError("cannot configure retained-session capacity while sessions are active")
+            existing_profile = self._session_capacity_profile
+        if existing_profile is not None:
+            if existing_profile["configured_limit"] != max_sessions:
+                raise RuntimeError(
+                    "retained-session capacity is already configured with limit "
+                    f"{existing_profile['configured_limit']}, requested {max_sessions}"
+                )
+            return dict(existing_profile)
+        if max_sessions is not None and max_sessions < 1:
+            raise ValueError(f"max_sessions must be positive when provided, got {max_sessions}")
+
+        defaults = self.default_session_config
+        max_fps = int(defaults.get("fps", self.default_fps))
+        max_duration_seconds = min(
+            float(defaults.get("max_duration_seconds", self.max_generation_seconds)),
+            self.max_generation_seconds,
+        )
+        max_sequence_length = int(defaults.get("max_sequence_length", 512))
+        if max_fps < 1 or max_sequence_length < 1:
+            raise ValueError("capacity profile requires positive fps and max_sequence_length")
+        tokenizer_sequence_length = getattr(self.pipeline.tokenizer, "seq_len", None)
+        if tokenizer_sequence_length is not None and max_sequence_length < tokenizer_sequence_length:
+            raise ValueError(
+                f"capacity max_sequence_length {max_sequence_length} is smaller than the tokenizer output "
+                f"length {tokenizer_sequence_length}"
+            )
+
+        max_latent_frames = int(math.floor(max_duration_seconds * max_fps / 4)) + 1
+        patch_area = self.pipeline.dit.patch_size[1] * self.pipeline.dit.patch_size[2]
+        max_frame_tokens = math.ceil(self.pipeline.config.max_area / (8 * 8 * patch_area))
+        kv_size = self.pipeline._resolve_self_kv_size(
+            frame_tokens=max_frame_tokens,
+            latent_frames=max_latent_frames,
+            config=self.pipeline.config,
+        )
+        profile = self.pipeline.configure_session_cache_pool(
+            configured_limit=max_sessions,
+            kv_size=kv_size,
+            max_sequence_length=max_sequence_length,
+        )
+        profile.update(
+            {
+                "max_fps": max_fps,
+                "max_duration_seconds": max_duration_seconds,
+                "max_latent_frames": max_latent_frames,
+                "max_frame_tokens": max_frame_tokens,
+            }
+        )
+        self._session_capacity_profile = profile
+        logger.info(
+            "LingBot retained-session capacity configured: effective={} computed={} limiting_device={}",
+            profile["effective_capacity"],
+            profile["computed_capacity"],
+            profile["limiting_device"],
+        )
+        return dict(profile)
+
+    def session_capacity_profile(self) -> dict[str, object] | None:
+        """Return the startup capacity profile for service metadata."""
+        return dict(self._session_capacity_profile) if self._session_capacity_profile is not None else None
 
     def _warmup_session_config(self) -> LingBotWorldFastSessionConfig:
         """Build a single-chunk request matching the service's default shape."""
@@ -225,6 +293,11 @@ class LingBotWorldFastService:
             raise ValueError(f"max_duration_seconds must be positive, got {max_duration_seconds}")
         if max_duration_seconds > self.max_generation_seconds:
             raise ValueError(f"max_duration_seconds must not exceed {self.max_generation_seconds:g}")
+        capacity_profile = self._session_capacity_profile
+        if capacity_profile is not None and fps > int(capacity_profile["max_fps"]):
+            raise ValueError(
+                f"Session fps {fps} exceeds the preallocated capacity profile maximum {capacity_profile['max_fps']}"
+            )
         control_idle_timeout = float(config.get("control_idle_timeout", defaults.get("control_idle_timeout", 10.0)))
         if control_idle_timeout <= 0:
             raise ValueError(f"control_idle_timeout must be positive, got {control_idle_timeout}")
@@ -244,6 +317,13 @@ class LingBotWorldFastService:
                 f"got {duration_seconds:g} seconds"
             )
 
+        max_sequence_length = int(config.get("max_sequence_length", defaults.get("max_sequence_length", 512)))
+        if capacity_profile is not None and max_sequence_length > int(capacity_profile["max_sequence_length"]):
+            raise ValueError(
+                f"Session max_sequence_length {max_sequence_length} exceeds the preallocated capacity profile "
+                f"maximum {capacity_profile['max_sequence_length']}"
+            )
+
         session_config = LingBotWorldFastSessionConfig(
             prompt=config.get("prompt", defaults.get("prompt", "")),
             image=image,
@@ -255,7 +335,7 @@ class LingBotWorldFastService:
             sample_shift=float(config.get("sample_shift", defaults.get("sample_shift", 10.0))),
             seed=int(config.get("seed", defaults.get("seed", 42))),
             max_attention_size=config.get("max_attention_size", defaults.get("max_attention_size")),
-            max_sequence_length=int(config.get("max_sequence_length", defaults.get("max_sequence_length", 512))),
+            max_sequence_length=max_sequence_length,
             intrinsics=intrinsics,
             intrinsics_width=config.get("intrinsics_width", defaults.get("intrinsics_width")),
             intrinsics_height=config.get("intrinsics_height", defaults.get("intrinsics_height")),
@@ -296,6 +376,12 @@ class LingBotWorldFastService:
         with self._sessions_lock:
             if session_id in self._sessions:
                 raise ValueError(f"LingBotWorld session {session_id!r} already exists")
+            if capacity_profile is not None:
+                effective_capacity = int(capacity_profile["effective_capacity"])
+                if len(self._sessions) >= effective_capacity:
+                    raise RuntimeError(
+                        f"LingBot retained-session capacity is exhausted (capacity={effective_capacity})"
+                    )
             self._sessions[session_id] = state
         try:
             self._lease_manager.register(session_id, idle_timeout=control_idle_timeout)

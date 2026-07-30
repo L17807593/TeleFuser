@@ -55,6 +55,20 @@ def test_remote_rank_error_marks_entire_group_failed() -> None:
         process.kill.assert_called_once_with()
 
 
+def test_recoverable_false_result_keeps_worker_group_usable() -> None:
+    worker = _worker()
+    worker.queue_out.get.side_effect = [False, True]
+
+    assert worker._wait_result("initialize_cache") is False
+    assert worker.failed is False
+    assert worker._wait_result("release_cache") is True
+    assert worker.failed is False
+    for process in worker.ctx.processes:
+        process.kill.assert_not_called()
+
+    worker._ensure_usable()
+
+
 def test_close_is_idempotent_and_rejects_new_work() -> None:
     worker = _worker()
     for process in worker.ctx.processes:

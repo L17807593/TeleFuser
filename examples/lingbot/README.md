@@ -181,7 +181,9 @@ flowchart LR
     O --> V[VAE decode actor]
 ```
 
-`max_sessions_per_worker=2` retains two isolated session states; it does not create a second model replica. Only one
+By default, stream-server calculates `max_sessions_per_worker` after warmup and preallocates fixed DiT KV slots.
+Passing `max_sessions_per_worker=2` caps that calculated value at two isolated session states; it does not create a
+second model replica. Only one
 session submits a model chunk at a time. With a waiter present, a holder that has no valid control activity for
 `control_idle_timeout` yields after its current chunk, while its cache and retained slot remain allocated. The
 browser sends a one-second `control_state` heartbeat while a key remains held. Use separate service processes and

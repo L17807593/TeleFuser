@@ -565,6 +565,61 @@ def test_create_session_rejects_invalid_pipeline_configuration() -> None:
     assert service._sessions == {}
 
 
+def test_create_session_admits_capacity_atomically_and_reuses_released_slot() -> None:
+    pipeline = MagicMock()
+    barrier = threading.Barrier(2)
+
+    def control_context(config: LingBotWorldFastSessionConfig) -> MagicMock:
+        barrier.wait()
+        return MagicMock(config=config)
+
+    pipeline.control_context.side_effect = control_context
+    service = LingBotWorldFastService(pipeline)
+    service._session_capacity_profile = {
+        "effective_capacity": 1,
+        "max_fps": 16,
+        "max_sequence_length": 512,
+    }
+    admitted: list[str] = []
+    rejected: list[BaseException] = []
+
+    def create(session_id: str) -> None:
+        try:
+            admitted.append(
+                service.create_session(
+                    {
+                        "session_id": session_id,
+                        "image": Image.new("RGB", (8, 8)),
+                    }
+                )
+            )
+        except BaseException as exc:
+            rejected.append(exc)
+
+    threads = [threading.Thread(target=create, args=(f"session-{index}",)) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(admitted) == 1
+    assert len(rejected) == 1
+    assert isinstance(rejected[0], RuntimeError)
+    assert str(rejected[0]) == "LingBot retained-session capacity is exhausted (capacity=1)"
+    assert list(service._sessions) == admitted
+
+    service.close_session(admitted[0])
+    pipeline.control_context.side_effect = None
+    reused = service.create_session(
+        {
+            "session_id": "session-reused",
+            "image": Image.new("RGB", (8, 8)),
+        }
+    )
+    assert reused == "session-reused"
+    service.close_session(reused)
+
+
 def test_create_session_limits_stream_generation_to_20_seconds() -> None:
     pipeline = MagicMock()
     service = LingBotWorldFastService(pipeline)

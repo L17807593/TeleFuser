@@ -55,7 +55,7 @@ def test_cached_cross_attention_uses_unified_attention_and_bsnd_cache() -> None:
     attention = CachedCrossAttention(dim=32, num_heads=4)
     attention_config = AttentionConfig.dense_attention(AttnImplType.SAGE_ATTN_2_8_8_SM90)
     attention.attention_config = attention_config
-    cache: dict[str, torch.Tensor | bool] = {"is_init": False}
+    cache: dict[str, torch.Tensor | bool | int] = {"is_init": False}
     calls: list[tuple[torch.Size, torch.Size, AttentionConfig]] = []
 
     def fake_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **kwargs: object) -> torch.Tensor:
@@ -74,6 +74,26 @@ def test_cached_cross_attention_uses_unified_attention_and_bsnd_cache() -> None:
     ]
     assert cache["k"].shape == torch.Size([1, 5, 4, 8])
     assert cache["v"].shape == torch.Size([1, 5, 4, 8])
+    assert cache["is_init"] is True
+
+
+def test_cached_cross_attention_writes_into_preallocated_storage() -> None:
+    attention = CachedCrossAttention(dim=32, num_heads=4)
+    cache: dict[str, torch.Tensor | bool | int] = {
+        "k": torch.empty(1, 8, 4, 8),
+        "v": torch.empty(1, 8, 4, 8),
+        "is_init": False,
+        "sequence_length": 0,
+    }
+    k_pointer = cache["k"].data_ptr()
+    v_pointer = cache["v"].data_ptr()
+
+    with patch("telefuser.models.lingbot_world_fast_dit.attn_func", side_effect=lambda q, _k, _v, **_kwargs: q):
+        attention(torch.randn(1, 6, 32), torch.randn(1, 5, 32), cache)
+
+    assert cache["k"].data_ptr() == k_pointer
+    assert cache["v"].data_ptr() == v_pointer
+    assert cache["sequence_length"] == 5
     assert cache["is_init"] is True
 
 

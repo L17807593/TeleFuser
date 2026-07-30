@@ -158,6 +158,21 @@ class LiveKitScheduler:
             worker.last_heartbeat_at = utc_timestamp()
             return worker.model_copy(deep=True)
 
+    def update_worker_capacity(self, worker_id: str, capacity: int) -> WorkerState:
+        """Apply hardware-calculated retained-session capacity before admission starts."""
+        if capacity < 1:
+            raise ValueError("worker session capacity must be positive")
+        with self._lock:
+            worker = self._workers[worker_id]
+            if len(worker.session_ids) > capacity:
+                raise RuntimeError(
+                    f"Worker {worker_id} already owns {len(worker.session_ids)} sessions, "
+                    f"cannot reduce capacity to {capacity}"
+                )
+            worker.session_capacity = capacity
+            worker.last_heartbeat_at = utc_timestamp()
+            return worker.model_copy(deep=True)
+
     def fail_worker(self, worker_id: str, error: str) -> WorkerState:
         """Mark a worker failed."""
         with self._lock:

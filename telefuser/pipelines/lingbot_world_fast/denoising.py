@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
+from telefuser.cache.session_memory import SessionSlotPool
 from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig
 from telefuser.core.module_manager import ModuleManager
@@ -40,10 +41,110 @@ class _DenoisingCacheState:
     scheduler: FlowUniPCMultistepScheduler
     timesteps: torch.Tensor
     self_kv_cache: list[dict[str, torch.Tensor | int]]
-    crossattn_cache: list[dict[str, torch.Tensor | bool]]
+    crossattn_cache: list[dict[str, torch.Tensor | bool | int]]
     generator: torch.Generator
     noise_generator: torch.Generator
     noise_shape: tuple[int, int, int, int, int]
+    pool_slot: int | None = None
+
+
+@dataclass(frozen=True)
+class DenoisingCachePoolProfile:
+    """Fixed cache-pool dimensions and storage size for one worker rank."""
+
+    capacity: int
+    batch_size: int
+    kv_size: int
+    max_sequence_length: int
+    bytes_per_session: int
+    allocated_bytes: int
+
+
+class _DenoisingCachePool:
+    """Preallocated rank-local KV storage split into reusable session slots."""
+
+    def __init__(
+        self,
+        *,
+        capacity: int,
+        num_layers: int,
+        batch_size: int,
+        kv_size: int,
+        max_sequence_length: int,
+        num_heads: int,
+        local_num_heads: int,
+        head_dim: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        self.capacity = capacity
+        self.num_layers = num_layers
+        self.batch_size = batch_size
+        self.kv_size = kv_size
+        self.max_sequence_length = max_sequence_length
+        self._slots = SessionSlotPool(capacity, name="LingBot KV cache")
+
+        self.self_k = torch.empty(
+            (capacity, num_layers, batch_size, kv_size, local_num_heads, head_dim),
+            dtype=dtype,
+            device=device,
+        )
+        self.self_v = torch.empty_like(self.self_k)
+        self.cross_k = torch.empty(
+            (capacity, num_layers, batch_size, max_sequence_length, num_heads, head_dim),
+            dtype=dtype,
+            device=device,
+        )
+        self.cross_v = torch.empty_like(self.cross_k)
+        self.cursors = torch.zeros((capacity, num_layers, 2), dtype=torch.int64, device=device)
+
+    @property
+    def allocated_bytes(self) -> int:
+        tensors = (self.self_k, self.self_v, self.cross_k, self.cross_v, self.cursors)
+        return sum(tensor.numel() * tensor.element_size() for tensor in tensors)
+
+    @property
+    def bytes_per_session(self) -> int:
+        return self.allocated_bytes // self.capacity
+
+    def acquire(
+        self,
+    ) -> tuple[int, list[dict[str, torch.Tensor | int]], list[dict[str, torch.Tensor | bool | int]]]:
+        acquired = self.try_acquire()
+        if acquired is None:
+            raise RuntimeError(f"LingBot KV cache pool is full (capacity={self.capacity})")
+        return acquired
+
+    def try_acquire(
+        self,
+    ) -> tuple[int, list[dict[str, torch.Tensor | int]], list[dict[str, torch.Tensor | bool | int]]] | None:
+        """Acquire reusable KV views without raising on capacity exhaustion."""
+        slot = self._slots.try_acquire()
+        if slot is None:
+            return None
+        self.cursors[slot].zero_()
+        self_cache = [
+            {
+                "k": self.self_k[slot, layer],
+                "v": self.self_v[slot, layer],
+                "global_end_index": self.cursors[slot, layer, 0],
+                "local_end_index": self.cursors[slot, layer, 1],
+            }
+            for layer in range(self.num_layers)
+        ]
+        cross_cache = [
+            {
+                "k": self.cross_k[slot, layer],
+                "v": self.cross_v[slot, layer],
+                "is_init": False,
+                "sequence_length": 0,
+            }
+            for layer in range(self.num_layers)
+        ]
+        return slot, self_cache, cross_cache
+
+    def release(self, slot: int) -> None:
+        self._slots.release(slot)
 
 
 class LingBotWorldFastDenoisingStage(BaseStage):
@@ -62,6 +163,7 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         self.dit.set_attention_config(model_runtime_config.attention_config)
         self.model_names = ["dit"]
         self._cache_registry: dict[int, _DenoisingCacheState] = {}
+        self._cache_pool: _DenoisingCachePool | None = None
         if model_runtime_config.parallel_config.world_size == 1 and model_runtime_config.compile_config.enabled:
             logger.info(f"Enabling torch.compile for {self.name}")
             self.dit = torch.compile(self.dit, **model_runtime_config.compile_config.get_compile_kwargs())
@@ -123,7 +225,7 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         self,
         batch_size: int,
         max_sequence_length: int,
-    ) -> list[dict[str, torch.Tensor | bool]]:
+    ) -> list[dict[str, torch.Tensor | bool | int]]:
         head_dim = self.dit.dim // self.dit.num_heads
         shape = (batch_size, max_sequence_length, self.dit.num_heads, head_dim)
         return [
@@ -131,9 +233,80 @@ class LingBotWorldFastDenoisingStage(BaseStage):
                 "k": torch.zeros(shape, dtype=self.torch_dtype, device=self.device),
                 "v": torch.zeros(shape, dtype=self.torch_dtype, device=self.device),
                 "is_init": False,
+                "sequence_length": 0,
             }
             for _ in range(self.dit.num_layers)
         ]
+
+    def _cache_dimensions(self) -> tuple[int, int, int]:
+        head_dim = self.dit.dim // self.dit.num_heads
+        device_mesh = getattr(self.dit, "device_mesh", None)
+        ulysses_world_size = get_ulysses_world_size(device_mesh)
+        if self.dit.num_heads % ulysses_world_size:
+            raise ValueError(
+                f"LingBot attention heads {self.dit.num_heads} are not divisible by SP degree {ulysses_world_size}"
+            )
+        return head_dim, self.dit.num_heads, self.dit.num_heads // ulysses_world_size
+
+    def estimate_session_cache_bytes(self, batch_size: int, kv_size: int, max_sequence_length: int) -> int:
+        """Return exact persistent DiT KV bytes for one session on this rank."""
+        head_dim, num_heads, local_num_heads = self._cache_dimensions()
+        element_size = torch.empty((), dtype=self.torch_dtype).element_size()
+        self_kv = 2 * self.dit.num_layers * batch_size * kv_size * local_num_heads * head_dim * element_size
+        cross_kv = 2 * self.dit.num_layers * batch_size * max_sequence_length * num_heads * head_dim * element_size
+        cursors = self.dit.num_layers * 2 * torch.empty((), dtype=torch.int64).element_size()
+        return self_kv + cross_kv + cursors
+
+    def configure_cache_pool(
+        self,
+        capacity: int,
+        batch_size: int,
+        kv_size: int,
+        max_sequence_length: int,
+    ) -> DenoisingCachePoolProfile:
+        """Allocate all persistent DiT KV slots before accepting sessions."""
+        if capacity < 1:
+            raise ValueError(f"cache pool capacity must be positive, got {capacity}")
+        if self._cache_registry:
+            raise RuntimeError("cannot configure the LingBot KV cache pool while sessions are active")
+        existing = getattr(self, "_cache_pool", None)
+        if existing is not None:
+            profile = DenoisingCachePoolProfile(
+                capacity=existing.capacity,
+                batch_size=existing.batch_size,
+                kv_size=existing.kv_size,
+                max_sequence_length=existing.max_sequence_length,
+                bytes_per_session=existing.bytes_per_session,
+                allocated_bytes=existing.allocated_bytes,
+            )
+            requested = (capacity, batch_size, kv_size, max_sequence_length)
+            current = (profile.capacity, profile.batch_size, profile.kv_size, profile.max_sequence_length)
+            if requested != current:
+                raise RuntimeError(f"LingBot KV cache pool is already configured as {current}, requested {requested}")
+            return profile
+
+        head_dim, num_heads, local_num_heads = self._cache_dimensions()
+        pool = _DenoisingCachePool(
+            capacity=capacity,
+            num_layers=self.dit.num_layers,
+            batch_size=batch_size,
+            kv_size=kv_size,
+            max_sequence_length=max_sequence_length,
+            num_heads=num_heads,
+            local_num_heads=local_num_heads,
+            head_dim=head_dim,
+            dtype=self.torch_dtype,
+            device=self.device,
+        )
+        self._cache_pool = pool
+        return DenoisingCachePoolProfile(
+            capacity=capacity,
+            batch_size=batch_size,
+            kv_size=kv_size,
+            max_sequence_length=max_sequence_length,
+            bytes_per_session=pool.bytes_per_session,
+            allocated_bytes=pool.allocated_bytes,
+        )
 
     @with_model_offload(["dit"])
     def initialize_cache(
@@ -158,15 +331,41 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         generator.set_state(torch.tensor(generator_state, dtype=torch.uint8))
         noise_generator = torch.Generator(device=self.device)
         noise_generator.set_state(torch.tensor(noise_generator_state, dtype=torch.uint8))
-        state = _DenoisingCacheState(
-            scheduler=scheduler,
-            timesteps=timesteps,
-            self_kv_cache=self._init_self_kv_cache(batch_size, kv_size),
-            crossattn_cache=self._init_crossattn_cache(batch_size, max_sequence_length),
-            generator=generator,
-            noise_generator=noise_generator,
-            noise_shape=noise_shape,
-        )
+        pool = getattr(self, "_cache_pool", None)
+        pool_slot = None
+        try:
+            if pool is None:
+                self_kv_cache = self._init_self_kv_cache(batch_size, kv_size)
+                crossattn_cache = self._init_crossattn_cache(batch_size, max_sequence_length)
+            else:
+                if (
+                    batch_size != pool.batch_size
+                    or kv_size > pool.kv_size
+                    or max_sequence_length > pool.max_sequence_length
+                ):
+                    raise ValueError(
+                        "Session cache dimensions exceed the fixed LingBot cache profile: "
+                        f"requested={(batch_size, kv_size, max_sequence_length)}, "
+                        f"configured={(pool.batch_size, pool.kv_size, pool.max_sequence_length)}"
+                    )
+                acquired = pool.try_acquire()
+                if acquired is None:
+                    return False
+                pool_slot, self_kv_cache, crossattn_cache = acquired
+            state = _DenoisingCacheState(
+                scheduler=scheduler,
+                timesteps=timesteps,
+                self_kv_cache=self_kv_cache,
+                crossattn_cache=crossattn_cache,
+                generator=generator,
+                noise_generator=noise_generator,
+                noise_shape=noise_shape,
+                pool_slot=pool_slot,
+            )
+        except Exception:
+            if pool is not None and pool_slot is not None:
+                pool.release(pool_slot)
+            raise
         self._cache_registry[cache_handle] = state
         return True
 
@@ -198,7 +397,7 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         scheduler: FlowUniPCMultistepScheduler,
         control_chunk: torch.Tensor | None,
         self_kv_cache: list[dict[str, torch.Tensor | int]],
-        crossattn_cache: list[dict[str, torch.Tensor | bool]],
+        crossattn_cache: list[dict[str, torch.Tensor | bool | int]],
         current_start: int,
         max_attention_size: int,
         generator: torch.Generator | None = None,
@@ -308,4 +507,10 @@ class LingBotWorldFastDenoisingStage(BaseStage):
 
     def release_cache(self, cache_handle: int) -> bool:
         """Idempotently release worker-local state for one generation session."""
-        return self._cache_registry.pop(cache_handle, None) is not None
+        state = self._cache_registry.pop(cache_handle, None)
+        if state is None:
+            return False
+        pool = getattr(self, "_cache_pool", None)
+        if pool is not None and state.pool_slot is not None:
+            pool.release(state.pool_slot)
+        return True

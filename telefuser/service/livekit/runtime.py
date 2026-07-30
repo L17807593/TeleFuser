@@ -55,7 +55,7 @@ class LiveKitServeRuntime:
             num_workers=config.num_workers,
             gpu_groups=config.worker_gpu_groups(),
             queue_size=config.queue_size,
-            max_sessions_per_worker=config.max_sessions_per_worker,
+            max_sessions_per_worker=config.session_capacity_limit() or 1,
         )
         self.token_service = token_service or LiveKitTokenService(
             api_key=config.livekit_api_key,
@@ -69,6 +69,7 @@ class LiveKitServeRuntime:
         self._closing = False
         self._closed = False
         self._finished_sessions: set[str] = set()
+        self._worker_capacity_profiles: dict[str, dict[str, object]] = {}
         self._lock = threading.RLock()
 
     @property
@@ -169,6 +170,12 @@ class LiveKitServeRuntime:
         """Apply a worker lifecycle callback to scheduler state."""
         self.scheduler.update_worker_status(worker_id, status)
 
+    def on_worker_capacity(self, worker_id: str, capacity: int, profile: dict[str, object] | None = None) -> None:
+        """Apply worker-local hardware capacity before the runtime becomes ready."""
+        self.scheduler.update_worker_capacity(worker_id, capacity)
+        if profile is not None:
+            self._worker_capacity_profiles[worker_id] = dict(profile)
+
     def on_session_status(self, session_id: str, status: SessionStatus, error: str | None = None) -> None:
         """Apply a worker-reported public session state."""
         if self.registry.require(session_id).status not in TERMINAL_SESSION_STATUSES:
@@ -203,18 +210,22 @@ class LiveKitServeRuntime:
     def metadata(self) -> dict:
         """Return runtime metadata for `/v1/service/metadata`."""
         health = self.health()
-        return {
+        metadata = {
             "service_type": "stream",
             "transport": "livekit",
             "pipeline_file": self.pipeline_file,
             "livekit_url": self.config.livekit_url,
             "num_workers": self.config.num_workers,
-            "max_sessions_per_worker": self.config.max_sessions_per_worker,
+            "max_sessions_per_worker": min(worker.session_capacity for worker in self.scheduler.workers()),
+            "configured_max_sessions_per_worker": self.config.max_sessions_per_worker,
             "control_idle_timeout": self.config.control_idle_timeout,
             "worker_mode": self.config.worker_mode,
             "queue_size": self.config.queue_size,
             **health.model_dump(),
         }
+        if self._worker_capacity_profiles:
+            metadata["session_capacity"] = dict(self._worker_capacity_profiles)
+        return metadata
 
     async def aclose(self) -> None:
         """Stop runtime-owned background resources."""

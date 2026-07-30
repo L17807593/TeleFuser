@@ -26,6 +26,7 @@ class _PipelineAdapter:
         self.pushed: list[tuple[str, dict]] = []
         self.closed: list[str] = []
         self.queues: dict[str, asyncio.Queue[dict | None]] = {}
+        self.capacity_profile: dict[str, object] | None = None
 
     def start(self, pipeline_file: str, *, skip_validation: bool = False, gpu_num: int = 1) -> None:
         del pipeline_file, skip_validation, gpu_num
@@ -52,6 +53,10 @@ class _PipelineAdapter:
 
     def close_session(self, session_id: str) -> None:
         self.closed.append(session_id)
+
+    def configure_session_capacity(self, max_sessions: int | None) -> dict[str, object] | None:
+        del max_sessions
+        return self.capacity_profile
 
 
 class _RoomClient:
@@ -172,6 +177,29 @@ def test_multi_session_worker_loads_one_pipeline_and_routes_two_rooms() -> None:
         assert sorted(adapter.closed) == ["a", "b"]
         assert all(room.disconnected for room in rooms)
         assert adapter.closed_service is True
+
+    asyncio.run(_run())
+
+
+def test_multi_session_worker_uses_pipeline_calculated_capacity() -> None:
+    async def _run() -> None:
+        adapter = _PipelineAdapter()
+        adapter.capacity_profile = {"effective_capacity": 3}
+        worker = MultiSessionLiveKitWorker(
+            worker_id="worker-0",
+            config=LiveKitServeConfig(
+                livekit_url="wss://livekit.example",
+                livekit_api_key="key",
+                livekit_api_secret="secret",
+            ),
+            pipeline_file="pipeline.py",
+            token_service=_TokenService(),
+            pipeline_adapter=adapter,
+        )
+
+        await worker.start(skip_validation=True)
+        assert worker._session_capacity == 3
+        await worker.stop()
 
     asyncio.run(_run())
 

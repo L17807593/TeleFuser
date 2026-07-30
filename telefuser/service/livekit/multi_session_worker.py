@@ -63,6 +63,7 @@ class MultiSessionLiveKitWorker:
         self._sessions: dict[str, LiveKitSessionRunner] = {}
         self._session_worker_statuses: dict[str, str] = {}
         self._started = False
+        self._session_capacity = self.config.session_capacity_limit() or 1
 
     async def start(self, *, skip_validation: bool = False) -> None:
         """Load the shared pipeline exactly once."""
@@ -73,7 +74,16 @@ class MultiSessionLiveKitWorker:
             skip_validation=skip_validation,
             gpu_num=self.gpu_num,
         )
-        if self.config.max_sessions_per_worker > 1 and self.pipeline_adapter.stream_mode != STREAM_MODE_BIDIRECTIONAL:
+        profile = None
+        configure_capacity = getattr(self.pipeline_adapter, "configure_session_capacity", None)
+        if self.pipeline_adapter.stream_mode == STREAM_MODE_BIDIRECTIONAL and callable(configure_capacity):
+            profile = configure_capacity(self.config.session_capacity_limit())
+        if profile is not None:
+            self._session_capacity = int(profile["effective_capacity"])
+        capacity_callback = getattr(self.event_sink, "on_worker_capacity", None)
+        if callable(capacity_callback):
+            capacity_callback(self.worker_id, self._session_capacity, profile)
+        if self._session_capacity > 1 and self.pipeline_adapter.stream_mode != STREAM_MODE_BIDIRECTIONAL:
             await self.pipeline_adapter.aclose()
             raise RuntimeError("Multiple retained sessions require a BidirectionalService pipeline")
         self._started = True
@@ -85,7 +95,7 @@ class MultiSessionLiveKitWorker:
             raise RuntimeError(f"Worker {self.worker_id} is not started")
         if record.session_id in self._sessions:
             raise RuntimeError(f"Session {record.session_id} is already running")
-        if len(self._sessions) >= self.config.max_sessions_per_worker:
+        if len(self._sessions) >= self._session_capacity:
             raise RuntimeError(f"Worker {self.worker_id} retained-session capacity is full")
 
         self._session_worker_statuses[record.session_id] = "assigned"
