@@ -40,8 +40,8 @@ fi
 
 # Install dependencies if needed
 print_section "Installing dependencies"
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu -q
 pip install -e ".[dev]" -q
-pip install torch --index-url https://download.pytorch.org/whl/cpu -q
 check_result "Dependencies installation"
 
 # Run lint checks
