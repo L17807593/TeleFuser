@@ -417,6 +417,7 @@ def apply_lingbot_qwen25_vl_patch():
 import torch
 from torch import nn
 import torch.nn.functional as F
+from types import MethodType
 from typing import Callable, Optional, Tuple
 
 from transformers.generation import GenerationMixin
@@ -426,7 +427,6 @@ from transformers.processing_utils import Unpack
 from transformers.utils import logging
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig, Qwen3VLTextConfig, Qwen3VLVisionConfig
-import transformers.models.qwen3_vl.modeling_qwen3_vl as hf_qwen3vl
 from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLForConditionalGeneration as _Qwen3VLForConditionalGeneration,
     Qwen3VLModel as _Qwen3VLModel,
@@ -447,11 +447,9 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
 logger = logging.get_logger(__name__)
 
 
-def _qwen3vl_no_init_weights(self, module):
-    return
-
-_Qwen3VLPreTrainedModel._init_weights = _qwen3vl_no_init_weights
-Qwen3VLPreTrainedModel = _Qwen3VLPreTrainedModel
+class Qwen3VLPreTrainedModel(_Qwen3VLPreTrainedModel):
+    def _init_weights(self, module):
+        return
 
 
 class Qwen3VLVisionAttention(nn.Module):
@@ -656,6 +654,9 @@ class Qwen3VLModel(_Qwen3VLModel):
     def __init__(self, config: Qwen3VLConfig):
         Qwen3VLPreTrainedModel.__init__(self, config)
         self.visual = Qwen3VLVisionModel._from_config(config.vision_config)
+        self.visual.blocks = nn.ModuleList([Qwen3VLVisionBlock(config.vision_config) for _ in self.visual.blocks])
+        self.visual.forward = MethodType(forward_without_grid_thw, self.visual)
+        self.visual.preprcess_grid_thw = MethodType(preprcess_grid_thw, self.visual)
         self.language_model = Qwen3VLTextModel._from_config(config.text_config)
         self.rope_deltas = None
         self.post_init()
@@ -733,13 +734,6 @@ def forward_without_grid_thw(
 
 
 def apply_lingbot_qwen3_vl_patch():
-    logger.info("apply Qwen3-VL LingBot patch")
-    hf_qwen3vl.Qwen3VLPreTrainedModel = Qwen3VLPreTrainedModel
-    hf_qwen3vl.Qwen3VLTextDecoderLayer = Qwen3VLTextDecoderLayer
-    hf_qwen3vl.Qwen3VLTextModel = Qwen3VLTextModel
-    hf_qwen3vl.Qwen3VLModel = Qwen3VLModel
-    hf_qwen3vl.Qwen3VLForConditionalGeneration = Qwen3VLForConditionalGeneration
-    hf_qwen3vl.Qwen3VLVisionAttention = Qwen3VLVisionAttention
-    hf_qwen3vl.Qwen3VLVisionBlock = Qwen3VLVisionBlock
-    hf_qwen3vl.Qwen3VLVisionModel.forward = forward_without_grid_thw
-    hf_qwen3vl.Qwen3VLVisionModel.preprcess_grid_thw = preprcess_grid_thw
+    logger.warning_once(
+        "apply_lingbot_qwen3_vl_patch is deprecated; LingBot-VLA v2 now installs Qwen3-VL changes per instance."
+    )

@@ -1018,116 +1018,9 @@ def _next_power_of_2(n: int) -> int:
 # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
 _HAS_TRITON = False
-try:
-    import triton
-    import triton.language as tl
+# Training-only MoE auxiliary losses keep the PyTorch vectorized path in the
+# model loader. Triton kernels live only under telefuser.kernel.triton.
 
-    _HAS_TRITON = True
-
-    # 鈹€鈹€ Kernel 1: per-segment topK counting (for sequence_wise_balance_loss) 鈹€鈹€
-    @triton.jit
-    def _topk_segment_count_kernel(
-        logits_ptr,         # [N_total, E]
-        seg_starts_ptr,     # [S_total]
-        seg_lengths_ptr,    # [S_total]
-        f_out_ptr,          # [S_total, E]
-        stride_logits_n,    # stride of logits along token dim
-        E: tl.constexpr,    # actual num_experts
-        K: tl.constexpr,    # top_k
-        BLOCK_E: tl.constexpr,  # next power of 2 >= E
-    ):
-        """Each program computes f_i (expert counts) for one segment.
-
-        Iterates over tokens in the segment, performs K rounds of argmax to
-        find top-K experts, and accumulates per-expert hit counts.
-        No gradient needed 鈥?f_i is always detached in the loss.
-        """
-        seg_id = tl.program_id(0)
-        seg_start = tl.load(seg_starts_ptr + seg_id)
-        seg_len = tl.load(seg_lengths_ptr + seg_id)
-
-        expert_offs = tl.arange(0, BLOCK_E)  # [BLOCK_E]
-        mask_e = expert_offs < E
-        f_acc = tl.zeros((BLOCK_E,), dtype=tl.float32)
-
-        for t in range(0, seg_len):
-            row_ptr = logits_ptr + (seg_start + t) * stride_logits_n
-            logits_row = tl.load(row_ptr + expert_offs, mask=mask_e, other=float('-inf'))
-
-            # K rounds of argmax to find top-K indices
-            row_copy = logits_row
-            for _k in range(K):
-                max_val = tl.max(row_copy, axis=0)
-                is_max = (row_copy == max_val)
-                # Distribute count evenly among ties (rare with float32)
-                n_ties = tl.sum(is_max.to(tl.float32), axis=0)
-                f_acc += tl.where(is_max, 1.0 / n_ties, 0.0)
-                row_copy = tl.where(is_max, float('-inf'), row_copy)
-
-        # Write f_count (unnormalized) 鈥?caller normalizes by (E / K) / seg_len
-        out_ptr = f_out_ptr + seg_id * E
-        tl.store(out_ptr + expert_offs, f_acc, mask=mask_e)
-
-    # 鈹€鈹€ Kernel 2: blocked topK counting (for load_balancing_loss_func) 鈹€鈹€
-    @triton.jit
-    def _topk_count_with_mask_kernel(
-        routing_weights_ptr,  # [N, E] 鈥?softmax probabilities
-        mask_ptr,             # [N] 鈥?1.0 for valid, 0.0 for padding
-        partial_f_ptr,        # [num_blocks, E] 鈥?partial expert counts
-        partial_p_ptr,        # [num_blocks, E] 鈥?partial masked prob sums
-        N,
-        stride_rw_n,          # stride along token dim
-        has_mask: tl.constexpr,
-        E: tl.constexpr,
-        K: tl.constexpr,
-        BLOCK_E: tl.constexpr,
-        BLOCK_N: tl.constexpr,
-    ):
-        """Each program accumulates topK counts + masked probs for a token block.
-
-        Two-phase reduction: writes partial [E] results per block;
-        caller sums across blocks in PyTorch.
-        """
-        pid = tl.program_id(0)
-        n_start = pid * BLOCK_N
-
-        expert_offs = tl.arange(0, BLOCK_E)
-        mask_e = expert_offs < E
-        f_local = tl.zeros((BLOCK_E,), dtype=tl.float32)
-        p_local = tl.zeros((BLOCK_E,), dtype=tl.float32)
-
-        for t_offset in range(BLOCK_N):
-            t = n_start + t_offset
-            # Guard: skip if t >= N (handles last block)
-            if t < N:
-                row_ptr = routing_weights_ptr + t * stride_rw_n
-                rw_row = tl.load(row_ptr + expert_offs, mask=mask_e, other=0.0)
-
-                if has_mask:
-                    m = tl.load(mask_ptr + t)
-                else:
-                    m = 1.0
-
-                # Accumulate masked probs
-                p_local += rw_row * m
-
-                # TopK counting
-                row_copy = rw_row
-                for _k in range(K):
-                    max_val = tl.max(row_copy, axis=0)
-                    is_max = (row_copy == max_val)
-                    n_ties = tl.sum(is_max.to(tl.float32), axis=0)
-                    f_local += tl.where(is_max, m / n_ties, 0.0)
-                    row_copy = tl.where(is_max, float('-inf'), row_copy)
-
-        # Write partial results (only E valid elements)
-        f_ptr = partial_f_ptr + pid * E
-        p_ptr = partial_p_ptr + pid * E
-        tl.store(f_ptr + expert_offs, f_local, mask=mask_e)
-        tl.store(p_ptr + expert_offs, p_local, mask=mask_e)
-
-except ImportError:
-    pass
 
 
 # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
@@ -1229,74 +1122,13 @@ def _vectorized_topk_count(
 # Section 3: Triton-accelerated wrappers
 # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
-def _triton_segment_f_i(
-    logits: torch.Tensor,         # [N_total, E]
-    seg_starts: torch.Tensor,     # [S_total]
-    seg_lengths: torch.Tensor,    # [S_total]
-    top_k: int,
-) -> torch.Tensor:
-    """Compute f_i per segment using the Triton kernel. Returns [S_total, E]."""
-    N, E = logits.shape
-    S_total = seg_starts.shape[0]
-    BLOCK_E = _next_power_of_2(E)
-
-    f_counts = torch.zeros(S_total, E, device=logits.device, dtype=torch.float32)
-
-    _topk_segment_count_kernel[(S_total,)](
-        logits,
-        seg_starts,
-        seg_lengths,
-        f_counts,
-        logits.stride(0),
-        E=E,
-        K=top_k,
-        BLOCK_E=BLOCK_E,
-    )
-
-    # Normalize: f_i = (E / K) * counts / T_s
-    inv_lens = (float(E) / top_k) / seg_lengths.unsqueeze(1).float().clamp(min=1)
-    return f_counts * inv_lens
+def _triton_segment_f_i(*args, **kwargs):
+    raise RuntimeError("LingBot-VLA v2 sequence-wise Triton loss was removed from models; use the PyTorch fallback")
 
 
-def _triton_topk_count(
-    routing_weights: torch.Tensor,  # [N, E]
-    top_k: int,
-    flat_mask: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """Compute tokens_per_expert [E] using the Triton kernel."""
-    N, E = routing_weights.shape
-    BLOCK_E = _next_power_of_2(E)
-    BLOCK_N = 256
-    num_blocks = (N + BLOCK_N - 1) // BLOCK_N
+def _triton_topk_count(*args, **kwargs):
+    raise RuntimeError("LingBot-VLA v2 load-balancing Triton loss was removed from models; use the PyTorch fallback")
 
-    partial_f = torch.zeros(num_blocks, E, device=routing_weights.device, dtype=torch.float32)
-    partial_p = torch.zeros(num_blocks, E, device=routing_weights.device, dtype=torch.float32)
-
-    has_mask = flat_mask is not None
-    _topk_count_with_mask_kernel[(num_blocks,)](
-        routing_weights,
-        flat_mask if has_mask else routing_weights,  # dummy ptr when no mask
-        partial_f,
-        partial_p,
-        N,
-        routing_weights.stride(0),
-        has_mask=has_mask,
-        E=E,
-        K=top_k,
-        BLOCK_E=BLOCK_E,
-        BLOCK_N=BLOCK_N,
-    )
-
-    # Phase 2: reduce across blocks
-    tokens_per_expert = partial_f.sum(dim=0)  # [E]
-
-    if flat_mask is not None:
-        n_valid = flat_mask.sum().clamp(min=1)
-    else:
-        n_valid = float(N)
-    tokens_per_expert = tokens_per_expert / n_valid
-
-    return tokens_per_expert
 
 
 # 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
@@ -1812,6 +1644,5 @@ def load_lingbot_vla_v2(
             "checkpoint_variant": checkpoint_variant,
             "checkpoint_path": str(checkpoint_path),
         },
-        strict=True,
     )
     return module_manager.fetch_module("lingbot_vla_v2")

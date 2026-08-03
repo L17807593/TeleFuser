@@ -3171,7 +3171,6 @@ __all__ = [
 # __V2_END__
 
 from telefuser.models.lingbot_vla_v2_loader import LingBotVlaV2StateDictConverter
-from telefuser.models.lingbot_vla_v2_qwen import apply_lingbot_qwen3_vl_patch
 
 
 class LingBotVlaV2Model(LingbotVlaV2Policy):
@@ -3180,7 +3179,6 @@ class LingBotVlaV2Model(LingbotVlaV2Policy):
     name = "lingbot_vla_v2"
 
     def __init__(self, config, eval=True):
-        apply_lingbot_qwen3_vl_patch()
         super().__init__(config=config, eval=eval)
 
     @staticmethod

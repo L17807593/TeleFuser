@@ -61,6 +61,18 @@ def test_action_chunk_is_marked_unverified() -> None:
     assert chunk.canonical_normalized_actions is None
 
 
+def test_default_profile_loads_bundled_upstream_stats() -> None:
+    profile = RobotWinProfile.default()
+
+    canonical = profile.normalize_state(torch.zeros(14))
+    chunk = profile.structure_actions(torch.zeros(1, 55))
+
+    assert canonical.shape == (55,)
+    assert torch.isfinite(canonical).all()
+    assert chunk.raw_actions.shape == (1, 14)
+    assert torch.isfinite(chunk.raw_actions).all()
+
+
 def test_profile_rejects_invalid_state_and_action_shapes() -> None:
     profile = RobotWinProfile(_stats())
 
