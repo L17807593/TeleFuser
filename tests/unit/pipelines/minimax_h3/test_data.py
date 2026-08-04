@@ -152,8 +152,20 @@ def test_ref2va_probed_clip_and_total_duration_limits() -> None:
         {"type": "video", "uri": "file:///two.mp4", "role": "reference"},
         {"type": "audio", "uri": "file:///voice.wav", "role": "reference"},
     ]
-    minimax_h3_validate_reference_media_facts(conditions, {1: 7.5, 2: 7.5, 3: 2.0})
+    minimax_h3_validate_reference_media_facts(
+        conditions,
+        video_duration_seconds_by_condition={1: 7.5, 2: 7.5},
+        audio_duration_seconds_by_condition={3: 2.0},
+    )
     with pytest.raises(ValueError, match="video total duration"):
-        minimax_h3_validate_reference_media_facts(conditions, {1: 8.0, 2: 7.1, 3: 2.0})
-    with pytest.raises(ValueError, match=r"conditions\[3\] duration"):
-        minimax_h3_validate_reference_media_facts(conditions, {1: 7.5, 2: 7.5, 3: 1.9})
+        minimax_h3_validate_reference_media_facts(
+            conditions,
+            video_duration_seconds_by_condition={1: 8.0, 2: 7.1},
+            audio_duration_seconds_by_condition={3: 2.0},
+        )
+    with pytest.raises(ValueError, match=r"conditions\[3\] audio duration"):
+        minimax_h3_validate_reference_media_facts(
+            conditions,
+            video_duration_seconds_by_condition={1: 7.5, 2: 7.5},
+            audio_duration_seconds_by_condition={3: 1.9},
+        )

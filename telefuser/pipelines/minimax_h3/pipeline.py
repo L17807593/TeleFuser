@@ -119,16 +119,22 @@ class MiniMaxH3Pipeline(BasePipeline):
         canonical: dict[str, Any],
         facts: dict[int, MiniMaxH3MaterialFacts],
     ) -> tuple[dict[str, Any], MiniMaxH3ResolvedPlan]:
+        MiniMaxH3Pipeline._validate_reference_start_times(canonical, facts)
         if canonical["target"].get("duration_seconds") is None:
             duration_sources = [
                 (index, condition)
                 for index, condition in enumerate(canonical["conditions"])
-                if condition["type"] in {"audio", "video", "video_audio"}
+                if condition["type"] in {"audio", "video", "video_audio"} and facts[index].has_audio
             ]
+            if len(duration_sources) != 1:
+                raise ValueError(
+                    "audio-derived target duration requires exactly one probed "
+                    f"condition with an audio stream, got {len(duration_sources)}"
+                )
             index, condition = duration_sources[0]
-            duration = facts[index].duration_seconds
+            duration = facts[index].audio_duration_seconds
             if duration is None:
-                raise ValueError(f"conditions[{index}] has no probed duration")
+                raise ValueError(f"conditions[{index}] has no positive probed audio duration")
             effective = duration - float(condition.get("start_time_seconds", 0.0))
             canonical = minimax_h3_validate_canonical_request(
                 task=canonical["task"],
@@ -156,6 +162,26 @@ class MiniMaxH3Pipeline(BasePipeline):
         if plan.shape.get("geometry") != "resolved_v2":
             raise ValueError("MiniMax H3 target geometry must resolve before model execution")
         return canonical, plan
+
+    @staticmethod
+    def _validate_reference_start_times(
+        canonical: dict[str, Any],
+        facts: dict[int, MiniMaxH3MaterialFacts],
+    ) -> None:
+        for index, condition in enumerate(canonical["conditions"]):
+            start = float(condition.get("start_time_seconds", 0.0))
+            if start == 0.0:
+                continue
+            item_facts = facts[index]
+            video_duration = item_facts.video_duration_seconds
+            if video_duration is None or start >= video_duration:
+                raise ValueError(f"conditions[{index}].start_time_seconds must be less than the video duration")
+            if item_facts.has_audio:
+                audio_duration = item_facts.audio_duration_seconds
+                if audio_duration is None or start >= audio_duration:
+                    raise ValueError(
+                        f"conditions[{index}].start_time_seconds must be less than the soundtrack duration"
+                    )
 
     @staticmethod
     def _condition_labels(
@@ -209,17 +235,22 @@ class MiniMaxH3Pipeline(BasePipeline):
                 path = stack.enter_context(minimax_h3_localize_material(condition["uri"]))
                 paths[index] = path
                 facts[index] = minimax_h3_probe_material(path, condition["type"])
-                duration = facts[index].duration_seconds
-                start = float(condition.get("start_time_seconds", 0.0))
-                if duration is not None and start >= duration:
-                    raise ValueError(f"conditions[{index}].start_time_seconds must be less than media duration")
-            if task == "ref2va":
-                duration_facts = {
-                    index: float(item.duration_seconds)
+            if canonical["task"] == "ref2va":
+                video_duration_facts = {
+                    index: float(item.video_duration_seconds)
                     for index, item in facts.items()
-                    if item.duration_seconds is not None
+                    if item.video_duration_seconds is not None
                 }
-                minimax_h3_validate_reference_media_facts(canonical["conditions"], duration_facts)
+                audio_duration_facts = {
+                    index: float(item.audio_duration_seconds)
+                    for index, item in facts.items()
+                    if item.audio_duration_seconds is not None
+                }
+                minimax_h3_validate_reference_media_facts(
+                    canonical["conditions"],
+                    video_duration_seconds_by_condition=video_duration_facts,
+                    audio_duration_seconds_by_condition=audio_duration_facts,
+                )
             canonical, plan = self._resolve_deferred_plan(canonical, facts)
             prepared = self.vae_stage.prepare_media(plan, paths, facts)
             images = [item.image for item in prepared if item.image is not None]
