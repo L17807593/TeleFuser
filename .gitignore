@@ -162,4 +162,10 @@ telefuser/_version.py
 !examples/data/lingbot_world_fast/image.jpg
 !examples/data/lingbot_world_fast/poses.npy
 !examples/data/lingbot_world_fast/intrinsics.npy
+# MiniMax H3 runnable example requests and frozen official reference inputs
+!examples/data/minimax-h3/fl2va-reference.png
+!examples/data/minimax-h3/ref2va-reference.mp4
+!examples/data/minimax-h3/ref2va-voice.mp3
+!examples/data/minimax-h3/ref2va.json
+!examples/data/minimax-h3/provenance.json
 .models

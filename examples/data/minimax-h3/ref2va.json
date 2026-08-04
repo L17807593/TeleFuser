@@ -1,0 +1,25 @@
+{
+  "task": "ref2va",
+  "prompt": "Preserve the subject, composition, motion, and soundtrack from <Video 1>. Use the calm male voice timbre from <Audio 2> for the spoken line: Follow the wind, live free.",
+  "conditions": [
+    {
+      "type": "video",
+      "uri": "ref2va-reference.mp4",
+      "role": "reference"
+    },
+    {
+      "type": "audio",
+      "uri": "ref2va-voice.mp3",
+      "role": "reference"
+    }
+  ],
+  "target": {
+    "short_edge": 768,
+    "aspect_ratio": "auto",
+    "duration_seconds": 5
+  },
+  "seed": 0,
+  "flow_shift": 12.0,
+  "audio_flow_shift": 3.0,
+  "num_inference_steps": 50
+}
