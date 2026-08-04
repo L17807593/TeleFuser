@@ -33,7 +33,7 @@ from .resolved_plan import (
     minimax_h3_resolve_spatial_shape,
 )
 from .text_encoding import MiniMaxH3TextEncodingStage
-from .vae import MiniMaxH3PreparedCondition, MiniMaxH3VAEStage
+from .vae import MiniMaxH3AudioVAEStage, MiniMaxH3PreparedCondition, MiniMaxH3VideoVAEStage
 
 
 def _fp32_runtime_config() -> ModelRuntimeConfig:
@@ -72,7 +72,8 @@ class MiniMaxH3Pipeline(BasePipeline):
         super().__init__(device=device, torch_dtype=torch_dtype)
         self.config: MiniMaxH3PipelineConfig | None = None
         self.text_stage: MiniMaxH3TextEncodingStage | None = None
-        self.vae_stage: MiniMaxH3VAEStage | None = None
+        self.video_vae_stage: MiniMaxH3VideoVAEStage | None = None
+        self.audio_vae_stage: MiniMaxH3AudioVAEStage | None = None
         self.denoising_stage: MiniMaxH3DenoisingStage | ParallelWorker | None = None
 
     def init(self, module_manager: ModuleManager, config: MiniMaxH3PipelineConfig) -> None:
@@ -87,11 +88,11 @@ class MiniMaxH3Pipeline(BasePipeline):
             config.text_encoder_config,
             processor=processor,
         )
-        self.vae_stage = MiniMaxH3VAEStage(
+        self.video_vae_stage = MiniMaxH3VideoVAEStage(
             module_manager,
             config.video_vae_config,
-            config.audio_vae_config,
         )
+        self.audio_vae_stage = MiniMaxH3AudioVAEStage(module_manager, config.audio_vae_config)
         denoising_stage = MiniMaxH3DenoisingStage(module_manager, config.dit_config)
         if config.dit_config.parallel_config.world_size > 1 and not dist.is_initialized():
             self.denoising_stage = ParallelWorker(denoising_stage)
@@ -102,7 +103,11 @@ class MiniMaxH3Pipeline(BasePipeline):
         self._model_info = module_manager.get_model_info()
 
     def _get_stages(self) -> list[object]:
-        return [stage for stage in (self.text_stage, self.vae_stage, self.denoising_stage) if stage is not None]
+        return [
+            stage
+            for stage in (self.text_stage, self.video_vae_stage, self.audio_vae_stage, self.denoising_stage)
+            if stage is not None
+        ]
 
     def stop(self) -> None:
         for stage in self._get_stages():
@@ -217,7 +222,13 @@ class MiniMaxH3Pipeline(BasePipeline):
         audio_flow_shift: float | None = None,
         num_inference_steps: int | None = None,
     ) -> MiniMaxH3Generation:
-        if self.config is None or self.text_stage is None or self.vae_stage is None or self.denoising_stage is None:
+        if (
+            self.config is None
+            or self.text_stage is None
+            or self.video_vae_stage is None
+            or self.audio_vae_stage is None
+            or self.denoising_stage is None
+        ):
             raise RuntimeError("MiniMaxH3Pipeline.init must be called before generation")
         canonical = minimax_h3_validate_canonical_request(
             task=task,
@@ -252,7 +263,7 @@ class MiniMaxH3Pipeline(BasePipeline):
                     audio_duration_seconds_by_condition=audio_duration_facts,
                 )
             canonical, plan = self._resolve_deferred_plan(canonical, facts)
-            prepared = self.vae_stage.prepare_media(plan, paths, facts)
+            prepared = self.video_vae_stage.prepare_media(plan, paths, facts)
             images = [item.image for item in prepared if item.image is not None]
             videos = [item.video_frames for item in prepared if item.video_frames is not None]
             text = self.text_stage.encode(
@@ -263,10 +274,10 @@ class MiniMaxH3Pipeline(BasePipeline):
                 condition_labels=self._condition_labels(prepared),
             )
             if any(item.image is not None or item.video_frames is not None for item in prepared):
-                prepared = self.vae_stage.encode_visual(prepared)
+                prepared = self.video_vae_stage.encode_visual(prepared)
             duration_seconds = float(plan.shape["frame_count"]) / float(plan.shape["fps"])
             if any(item.has_audio for item in prepared):
-                prepared = self.vae_stage.encode_audio(prepared, paths, facts, duration_seconds)
+                prepared = self.audio_vae_stage.encode_audio(prepared, paths, facts, duration_seconds)
             steps = self.config.num_inference_steps if num_inference_steps is None else num_inference_steps
             if isinstance(steps, bool) or not isinstance(steps, int) or steps < 2:
                 raise ValueError("num_inference_steps must be an integer of at least 2")
@@ -278,8 +289,8 @@ class MiniMaxH3Pipeline(BasePipeline):
                     num_inference_steps=steps,
                 )
             )
-            video = self.vae_stage.decode_video(denoised.video_latent)
-            audio = self.vae_stage.decode_audio(denoised.audio_latent)
+            video = self.video_vae_stage.decode_video(denoised.video_latent)
+            audio = self.audio_vae_stage.decode_audio(denoised.audio_latent)
             return MiniMaxH3Generation(
                 video=video[:, : int(plan.shape["frame_count"])],
                 audio=audio,

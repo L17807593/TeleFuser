@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MiniMax H3 visual/audio condition encoding and joint decoding stages."""
+"""MiniMax H3 media preparation and modality-specific VAE stages."""
 
 from __future__ import annotations
 
@@ -137,29 +137,16 @@ def _decode_audio(
     return waveform
 
 
-class MiniMaxH3VAEStage(BaseStage):
-    def __init__(
-        self,
-        module_manager: ModuleManager,
-        video_runtime_config: ModelRuntimeConfig,
-        audio_runtime_config: ModelRuntimeConfig,
-    ) -> None:
-        if (
-            video_runtime_config.device_type != audio_runtime_config.device_type
-            or video_runtime_config.device_id != audio_runtime_config.device_id
-            or video_runtime_config.offload_config != audio_runtime_config.offload_config
-        ):
-            raise ValueError("MiniMax H3 video and audio VAEs must use the same device and offload configuration")
-        super().__init__("minimax_h3_vae", video_runtime_config)
+class MiniMaxH3VideoVAEStage(BaseStage):
+    def __init__(self, module_manager: ModuleManager, model_runtime_config: ModelRuntimeConfig) -> None:
+        super().__init__("minimax_h3_video_vae", model_runtime_config)
         self.video_vae = module_manager.fetch_module("minimax_h3_video_vae")
-        self.audio_vae = module_manager.fetch_module("minimax_h3_audio_vae")
-        if self.video_vae is None or self.audio_vae is None:
-            raise ValueError("ModuleManager must contain MiniMax H3 video and audio VAEs")
-        self.audio_runtime_config = audio_runtime_config
-        self.model_names = ["video_vae", "audio_vae"]
+        if self.video_vae is None:
+            raise ValueError("ModuleManager must contain MiniMax H3 video VAE")
+        self.model_names = ["video_vae"]
 
+    @staticmethod
     def prepare_media(
-        self,
         plan: MiniMaxH3ResolvedPlan,
         paths: dict[int, Path],
         facts: dict[int, MiniMaxH3MaterialFacts],
@@ -254,6 +241,26 @@ class MiniMaxH3VAEStage(BaseStage):
             )
         return output
 
+    @with_model_offload(["video_vae"])
+    @torch.inference_mode()
+    def decode_video(self, latent: torch.Tensor) -> torch.Tensor:
+        device = next(self.video_vae.parameters()).device
+        use_fp16_autocast = device.type == "cuda"
+        if use_fp16_autocast:
+            self.video_vae.prepare_decoder_autocast_weights(torch.float16)
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_fp16_autocast):
+            frames = self.video_vae.decode_normalized(latent.to(device))
+        return frames.permute(0, 2, 3, 4, 1).float().cpu().contiguous()
+
+
+class MiniMaxH3AudioVAEStage(BaseStage):
+    def __init__(self, module_manager: ModuleManager, model_runtime_config: ModelRuntimeConfig) -> None:
+        super().__init__("minimax_h3_audio_vae", model_runtime_config)
+        self.audio_vae = module_manager.fetch_module("minimax_h3_audio_vae")
+        if self.audio_vae is None:
+            raise ValueError("ModuleManager must contain MiniMax H3 audio VAE")
+        self.model_names = ["audio_vae"]
+
     @with_model_offload(["audio_vae"])
     @torch.inference_mode()
     def encode_audio(
@@ -296,24 +303,15 @@ class MiniMaxH3VAEStage(BaseStage):
             )
         return output
 
-    @with_model_offload(["video_vae"])
-    @torch.inference_mode()
-    def decode_video(self, latent: torch.Tensor) -> torch.Tensor:
-        device = next(self.video_vae.parameters()).device
-        use_fp16_autocast = device.type == "cuda"
-        if use_fp16_autocast:
-            self.video_vae.prepare_decoder_autocast_weights(torch.float16)
-        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_fp16_autocast):
-            frames = self.video_vae.decode_normalized(latent.to(device))
-        return frames.permute(0, 2, 3, 4, 1).float().cpu().contiguous()
-
     @with_model_offload(["audio_vae"])
     @torch.inference_mode()
     def decode_audio(self, latent: torch.Tensor) -> torch.Tensor:
-        return self.audio_vae.decode_normalized(latent.to(next(self.audio_vae.parameters()).device)).float().cpu()
+        device = next(self.audio_vae.parameters()).device
+        return self.audio_vae.decode_normalized(latent.to(device)).float().cpu()
 
 
 __all__ = [
     "MiniMaxH3PreparedCondition",
-    "MiniMaxH3VAEStage",
+    "MiniMaxH3AudioVAEStage",
+    "MiniMaxH3VideoVAEStage",
 ]
