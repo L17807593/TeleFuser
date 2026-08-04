@@ -13,7 +13,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from tools.validation.minimax_h3_validation_common import sha256 as _sha256
+if __package__:
+    from tools.validation.minimax_h3_validation_common import sha256 as _sha256
+else:
+    from minimax_h3_validation_common import sha256 as _sha256
 
 _CASES = ("t2va", "fl2va", "ref2va")
 _MAX_DOWNLOAD_BYTES = 2 * 1024**3

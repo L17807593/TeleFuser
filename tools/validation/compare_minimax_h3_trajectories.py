@@ -11,7 +11,10 @@ from typing import Any
 
 import torch
 
-from tools.validation.minimax_h3_validation_common import sha256 as _sha256
+if __package__:
+    from tools.validation.minimax_h3_validation_common import sha256 as _sha256
+else:
+    from minimax_h3_validation_common import sha256 as _sha256
 
 TensorPath = str | tuple[str, ...]
 

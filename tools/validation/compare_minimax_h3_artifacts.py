@@ -10,7 +10,10 @@ from pathlib import Path
 
 import numpy as np
 
-from tools.validation.minimax_h3_validation_common import sha256 as _sha256
+if __package__:
+    from tools.validation.minimax_h3_validation_common import sha256 as _sha256
+else:
+    from minimax_h3_validation_common import sha256 as _sha256
 
 MIN_VIDEO_COSINE = 0.99
 MIN_VIDEO_PSNR_DB = 28.0

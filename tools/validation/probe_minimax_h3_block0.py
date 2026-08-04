@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from compare_minimax_h3_trajectories import _tensor_metrics
 from safetensors import safe_open
 
 from telefuser.core.config import AttentionConfig, AttnImplType
@@ -21,7 +20,13 @@ from telefuser.models.minimax_h3_dit import (
     _rotate_half,
 )
 from telefuser.ops.attention import attention
-from tools.validation.minimax_h3_validation_common import sha256 as _sha256
+
+if __package__:
+    from tools.validation.compare_minimax_h3_trajectories import _tensor_metrics
+    from tools.validation.minimax_h3_validation_common import sha256 as _sha256
+else:
+    from compare_minimax_h3_trajectories import _tensor_metrics
+    from minimax_h3_validation_common import sha256 as _sha256
 
 
 def _load_block(
