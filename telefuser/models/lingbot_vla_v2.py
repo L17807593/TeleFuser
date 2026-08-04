@@ -215,7 +215,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch import Tensor, nn
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypedDict, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from functools import partial
 import math
 from transformers import (
@@ -234,8 +234,6 @@ from transformers.utils import (
 )
 
 
-class LossKwargs(TypedDict, total=False):
-    labels: Optional[torch.LongTensor]
 from transformers.utils.deprecation import deprecate_kwarg
 from transformers.activations import ACT2FN
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs, is_flash_attn_available
@@ -258,12 +256,10 @@ from telefuser.models.lingbot_vla_v2_loader import (
     create_sinusoidal_pos_embedding,
     make_att_2d_masks,
     resize_with_pad,
-    sample_beta,
 )
 from telefuser.models.lingbot_vla_v2_loader import apply_rope, our_eager_attention_forward
 from telefuser.models.lingbot_vla_v2_loader import flex_attention_forward
 from telefuser.models.lingbot_vla_v2_loader import build_block_mask, flex_attention_with_block_mask
-import time
 
 from telefuser.models.lingbot_vla_v2_loader import LingBotVLAWeightLoader, TaskTokenDepthHead
 from telefuser.models.lingbot_vla_v2_moe import (
@@ -561,29 +557,7 @@ class QwenvlWithExpertModel(PreTrainedModel):
         self.attention_interface = self.get_attention_interface()
 
         # self.to_bfloat16_like_physical_intelligence()
-        self.set_requires_grad()
 
-    def set_requires_grad(self):
-        """sets the requires_grad attribute of the model parameters based on the configuration.
-        If `freeze_vision_encoder` is True, the vision tower parameters are frozen.
-        If `train_expert_only` is True, the entire Qwenvl model is frozen.
-        """
-        if self.config.freeze_vision_encoder:
-            self.qwenvl.visual.eval()
-            for params in self.qwenvl.visual.parameters():
-                params.requires_grad = False
-
-        if self.config.train_expert_only:
-            self.qwenvl.eval()
-            for params in self.qwenvl.parameters():
-                params.requires_grad = False
-
-    def train(self, mode: bool = True):
-        super().train(mode)
-        if self.config.freeze_vision_encoder:
-            self.qwenvl.visual.eval()
-        if self.config.train_expert_only:
-            self.qwenvl.eval()
 
     def to_bfloat16_like_physical_intelligence(self):
         """casts the model to bfloat16.
@@ -818,96 +792,6 @@ class QwenvlWithExpertModel(PreTrainedModel):
             )
         return attention_interface
 
-class LingbotVlaPolicy(PreTrainedModel):
-    config_class = LingbotVLAConfig
-    name = "torch_lingbot_vla"
-    supports_gradient_checkpointing = True
-
-    _no_split_modules = ["Qwen2DecoderLayer", "FixQwen2RMSNorm", "FixAdaRMSNorm"] # NOTE: if moudule in Qwen2DecoderLayer, it doesn't need to specify in _no_split_modules
-
-    def get_parallel_plan(self):
-        from telefuser.models.lingbot_vla_v2_loader import NativeParallelPlan as ParallelPlan
-        from torch.distributed._tensor import Shard
-        ep_plan = {
-            "model.qwenvl_with_expert.qwen_expert.model.layers.*.mlp.experts.gate_proj": Shard(0),
-            "model.qwenvl_with_expert.qwen_expert.model.layers.*.mlp.experts.up_proj": Shard(0),
-            "model.qwenvl_with_expert.qwen_expert.model.layers.*.mlp.experts.down_proj": Shard(0),
-        }
-        return ParallelPlan(ep_plan=ep_plan)
-
-    @classmethod
-    def get_weight_loader(cls):
-        return LingBotVLAWeightLoader()
-
-    def __init__(
-        self,
-        config: LingbotVLAConfig,
-        eval: bool=False,
-    ):
-        """
-        Args:
-            config: Policy configuration class instance or None, in which case the default instantiation of
-                    the configuration class is used.
-        """
-
-        super().__init__(config)
-        self.config = config
-        self.language_tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path, local_files_only=True)
-        self.model = FlowMatching(config, eval)
-
-        if not getattr(self.config,"use_lm_head", False):
-            del self.model.qwenvl_with_expert.qwenvl.lm_head
-        del self.model.qwenvl_with_expert.qwen_expert.lm_head
-
-        self.reset()
-        torch.set_float32_matmul_precision("high")
-
-    def reset(self):
-        return None
-
-    def get_optim_params(self) -> dict:
-        return self.parameters()
-
-    def forward(
-        self, images, img_masks, state, lang_tokens, lang_masks, actions, joint_mask=None, action_is_pad=None, noise=None, time=None, vlm_causal=False, depth_targets=None, precompute_grid_thw=False, future_depth_targets=None, **kwargs
-    ) -> tuple[Tensor, dict[str, Tensor]]:
-        loss_dict = {}
-        # Keep state and actions in fp32 for action learning precision
-        if getattr(self.config, 'action_fp32', False):
-            state = state.float()
-            actions = actions.float()
-        losses, loss_depth, depth_preds, seq_wise_loss, moe_metrics = self.model.forward(
-            images, img_masks, lang_tokens, lang_masks, state, actions, noise, time, vlm_causal, self.config.loss_type, depth_targets, precompute_grid_thw=precompute_grid_thw, future_depth_targets=future_depth_targets,
-        )
-
-        if joint_mask is not None:
-            if 'repeat' in self.config.loss_type:
-                joint_mask = joint_mask.repeat(2,1)
-            mask_expanded = joint_mask.unsqueeze(1).expand(-1, losses.size(1), -1) # (B, T, D)
-            masked_losses = losses * mask_expanded
-
-            valid_counts = mask_expanded.sum(dim=(1, 2)).clamp(min=1)
-            batch_mean_losses = masked_losses.sum(dim=(1, 2)) / valid_counts
-            loss_vla = masked_losses.sum() / mask_expanded.sum().clamp(min=1)
-        else:
-            losses = losses[:, :, :self.config.action_dim]
-            batch_mean_losses = losses.mean(dim=(1, 2))
-            loss_vla = losses.mean()
-
-        loss_dict["batch_mean_losses"] = batch_mean_losses.detach()
-
-        total_loss = (
-            loss_vla
-            + loss_depth
-            + seq_wise_loss
-        )
-
-        # Attach MoE monitoring metrics to loss_dict
-        if moe_metrics:
-            loss_dict.update(moe_metrics)
-
-        return total_loss, loss_vla, loss_depth, seq_wise_loss, loss_dict, depth_preds
-
 class FlowMatching(nn.Module):
     def __init__(self, config, eval):
         super().__init__()
@@ -977,7 +861,6 @@ class FlowMatching(nn.Module):
             self.use_shared_future_task_proj = False
             self.future_video_share_future_depth_query = False
 
-        self.set_requires_grad()
 
     def init_depth_heads(self, config):
         self.llm_image_token_size = config['llm']['image_token_size']
@@ -1009,12 +892,9 @@ class FlowMatching(nn.Module):
                config['depth']['num_backbone_tokens'], config['llm']['dim_out']
             )
         )
-        self.depth_align_embs.requires_grad = True
 
         self.depth_align_head = TaskTokenDepthHead(config['depth'], llm_hidden_size=config['llm']['dim_out']).to(dtype=torch.bfloat16)
 
-        for p in self.depth_align_head.parameters():
-            p.requires_grad = True
 
         if self.use_future_depth:
             self.future_depth_align_embs = nn.Parameter(
@@ -1022,14 +902,11 @@ class FlowMatching(nn.Module):
                 config['depth']['num_backbone_tokens'], config['llm']['dim_out']
                 )
             )
-            self.future_depth_align_embs.requires_grad = True
 
             self.future_depth_align_head = TaskTokenDepthHead(
                 config['depth'], llm_hidden_size=config['llm']['dim_out']
             ).to(dtype=torch.bfloat16)
 
-            for p in self.future_depth_align_head.parameters():
-                p.requires_grad = True
 
     def init_video_heads(self, config):
         if self.align_type != "query":
@@ -1099,19 +976,14 @@ class FlowMatching(nn.Module):
                         video_config['num_backbone_tokens'], config['llm']['dim_out']
                     )
                 )
-                self.current_video_align_embs.requires_grad = True
                 if self.use_current_shared_task_proj:
                     self.current_shared_task_proj = nn.Linear(
                         config['llm']['dim_out'] * 2,
                         config['llm']['dim_out'],
                     )
-                    for p in self.current_shared_task_proj.parameters():
-                        p.requires_grad = True
                 self.current_video_align_head = TaskTokenDepthHead(
                     video_config, llm_hidden_size=config['llm']['dim_out']
                 ).to(dtype=torch.bfloat16)
-                for p in self.current_video_align_head.parameters():
-                    p.requires_grad = True
 
             if (
                 not self.future_video_share_future_depth_query
@@ -1122,19 +994,14 @@ class FlowMatching(nn.Module):
                         video_config['num_backbone_tokens'], config['llm']['dim_out']
                     )
                 )
-                self.future_video_align_embs.requires_grad = True
             if self.use_shared_future_task_proj:
                 self.future_shared_task_proj = nn.Linear(
                     config['llm']['dim_out'] * 2,
                     config['llm']['dim_out'],
                 )
-                for p in self.future_shared_task_proj.parameters():
-                    p.requires_grad = True
             self.future_video_align_head = TaskTokenDepthHead(
                 video_config, llm_hidden_size=config['llm']['dim_out']
             ).to(dtype=torch.bfloat16)
-            for p in self.future_video_align_head.parameters():
-                p.requires_grad = True
 
         if self.use_future_video_cls:
             self.future_video_cls_align_emb = nn.Embedding(1, config['llm']['dim_out'])
@@ -1142,8 +1009,6 @@ class FlowMatching(nn.Module):
                 nn.LayerNorm(config['llm']['dim_out']),
                 nn.Linear(config['llm']['dim_out'], video_config['dim_out']),
             ).to(dtype=torch.bfloat16)
-            for p in self.future_video_cls_head.parameters():
-                p.requires_grad = True
 
     def _future_depth_token_count(self):
         return self.num_task_tokens if getattr(self, "use_future_depth", False) else 0
@@ -1247,10 +1112,6 @@ class FlowMatching(nn.Module):
         if reset_post_init is not None:
             reset_post_init()
 
-    def set_requires_grad(self):
-        for params in self.state_proj.parameters():
-            params.requires_grad = self.config.train_state_proj
-
     @staticmethod
     def _fp32_linear(module, x):
         """Compute linear layer in fp32 regardless of module's current parameter dtype."""
@@ -1260,10 +1121,6 @@ class FlowMatching(nn.Module):
             module.bias.float() if module.bias is not None else None
         )
 
-    def sample_time(self, bsize, device):
-        time_beta = sample_beta(1.5, 1.0, bsize, device)
-        time = time_beta * 0.999 + 0.001
-        return time.to(dtype=torch.float32, device=device)
 
     def embed_prefix(
         self, images, img_masks, lang_tokens, lang_masks, vlm_causal, precompute_grid_thw=False
@@ -1376,165 +1233,10 @@ class FlowMatching(nn.Module):
 
         return time_emb_ori, embs, pad_masks, att_masks
 
-    def forward(
-        self,
-        images,
-        img_masks,
-        lang_tokens,
-        lang_masks,
-        state,
-        actions,
-        noise=None,
-        time=None,
-        vlm_causal=False,
-        loss_type='fm',
-        depth_targets=None,
-        precompute_grid_thw=False,
-        future_depth_targets=None,
-    ) -> Tensor:
-        dtype = state.dtype
-        device = state.device
-        if noise is None:
-            noise = torch.randn(actions.shape, device=device, dtype=dtype)
-
-        if time is None:
-            time = self.sample_time(actions.size(0), device).to(dtype)
-
-        time_expanded = time[:, None, None]
-        x_t = time_expanded * noise + (1 - time_expanded) * actions
-        u_t = noise - actions
-
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
-            images, img_masks, lang_tokens, lang_masks, vlm_causal, precompute_grid_thw=precompute_grid_thw
-        ) # 1,bs_img*(768+48),2048  1,bs_img*(768+48)  1,bs_img*(768+48)
-        time_embs, suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(
-            state, x_t, time
-        ) # [1, state_bs*(50+1), 1024], [1, state_bs*(50+1)], [1, state_bs*(50+1)]   state_bs=bs_img
-
-        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1) # 1,state_bs*(768+48+50+1)
-        att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)# 1,state_bs*(768+48+50+1)
-
-        # pad_masks = pad_masks.reshape(state.size(0), -1)
-        # att_masks = att_masks.reshape(state.size(0), -1)
-        att_2d_masks = make_att_2d_masks(pad_masks, att_masks) # torch.Size([state_bs, 768+48+50+1, 768+48+50+1])
-        position_ids = torch.cumsum(pad_masks, dim=1) - 1 # torch.Size([state_bs, 768+48+50+1])
-        vlm_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
-
-        # prefix_embs = prefix_embs.reshape(state.size(0), -1, prefix_embs.size(-1))
-        # suffix_embs = suffix_embs.reshape(state.size(0), -1, suffix_embs.size(-1))
-        (outputs_embeds, suffix_out), _, router_logits_list = self.qwenvl_with_expert.forward(
-            attention_mask=att_2d_masks,
-            position_ids=position_ids,
-            vlm_position_ids=vlm_position_ids,
-            past_key_values=None,
-            inputs_embeds=[prefix_embs, suffix_embs], # bs_img,(768+48),2048  [state_bs, (50+1), 1024]
-            use_cache=self.config.use_cache,
-            fill_kv_cache=True,
-            ada_cond = time_embs if getattr(self.config, 'adanorm_time', False) else None,
-        )
-        if self.config.align_params != {}:
-            loss_depth, depth_preds = self.depth_emb_forward(outputs_embeds, depth_targets, img_masks)
-            loss_depth = loss_depth * self.config.align_params['depth_loss_weight']
-            self.steps+=1
-        else:
-            loss_depth = 0
-            depth_preds = None
-        suffix_out = suffix_out[:, -self.config.n_action_steps :]
-        if getattr(self.config, 'action_fp32', False):
-            v_t = self._fp32_linear(self.action_out_proj, suffix_out)
-        else:
-            if suffix_out.dtype != self.action_out_proj.weight.dtype:
-                suffix_out = suffix_out.to(self.action_out_proj.weight.dtype)
-            v_t = self.action_out_proj(suffix_out)
-        # u_t = u_t.reshape(images.size(0), -1, u_t.size(-1))
-        if loss_type == 'fm':
-            losses = F.mse_loss(u_t, v_t, reduction="none")
-            # losses = torch.mean((v_t - u_t)**2, dim=-1)
-        elif loss_type == 'L1_fm':
-            losses = F.l1_loss(u_t, v_t, reduction="none")
-
-        # Sequence-wise balance loss (DeepSeek-V3 style, for token-MoE only)
-        seq_wise_loss_coeff = getattr(self.config, 'sequence_wise_loss_coeff', 0)
-        seq_wise_loss = 0
-
-        if seq_wise_loss_coeff > 0 and router_logits_list:
-            from telefuser.models.lingbot_vla_v2_loader import triton_sequence_wise_balance_loss
-
-            token_moe_layers_set = set(getattr(self.config, 'token_moe_layers', None) or [])
-            token_moe_layers_list = sorted(token_moe_layers_set)
-            token_router_logits = tuple(
-                logits for i, logits in enumerate(router_logits_list)
-                if not token_moe_layers_list or (token_moe_layers_list[i] if i < len(token_moe_layers_list) else i) in token_moe_layers_set
-            )
-
-            if token_router_logits:
-                token_top_k = getattr(self.config, 'token_top_k', 4)
-
-                # Batch-wise balance loss: treat all B脳T tokens as one group.
-                # seq_lengths=None makes the function use all tokens at once,
-                # giving stable f_i statistics (B脳T脳K assignments / E experts).
-                layer_losses = triton_sequence_wise_balance_loss(
-                    router_logits_list=token_router_logits,
-                    top_k=token_top_k,
-                    seq_lengths=None,
-                    padding_len=0,
-                )
-                if layer_losses:
-                    seq_wise_loss = seq_wise_loss_coeff * torch.stack(layer_losses).mean()
-
-        # MoE monitoring metrics for token-MoE.
-        moe_metrics = {}
-        if router_logits_list:
-            all_moe_indices = sorted(getattr(self.config, 'token_moe_layers', None) or [])
-            token_expert_counts = []
-
-            with torch.no_grad():
-                for i, logits in enumerate(router_logits_list):
-                    layer_id = all_moe_indices[i] if i < len(all_moe_indices) else i
-                    num_experts = logits.shape[-1]
-                    routing_probs = F.softmax(logits, dim=1, dtype=torch.float)
-
-                    moe_block = self.qwenvl_with_expert.qwen_expert.model.layers[layer_id].mlp
-                    if hasattr(moe_block, 'last_tokens_per_expert'):
-                        counts = moe_block.last_tokens_per_expert.clone()
-                    else:
-                        _, selected = torch.topk(routing_probs, 1, dim=-1)
-                        expert_indices = selected.squeeze(-1)
-                        counts = F.one_hot(expert_indices, num_classes=num_experts).float().sum(dim=0)
-
-                    token_expert_counts.append((layer_id, counts))
-
-                    # MaxVio: (max_load - avg_load) / avg_load (paper 2408.15664)
-                    avg_load = counts.mean()
-                    maxvio = (counts.max() - avg_load) / avg_load.clamp(min=1e-9)
-                    moe_metrics[f"token_moe/layer{layer_id}_maxvio"] = maxvio
-
-                    per_sample_entropy = -(routing_probs * routing_probs.clamp(min=1e-9).log()).sum(dim=-1)
-                    moe_metrics[f"token_moe/layer{layer_id}_entropy"] = per_sample_entropy.mean()
-
-                # Compute average MaxVio across token-MoE layers
-                token_maxvio_values = [
-                    moe_metrics[k] for k in moe_metrics
-                    if k.startswith("token_moe/") and k.endswith("_maxvio")
-                ]
-                if token_maxvio_values:
-                    moe_metrics["token_moe/avg_maxvio"] = torch.stack(token_maxvio_values).mean()
-
-                # Avg top-K sigmoid score (before norm) across token-MoE layers
-                token_moe_layers_list = sorted(getattr(self.config, 'token_moe_layers', None) or [])
-                if token_moe_layers_list:
-                    sigmoid_scores = []
-                    for lid in token_moe_layers_list:
-                        moe_block = self.qwenvl_with_expert.qwen_expert.model.layers[lid].mlp
-                        if hasattr(moe_block, 'avg_topk_sigmoid_score'):
-                            sigmoid_scores.append(moe_block.avg_topk_sigmoid_score.detach().to(losses.device))
-                    if sigmoid_scores:
-                        moe_metrics["token_moe/avg_topk_sigmoid"] = torch.stack(sigmoid_scores).mean()
-
-                if token_expert_counts:
-                    moe_metrics["_token_moe_expert_counts"] = token_expert_counts
-
-        return losses, loss_depth, depth_preds, seq_wise_loss, moe_metrics
+    def forward(self, *args, **kwargs):
+        """Reject the upstream training API in the inference-only model."""
+        del args, kwargs
+        raise RuntimeError("LingBot-VLA v2 is inference-only; use sample_actions()")
 
     def sample_actions(
         self, images, img_masks, lang_tokens, lang_masks, state, vlm_causal=False, noise=None
@@ -1623,200 +1325,6 @@ class FlowMatching(nn.Module):
             v_t = self.action_out_proj(suffix_out)
         return v_t
 
-    def depth_emb_forward(self, hidden_states, depth_targets=None, img_masks=None, future_depth_targets=None):
-        chunk_size = self.llm_image_token_size * self.llm_image_token_size
-        num_images = img_masks.shape[1] if img_masks is not None and img_masks.ndim == 2 else 3
-        if img_masks is not None:
-            img_masks = einops.rearrange(img_masks, 'b n -> (b n)')
-        image_embs = hidden_states[:, chunk_size * 0 + 1 : chunk_size * 1 + 1, :]
-        align_embs = self._current_depth_task_tokens(hidden_states, num_images=num_images)
-        align_embs = torch.cat([image_embs, align_embs], dim=1)
-        depth_preds = self.depth_align_embs.repeat(align_embs.shape[0], 1, 1).to(dtype=align_embs.dtype, device=align_embs.device)
-        depth_preds = self.depth_align_head(align_embs, depth_preds).contiguous().float()
-        current_loss = self._emb_loss(depth_preds, depth_targets)
-
-        if self.use_future_depth:
-            future_align_embs = self._future_depth_task_tokens(hidden_states)
-            future_image_embs = (
-                image_embs.detach()
-                if getattr(self, "detach_future_depth_image_feats", False)
-                else image_embs
-            )
-            future_align_embs = torch.cat([future_image_embs, future_align_embs], dim=1)
-            future_depth_preds = self.future_depth_align_embs.repeat(future_align_embs.shape[0], 1, 1).to(dtype=future_align_embs.dtype, device=future_align_embs.device)
-            future_depth_preds = self.future_depth_align_head(future_align_embs, future_depth_preds).contiguous().float()
-            future_loss = self._emb_loss(future_depth_preds, future_depth_targets)
-            return current_loss, future_loss, depth_preds, future_depth_preds
-
-        return current_loss, 0, depth_preds, None
-
-    def video_emb_forward(
-        self,
-        hidden_states,
-        future_video_targets=None,
-        future_video_cls_targets=None,
-        future_video_current_patch=None,
-    ):
-        if self.align_type != 'query':
-            raise ValueError("future-video alignment is only supported for query align mode.")
-
-        use_patch = getattr(self, "use_future_video_patch", True)
-        use_cls = getattr(self, "use_future_video_cls", False)
-        if not use_patch and not use_cls:
-            raise ValueError("future-video alignment requires use_patch_loss or use_cls_loss to be enabled.")
-        if use_patch and future_video_targets is None:
-            raise ValueError("future_video_targets is required when use_patch_loss=True.")
-
-        align_params = getattr(getattr(self, "config", None), "align_params", {}) or {}
-        video_cfg = align_params.get("video", {}) if hasattr(align_params, "get") else {}
-        chunk_size = self.llm_image_token_size * self.llm_image_token_size
-        image_embs = hidden_states[:, chunk_size * 0 + 1 : chunk_size * 1 + 1, :]
-        image_embs_for_video = image_embs.detach() if bool(video_cfg.get("detach_image_feats", False)) else image_embs
-
-        cls_preds = None
-        if use_cls:
-            if future_video_cls_targets is None:
-                raise ValueError("future_video_cls_targets is required when use_cls_loss=True.")
-            cls_task_embs = self._future_video_cls_task_tokens(hidden_states)
-            cls_delta = self.future_video_cls_head(cls_task_embs.squeeze(1))
-            cls_preds = cls_delta.contiguous().float()
-
-        loss = None
-        metrics = {}
-        video_preds = None
-        if use_patch:
-            video_task_embs = self._future_video_patch_task_tokens(hidden_states)
-            context_mode = str(
-                video_cfg.get(
-                    "context_mode",
-                    getattr(self, "future_video_context_mode", "img_query"),
-                )
-            ).lower()
-            if context_mode == "query_only":
-                video_align_embs = video_task_embs
-            else:
-                video_align_embs = torch.cat([image_embs_for_video, video_task_embs], dim=1)
-            if (
-                getattr(self, "future_video_share_future_depth_query", False)
-                and not getattr(self, "use_shared_future_task_proj", False)
-            ):
-                query_embs = self.future_depth_align_embs
-            else:
-                query_embs = self.future_video_align_embs
-            video_preds = query_embs.repeat(video_align_embs.shape[0], 1, 1).to(
-                dtype=video_align_embs.dtype, device=video_align_embs.device
-            )
-            video_preds = self.future_video_align_head(video_align_embs, video_preds).contiguous().float()
-            loss, metrics = self._video_emb_loss(video_preds, future_video_targets)
-        if use_cls:
-            cls_loss, cls_metrics = self._video_cls_loss(cls_preds, future_video_cls_targets)
-            loss = cls_loss if loss is None else loss + cls_loss
-            metrics.update(cls_metrics)
-        return loss, video_preds, metrics
-
-    def current_video_emb_forward(
-        self,
-        hidden_states,
-        current_video_targets=None,
-    ):
-        if self.align_type != 'query':
-            raise ValueError("current-video alignment is only supported for query align mode.")
-        if not getattr(self, "use_current_video_patch", False):
-            raise ValueError("current-video alignment requires use_current_patch_loss=True.")
-        if current_video_targets is None:
-            raise ValueError("current_video_targets is required for current-video alignment.")
-
-        chunk_size = self.llm_image_token_size * self.llm_image_token_size
-        image_embs = hidden_states[:, chunk_size * 0 + 1 : chunk_size * 1 + 1, :]
-        current_task_embs = self._current_depth_task_tokens(hidden_states)
-        align_embs = torch.cat([image_embs, current_task_embs], dim=1)
-        queries = self.current_video_align_embs.repeat(align_embs.shape[0], 1, 1).to(
-            dtype=align_embs.dtype,
-            device=align_embs.device,
-        )
-        preds = self.current_video_align_head(align_embs, queries).contiguous().float()
-        loss, metrics = self._video_emb_loss(
-            preds,
-            current_video_targets,
-            metric_prefix="current_video",
-        )
-        return loss, preds, metrics
-
-    def _video_emb_loss(self, video_preds, future_video_targets, metric_prefix="future_video"):
-        align_params = getattr(getattr(self, "config", None), "align_params", {}) or {}
-        video_cfg = align_params.get("video", {}) if hasattr(align_params, "get") else {}
-        use_smooth_l1 = bool(video_cfg.get("use_smooth_l1_loss", True))
-        use_mse = bool(video_cfg.get("use_mse_loss", False))
-        use_cosine = bool(video_cfg.get("use_cosine_loss", False))
-        if not use_smooth_l1 and not use_mse and not use_cosine:
-            raise ValueError(f"{metric_prefix} loss requires smooth-L1, MSE, and/or cosine loss.")
-
-        metrics = {}
-        loss = None
-        if use_smooth_l1:
-            smooth_l1_loss = self._emb_loss(video_preds, future_video_targets)
-            metrics[f"align/{metric_prefix}_smooth_l1_loss"] = smooth_l1_loss.detach()
-            loss = smooth_l1_loss
-        if use_mse:
-            target = future_video_targets.to(dtype=video_preds.dtype, device=video_preds.device)
-            mse_loss = F.mse_loss(video_preds.float(), target.float().detach())
-            mse_weight = float(video_cfg.get("mse_loss_weight", 1.0))
-            metrics[f"align/{metric_prefix}_mse_loss"] = mse_loss.detach()
-            metrics[f"align/{metric_prefix}_mse_loss_weighted"] = (mse_loss * mse_weight).detach()
-            weighted_mse_loss = mse_loss * mse_weight
-            loss = weighted_mse_loss if loss is None else loss + weighted_mse_loss
-        if use_cosine:
-            target = future_video_targets.to(dtype=video_preds.dtype, device=video_preds.device)
-            pred_norm = F.normalize(video_preds.float(), dim=-1, eps=1e-6)
-            target_norm = F.normalize(target.float().detach(), dim=-1, eps=1e-6)
-            cosine_loss = 1.0 - F.cosine_similarity(pred_norm, target_norm, dim=-1, eps=1e-6).mean()
-            cosine_weight = float(video_cfg.get("cosine_loss_weight", 1.0))
-            metrics[f"align/{metric_prefix}_cosine_loss"] = cosine_loss.detach()
-            metrics[f"align/{metric_prefix}_cosine_loss_weighted"] = (cosine_loss * cosine_weight).detach()
-            weighted_cosine_loss = cosine_loss * cosine_weight
-            loss = weighted_cosine_loss if loss is None else loss + weighted_cosine_loss
-        return loss, metrics
-
-    def _video_cls_loss(self, cls_preds, future_video_cls_targets):
-        align_params = getattr(getattr(self, "config", None), "align_params", {}) or {}
-        video_cfg = align_params.get("video", {}) if hasattr(align_params, "get") else {}
-        cls_loss_type = str(video_cfg.get("cls_loss_type", "cosine")).lower()
-        cls_weight = float(video_cfg.get("cls_loss_weight", 1.0))
-        target = future_video_cls_targets.to(dtype=cls_preds.dtype, device=cls_preds.device)
-        if target.ndim == 3 and target.shape[1] == 1:
-            target = target.squeeze(1)
-
-        metrics = {}
-        loss = None
-        if cls_loss_type in ("smooth_l1", "smoothl1", "huber"):
-            smooth_l1_loss = F.smooth_l1_loss(cls_preds.float(), target.float().detach())
-            metrics["align/future_video_cls_smooth_l1_loss"] = smooth_l1_loss.detach()
-            loss = smooth_l1_loss
-        if cls_loss_type in ("mse", "mse_cosine", "cosine_mse"):
-            mse_loss = F.mse_loss(cls_preds.float(), target.float().detach())
-            metrics["align/future_video_cls_mse_loss"] = mse_loss.detach()
-            loss = mse_loss
-        if cls_loss_type in ("cosine", "mse_cosine", "cosine_mse"):
-            pred_norm = F.normalize(cls_preds.float(), dim=-1, eps=1e-6)
-            target_norm = F.normalize(target.float().detach(), dim=-1, eps=1e-6)
-            cosine_loss = 1.0 - F.cosine_similarity(pred_norm, target_norm, dim=-1, eps=1e-6).mean()
-            metrics["align/future_video_cls_cosine_loss"] = cosine_loss.detach()
-            loss = cosine_loss if loss is None else loss + cosine_loss
-        if loss is None:
-            raise ValueError(f"Unsupported future-video CLS loss type: {cls_loss_type}")
-        weighted_loss = loss * cls_weight
-        metrics["align/future_video_cls_loss"] = loss.detach()
-        metrics["align/future_video_cls_loss_weighted"] = weighted_loss.detach()
-        return weighted_loss, metrics
-
-    def _emb_loss(self, emb_preds, emb_targets):
-        l1_loss = F.smooth_l1_loss(emb_preds.float(), emb_targets.float().detach(), reduction="none")
-        return l1_loss.mean()
-
-ModelClass = LingbotVlaPolicy
-
-__all__ = ["LingbotVlaPolicy", "Qwen2_5_VLForConditionalGeneration", "Qwen2_5_VLTextModel", "Qwen2ForCausalLM", "Qwen2_5_VLPreTrainedModel"]
-# __V1_END__
 
 # Qwen3-VL LingBot-VLA v2 policy.
 FlowMatchingV1 = FlowMatching
@@ -1844,11 +1352,9 @@ from telefuser.models.lingbot_vla_v2_loader import (
     our_eager_attention_forward,
     prefix_query_segments,
     prefix_query_token_spans,
-    sample_beta,
 )
 from telefuser.models.lingbot_vla_v2_loader import build_block_mask, flex_attention_forward, flex_attention_with_block_mask
 from telefuser.models.lingbot_vla_v2_loader import LingBotVLAWeightLoader
-from telefuser.models.lingbot_vla_v2_loader import triton_sequence_wise_balance_loss
 from telefuser.models.lingbot_vla_v2_moe import (
     Qwen2ForCausalLM,
     Qwen2TokenMoeBlock,
@@ -1986,7 +1492,6 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
             )
 
         self.attention_interface = self.get_attention_interface()
-        self.set_requires_grad()
 
     def _apply(self, fn):
         super()._apply(fn)
@@ -2029,23 +1534,6 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
             token_config.use_robby_moe_kernel = getattr(self.config, "use_robby_moe_kernel", False)
             for idx in token_moe_layers:
                 self.qwen_expert.model.layers[idx].mlp = Qwen2TokenMoeBlock(token_config)
-
-    def set_requires_grad(self):
-        if self.config.freeze_vision_encoder:
-            self.qwenvl.visual.eval()
-            for params in self.qwenvl.visual.parameters():
-                params.requires_grad = False
-        if self.config.train_expert_only:
-            self.qwenvl.eval()
-            for params in self.qwenvl.parameters():
-                params.requires_grad = False
-
-    def train(self, mode: bool = True):
-        super().train(mode)
-        if self.config.freeze_vision_encoder:
-            self.qwenvl.visual.eval()
-        if self.config.train_expert_only:
-            self.qwenvl.eval()
 
     def get_image_features(
         self,
@@ -2334,7 +1822,6 @@ class FlowMatchingV2(FlowMatchingV1):
             self.future_video_share_future_depth_query = False
             self.block_future_depth_to_action = False
 
-        self.set_requires_grad()
 
     def embed_prefix(
         self,
@@ -2604,158 +2091,10 @@ class FlowMatchingV2(FlowMatchingV1):
         start, end = query_spans["current_depth"]
         return hidden_states[:, start:end, :]
 
-    def forward(
-        self,
-        images,
-        img_masks,
-        lang_tokens,
-        lang_masks,
-        state,
-        actions,
-        noise=None,
-        time=None,
-        loss_type="fm",
-        depth_targets=None,
-        image_grid_thw=None,
-        future_depth_targets=None,
-        future_video_targets=None,
-        future_video_cls_targets=None,
-        future_video_current_patch=None,
-    ) -> Tensor:
-        dtype = state.dtype
-        device = state.device
-        if noise is None:
-            noise = torch.randn(actions.shape, device=device, dtype=dtype)
-        if time is None:
-            time = self.sample_time(actions.size(0), device).to(dtype)
-
-        time_expanded = time[:, None, None]
-        x_t = time_expanded * noise + (1 - time_expanded) * actions
-        u_t = noise - actions
-
-        (
-            prefix_embs,
-            prefix_pad_masks,
-            prefix_att_masks,
-            prefix_position_ids,
-            visual_pos_masks,
-            deepstack_visual_embeds,
-        ) = self.embed_prefix(
-            images,
-            img_masks,
-            lang_tokens,
-            lang_masks,
-            image_grid_thw=image_grid_thw,
-        )
-        time_embs, suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(
-            state, x_t, time
-        )
-
-        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
-        att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
-        att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
-        prefix_len = prefix_pad_masks.shape[1]
-        if self.block_future_depth_to_action:
-            att_2d_masks = block_suffix_to_fv_(
-                att_2d_masks,
-                suffix_row_start=prefix_len,
-                prefix_len=prefix_len,
-                num_task_tokens=self.num_task_tokens,
-            )
-
-        att_2d_masks = self._block_suffix_to_future_video_if_enabled_(
-            att_2d_masks,
-            suffix_row_start=prefix_len,
-            prefix_len=prefix_len,
-        )
-        position_ids = self._build_full_position_ids(prefix_position_ids, prefix_pad_masks, suffix_pad_masks)
-
-        (outputs_embeds, suffix_out), _, router_logits_list = self.qwenvl_with_expert.forward(
-            attention_mask=att_2d_masks,
-            position_ids=position_ids,
-            vlm_position_ids=prefix_position_ids,
-            past_key_values=None,
-            inputs_embeds=[prefix_embs, suffix_embs],
-            use_cache=self.config.use_cache,
-            fill_kv_cache=True,
-            ada_cond=time_embs if getattr(self.config, "adanorm_time", False) else None,
-            visual_pos_masks=visual_pos_masks,
-            deepstack_visual_embeds=deepstack_visual_embeds,
-        )
-        align_metrics = {}
-        if self.config.align_params != {}:
-            loss_depth, loss_future_depth, depth_preds, future_depth_preds = self.depth_emb_forward(outputs_embeds, depth_targets, img_masks,future_depth_targets,)
-            loss_depth = loss_depth * self.config.align_params["depth_loss_weight"]
-            loss_future_depth = loss_future_depth * self.config.align_params.get("future_depth_loss_weight", 1.0)
-            loss_future_video = 0
-            future_video_preds = None
-            current_video_preds = None
-            if getattr(self, "use_future_video", False):
-                loss_video, future_video_preds, video_metrics = self.video_emb_forward(
-                    outputs_embeds,
-                    future_video_targets,
-                    future_video_cls_targets=future_video_cls_targets,
-                    future_video_current_patch=future_video_current_patch,
-                )
-                video_total_loss = loss_video
-                if (
-                    getattr(self, "use_current_video_patch", False)
-                    and future_video_current_patch is not None
-                ):
-                    current_video_loss, current_video_preds, current_video_metrics = self.current_video_emb_forward(
-                        outputs_embeds,
-                        future_video_current_patch,
-                    )
-                    video_total_loss = video_total_loss + current_video_loss
-                    video_metrics.update(current_video_metrics)
-                    video_metrics["align/current_video_loss"] = current_video_loss.detach()
-                video_cfg = self.config.align_params.get("video", {})
-                video_weight = video_cfg.get(
-                    "future_video_loss_weight",
-                    self.config.align_params.get(
-                        "future_video_loss_weight",
-                        self.config.align_params["depth_loss_weight"],
-                    ),
-                )
-                loss_future_video = video_total_loss * video_weight
-                align_metrics.update(video_metrics)
-                if "align/current_video_loss" in align_metrics:
-                    align_metrics["align/current_video_loss_weighted"] = (
-                        align_metrics["align/current_video_loss"] * video_weight
-                    )
-                align_metrics["align/future_video_loss"] = loss_video.detach()
-                align_metrics["align/future_video_loss_weighted"] = (loss_video * video_weight).detach()
-                align_metrics["align/video_loss"] = video_total_loss.detach()
-                align_metrics["align/video_loss_weighted"] = loss_future_video.detach()
-            self.steps += 1
-        else:
-            loss_depth = 0
-            loss_future_depth = 0
-            loss_future_video = 0
-            depth_preds = None
-            future_depth_preds = None
-            future_video_preds = None
-            current_video_preds = None
-
-        suffix_out = suffix_out[:, -self.config.n_action_steps :]
-        if getattr(self.config, "action_fp32", False):
-            v_t = self._fp32_linear(self.action_out_proj, suffix_out)
-        else:
-            if suffix_out.dtype != self.action_out_proj.weight.dtype:
-                suffix_out = suffix_out.to(self.action_out_proj.weight.dtype)
-            v_t = self.action_out_proj(suffix_out)
-
-        if loss_type == "fm":
-            losses = F.mse_loss(u_t, v_t, reduction="none")
-        elif loss_type == "L1_fm":
-            losses = F.l1_loss(u_t, v_t, reduction="none")
-
-        seq_wise_loss, router_z_loss, moe_metrics = self._moe_losses_and_metrics(
-            router_logits_list, losses
-        )
-        if align_metrics:
-            moe_metrics.update(align_metrics)
-        return losses, loss_depth, loss_future_depth, loss_future_video, depth_preds, seq_wise_loss, router_z_loss, moe_metrics, future_depth_preds, future_video_preds, current_video_preds
+    def forward(self, *args, **kwargs):
+        """Reject the upstream training API in the inference-only model."""
+        del args, kwargs
+        raise RuntimeError("LingBot-VLA v2 is inference-only; use sample_actions()")
 
     def sample_actions(
         self,
@@ -2910,153 +2249,19 @@ class FlowMatchingV2(FlowMatchingV1):
             v_t = self.action_out_proj(suffix_out)
         return v_t
 
-    def _moe_losses_and_metrics(self, router_logits_list, losses):
-        router_z_loss_coeff = getattr(self.config, "router_z_loss_coeff", 0)
-        router_z_loss = losses.new_zeros(())
-        router_z_layer_losses = None  # per-layer raw z-loss (pre-coeff), for monitoring
-        if router_z_loss_coeff > 0 and router_logits_list:
-            router_z_layer_losses = [
-                torch.logsumexp(logits.float(), dim=-1).pow(2).mean()
-                for logits in router_logits_list
-            ]
-            router_z_loss = router_z_loss_coeff * torch.stack(router_z_layer_losses).mean()
-
-        seq_wise_loss_coeff = getattr(self.config, "sequence_wise_loss_coeff", 0)
-        seq_wise_loss = 0
-        seqwise_layer_losses = None  # per-layer raw seq-wise balance loss (pre-coeff), for monitoring
-        if seq_wise_loss_coeff > 0 and router_logits_list:
-            # router_logits are [B*T, E] (action-expert tokens, fixed length T per sample).
-            # per_sequence -> balance experts within each sample's T tokens (DeepSeek-V3 intent);
-            # global -> treat the whole B*T batch as one sequence.
-            mode = getattr(self.config, "sequence_wise_mode", "per_sequence")
-            score_func = getattr(self.config, "router_activation", "softmax")
-            if mode == "global":
-                seq_lengths = None
-            else:
-                B = losses.shape[0]
-                N = router_logits_list[0].shape[0]
-                seq_lengths = [N // B] * B
-            seqwise_layer_losses = triton_sequence_wise_balance_loss(
-                router_logits_list=tuple(router_logits_list),
-                top_k=getattr(self.config, "token_top_k", 4),
-                seq_lengths=seq_lengths,
-                padding_len=0,
-                score_func=score_func,
-            )
-            if seqwise_layer_losses:
-                seq_wise_loss = seq_wise_loss_coeff * torch.stack(seqwise_layer_losses).mean()
-
-        moe_metrics = {}
-        if router_logits_list:
-            token_moe_layers_list = sorted(getattr(self.config, "token_moe_layers", None) or [])
-            all_moe_indices = token_moe_layers_list
-            token_expert_counts = []
-            # Per-layer token-MoE stats, collected for moe_summary/* cross-layer aggregates.
-            tok_maxvio, tok_minvio, tok_minload, tok_entropy, tok_sigmoid = [], [], [], [], []
-            tok_bias = []  # per-layer max(|e_score_correction_bias|) (loss-free); >1 -> bias dominates sigmoid score
-            any_dead = None  # OR-accumulated bool: any token-MoE layer with a 0-count expert
-            with torch.no_grad():
-                for i, logits in enumerate(router_logits_list):
-                    layer_id = all_moe_indices[i] if i < len(all_moe_indices) else i
-                    num_experts = logits.shape[-1]
-                    routing_probs = F.softmax(logits, dim=1, dtype=torch.float)
-                    moe_block = self.qwenvl_with_expert.qwen_expert.model.layers[layer_id].mlp
-                    if hasattr(moe_block, "last_tokens_per_expert"):
-                        # Global (all-reduced), biased, true top-k load from the load-balance hook.
-                        counts = moe_block.last_tokens_per_expert.clone()
-                        if counts.sum() == 0:
-                            # Buffer not yet populated by the load-balance hook (first step
-                            # after run start / resume) -> skip this layer to avoid a spurious
-                            # has_dead_expert / min_load_ratio spike on the very first viz.
-                            continue
-                    else:
-                        _, selected = torch.topk(routing_probs, 1, dim=-1)
-                        counts = F.one_hot(selected.squeeze(-1), num_classes=num_experts).float().sum(dim=0)
-                    avg_load = counts.mean()
-                    denom = avg_load.clamp(min=1e-9)
-                    maxvio = (counts.max() - avg_load) / denom          # peak overload  (>=0, larger=worse)
-                    minvio = (avg_load - counts.min()) / denom          # valley underload (=1 -> dead expert)
-                    min_load_ratio = counts.min() / denom               # =0 -> dead expert
-                    # entropy is rank-local (this rank's routing_probs, last micro-batch).
-                    per_sample_entropy = -(routing_probs * routing_probs.clamp(min=1e-9).log()).sum(dim=-1)
-                    entropy = per_sample_entropy.mean()
-                    ll = f"{layer_id:02d}"
-                    token_expert_counts.append((layer_id, counts))
-                    moe_metrics[f"moe_maxvio/layer{ll}"] = maxvio
-                    moe_metrics[f"moe_minvio/layer{ll}"] = minvio
-                    moe_metrics[f"moe_minload/layer{ll}"] = min_load_ratio
-                    moe_metrics[f"moe_entropy_rank0/layer{ll}"] = entropy
-                    tok_maxvio.append(maxvio)
-                    tok_minvio.append(minvio)
-                    tok_minload.append(min_load_ratio)
-                    tok_entropy.append(entropy)
-                    dead = counts.min() == 0
-                    any_dead = dead if any_dead is None else (any_dead | dead)
-                    if hasattr(moe_block, "avg_topk_sigmoid_score"):
-                        sig = moe_block.avg_topk_sigmoid_score.detach().reshape(()).to(denom)
-                        moe_metrics[f"moe_topksigmoid_rank0/layer{ll}"] = sig
-                        tok_sigmoid.append(sig)
-                    if hasattr(moe_block, "e_score_correction_bias"):
-                        bias_absmax = moe_block.e_score_correction_bias.detach().abs().max().to(denom)
-                        moe_metrics[f"moe_bias/layer{ll}"] = bias_absmax
-                        tok_bias.append(bias_absmax)
-                # ---- moe_summary/* : cross-layer aggregates over token-MoE layers (written every step) ----
-                if tok_maxvio:
-                    moe_metrics["moe_summary/maxvio_avg"] = torch.stack(tok_maxvio).mean()
-                    moe_metrics["moe_summary/maxvio_max"] = torch.stack(tok_maxvio).max()
-                    moe_metrics["moe_summary/minvio_avg"] = torch.stack(tok_minvio).mean()
-                    moe_metrics["moe_summary/minvio_max"] = torch.stack(tok_minvio).max()
-                    moe_metrics["moe_summary/min_load_ratio"] = torch.stack(tok_minload).min()
-                    moe_metrics["moe_summary/has_dead_expert"] = any_dead.float()
-                    moe_metrics["moe_summary/entropy_avg_rank0"] = torch.stack(tok_entropy).mean()
-                if tok_sigmoid:
-                    moe_metrics["moe_summary/topk_sigmoid_avg_rank0"] = torch.stack(tok_sigmoid).mean()
-                if tok_bias:
-                    moe_metrics["moe_summary/bias_absmax"] = torch.stack(tok_bias).max()
-                # ---- moe_seqwise/* : per-layer raw sequence-wise balance loss (pre-coeff) + average ----
-                if seqwise_layer_losses and len(seqwise_layer_losses) == len(all_moe_indices):
-                    sw_vals = []
-                    for lid, sw in zip(all_moe_indices, seqwise_layer_losses):
-                        v = sw.detach()
-                        moe_metrics[f"moe_seqwise/layer{lid:02d}"] = v
-                        sw_vals.append(v)
-                    moe_metrics["moe_seqwise/avg"] = torch.stack(sw_vals).mean()
-                # ---- moe_zloss/* : per-layer raw router z-loss (pre-coeff) + average/weighted loss ----
-                if router_z_layer_losses and len(router_z_layer_losses) == len(all_moe_indices):
-                    zl_vals = []
-                    for lid, zl in zip(all_moe_indices, router_z_layer_losses):
-                        v = zl.detach()
-                        moe_metrics[f"moe_zloss/layer{lid:02d}"] = v
-                        zl_vals.append(v)
-                    moe_metrics["moe_zloss/avg_raw"] = torch.stack(zl_vals).mean()
-                    moe_metrics["moe_zloss/weighted"] = router_z_loss.detach()
-                if token_expert_counts:
-                    moe_metrics["_token_moe_expert_counts"] = token_expert_counts
-        return seq_wise_loss, router_z_loss, moe_metrics
-
 
 class LingbotVlaV2Policy(PreTrainedModel):
     config_class = LingbotVLAV2Config
     name = "torch_lingbot_vla_v2"
-    supports_gradient_checkpointing = True
     _no_split_modules = ["Qwen2DecoderLayer", "FixQwen2RMSNorm", "FixAdaRMSNorm"]
-
-    def get_parallel_plan(self):
-        from telefuser.models.lingbot_vla_v2_loader import NativeParallelPlan as ParallelPlan
-        from torch.distributed._tensor import Shard
-
-        ep_plan = {
-            "model.qwenvl_with_expert.qwen_expert.model.layers.*.mlp.experts.gate_proj": Shard(0),
-            "model.qwenvl_with_expert.qwen_expert.model.layers.*.mlp.experts.up_proj": Shard(0),
-            "model.qwenvl_with_expert.qwen_expert.model.layers.*.mlp.experts.down_proj": Shard(0),
-        }
-        return ParallelPlan(ep_plan=ep_plan)
 
     @classmethod
     def get_weight_loader(cls):
         return LingBotVLAWeightLoader()
 
-    def __init__(self, config: LingbotVLAV2Config, eval: bool = False):
+    def __init__(self, config: LingbotVLAV2Config, eval: bool = True):
+        if not eval:
+            raise ValueError("LingBot-VLA v2 only supports inference mode")
         super().__init__(config)
         self.config = config
         self.language_tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path, local_files_only=True)
@@ -3064,96 +2269,18 @@ class LingbotVlaV2Policy(PreTrainedModel):
         if not getattr(self.config, "use_lm_head", False):
             del self.model.qwenvl_with_expert.qwenvl.lm_head
         del self.model.qwenvl_with_expert.qwen_expert.lm_head
+        self.requires_grad_(False)
+        self.eval()
         self.reset()
         torch.set_float32_matmul_precision("high")
 
     def reset(self):
         return None
 
-    def get_optim_params(self) -> dict:
-        return self.parameters()
-
-    def forward(
-        self,
-        images,
-        img_masks,
-        state,
-        lang_tokens,
-        lang_masks,
-        actions,
-        joint_mask=None,
-        action_is_pad=None,
-        noise=None,
-        time=None,
-        depth_targets=None,
-        image_grid_thw=None,
-        future_depth_targets=None,
-        future_video_targets=None,
-        future_video_cls_targets=None,
-        future_video_current_patch=None,
-        **kwargs
-    ) -> tuple[Tensor, dict[str, Tensor]]:
-        loss_dict = {}
-        if getattr(self.config, "action_fp32", False):
-            state = state.float()
-            actions = actions.float()
-        (
-            losses,
-            loss_depth,
-            loss_future_depth,
-            loss_future_video,
-            depth_preds,
-            seq_wise_loss,
-            router_z_loss,
-            moe_metrics,
-            future_depth_preds,
-            future_video_preds,
-            current_video_preds,
-        ) = self.model.forward(
-            images,
-            img_masks,
-            lang_tokens,
-            lang_masks,
-            state,
-            actions,
-            noise,
-            time,
-            loss_type=self.config.loss_type,
-            depth_targets=depth_targets,
-            image_grid_thw=image_grid_thw,
-            future_depth_targets=future_depth_targets,
-            future_video_targets=future_video_targets,
-            future_video_cls_targets=future_video_cls_targets,
-            future_video_current_patch=future_video_current_patch,
-        )
-
-        if joint_mask is not None:
-            if "repeat" in self.config.loss_type:
-                joint_mask = joint_mask.repeat(2, 1, 1)
-            assert len(joint_mask.shape) == 3
-            
-            masked_losses = losses * joint_mask
-            valid_counts = joint_mask.sum(dim=(1, 2)).clamp(min=1)
-            batch_mean_losses = masked_losses.sum(dim=(1, 2)) / valid_counts
-            loss_vla = masked_losses.sum() / joint_mask.sum().clamp(min=1)
-        else:
-            losses = losses[:, :, : self.config.action_dim]
-            batch_mean_losses = losses.mean(dim=(1, 2))
-            loss_vla = losses.mean()
-
-        loss_dict["batch_mean_losses"] = batch_mean_losses.detach()
-        total_loss = (
-            loss_vla
-            + loss_depth
-            + loss_future_depth
-            + loss_future_video
-            + seq_wise_loss
-            + router_z_loss
-        )
-        loss_dict["router_z_loss"] = router_z_loss.detach() if torch.is_tensor(router_z_loss) else router_z_loss
-        if moe_metrics:
-            loss_dict.update(moe_metrics)
-        return total_loss, loss_vla, loss_depth, loss_future_depth, loss_future_video, seq_wise_loss, loss_dict, depth_preds, future_depth_preds, future_video_preds, current_video_preds
+    def forward(self, *args, **kwargs):
+        """Reject the upstream training API in the inference-only model."""
+        del args, kwargs
+        raise RuntimeError("LingBot-VLA v2 is inference-only; use sample_actions()")
 
     def sample_actions(self, *args, **kwargs) -> Tensor:
         return self.model.sample_actions(*args, **kwargs)

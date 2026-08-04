@@ -1,8 +1,10 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
-from telefuser.models.lingbot_vla_v2 import QwenvlWithExpertV2Model
+from telefuser.models import lingbot_vla_v2_loader
+from telefuser.models.lingbot_vla_v2 import LingbotVlaV2Policy, QwenvlWithExpertV2Model
 
 
 class _Visual:
@@ -51,3 +53,18 @@ def test_image_grid_cache_is_reused_and_invalidated_by_grid_shape() -> None:
     assert visual.preprocess_calls == 2
     assert first[0].shape == repeated[0].shape == (2, 4, 3)
     assert changed[0].shape == (2, 2, 3)
+
+
+def test_policy_rejects_training_entrypoints() -> None:
+    with pytest.raises(RuntimeError, match="inference-only"):
+        LingbotVlaV2Policy.forward(None)
+    with pytest.raises(ValueError, match="only supports inference mode"):
+        LingbotVlaV2Policy.__init__(None, SimpleNamespace(), eval=False)
+
+    assert "get_optim_params" not in LingbotVlaV2Policy.__dict__
+    assert "get_parallel_plan" not in LingbotVlaV2Policy.__dict__
+
+
+def test_loader_does_not_expose_training_loss_helpers() -> None:
+    assert not hasattr(lingbot_vla_v2_loader, "triton_sequence_wise_balance_loss")
+    assert not hasattr(lingbot_vla_v2_loader, "triton_load_balancing_loss_func")
