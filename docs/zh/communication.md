@@ -157,6 +157,79 @@ Producer worker                 父进程 / 控制路径                 Consume
 父进程只接收 `WorkerTensorRef`，不会物化 CUDA tensor 内容。嵌套 dict、tuple 和 list 保持结构；同一 artifact
 中的重复 tensor leaf 只传输一次。
 
+### 跨 Stage 的 Worker 与 Actor 数据流
+
+跨 stage 通信的设计目标是把编排与 tensor 传输分开：
+
+```text
+Pipeline scheduler
+      | invocation metadata
+      v
+Producer actor -> Producer ParallelWorker -> WorkerTensorChannel storage
+      |                                      |
+      | WorkerTensorRef                      | shared memory 或 CUDA IPC
+      v                                      v
+Consumer actor -> Consumer ParallelWorker -> rank-local tensor
+```
+
+Actor 是控制面的 owner，负责准入、顺序、request/session 结果关联和取消协调。`ParallelWorker` 拥有 stage
+执行，并在 worker rank 上解析输入 reference。`WorkerTensorChannel` 是数据面：producer worker 发布轻量
+reference，tensor storage 不经过 actor 和父进程 queue 传输。Actor 与 scheduler 应原样转发
+`WorkerTensorRef`，不能解析它，也不能把其 tensor payload 移动到其他 device。
+
+这条路径需要 pipeline 为每条 edge 显式启用。只构造 `ParallelWorker(stage)` 不会自动创建或发现 tensor
+channel。Pipeline 拥有 stage 拓扑，必须显式创建 channel 并绑定两端：
+
+```python
+from telefuser.worker import ParallelWorker, WorkerTensorChannel
+
+latent_channel = WorkerTensorChannel(
+    consumer_world_size=vae_config.parallel_config.world_size,
+    timeout=max(dit_config.parallel_config.timeout, vae_config.parallel_config.timeout),
+)
+denoise_worker = ParallelWorker(
+    denoise_stage,
+    tensor_output_channel=latent_channel,
+    tensor_output_methods=("denoise",),
+)
+vae_worker = ParallelWorker(
+    vae_stage,
+    tensor_input_channels=(latent_channel,),
+)
+```
+
+Actor adapter 可以包装任意一端的 worker，而不改变 channel contract。Producer actor 向 scheduler 返回
+metadata，consumer actor 再把 metadata 传给 consumer worker。Consumer rank 在调用 stage method 前解析
+reference。某个 method 的结果如果需要由父进程检查，应对该次调用设置 `_tensor_transport=False`，继续走
+常规 result 路径。
+
+只有满足下列条件的 edge 才应使用直接路径：
+
+| Edge | Transport |
+|------|-----------|
+| 同机 `ParallelWorker` group 到一个 consumer worker group | `WorkerTensorChannel` |
+| Actor 间的控制、顺序、状态或小型 metadata | Actor 或 scheduler queue |
+| 父进程需要检查或修改的输出 | 常规 worker result 路径 |
+| Ray 或其他跨节点 actor 边界 | Runtime 提供的 transport |
+| 多个独立 consumer group | 分别声明和管理 edge；一个 channel 不能向多个 group fan-out |
+
+Direct channel 当前只遍历嵌套在 dict、tuple 和 list 中的 tensor。返回 dataclass 或其他自定义容器的 stage
+必须先把 transport output 规范成支持的结构，否则继续使用常规 result 路径。
+
+跨 stage 生命周期是 transport contract 的一部分，不是 actor 的内部实现细节：
+
+1. 构造 producer 和 consumer worker 前先创建 channel。
+2. Actor edge 只携带返回的 reference 和小型 metadata。
+3. 每个 consumer 都保持 producer FIFO 顺序。
+4. 末端取消时，在丢弃 actor artifact 前对 consumer worker 调用
+   `discard_tensor_refs(..., sync=True)`。
+5. Shutdown 时先 drain 并关闭 consumer actor/worker，再关闭 producer actor/worker，最后关闭 channel。
+
+`ParallelWorkerStageActor` 调用 worker 时会保留 reference，但通用 actor cleanup 不会推断 channel ownership。
+支持 session 取消的 pipeline 必须安装 stage/session cleanup hook，释放未消费的 reference。LingBot 在
+condition 和 latent edge 上实现了这一 contract；Wan 2.2 使用同一 channel 机制完成 VAE-to-denoise 和
+denoise-to-VAE 双向 handoff。
+
 ### 持久 CUDA IPC Pool
 
 稳定 CUDA tensor profile 由 tensor index、shape、dtype 和 source device 共同标识。每个 profile 持有一块
@@ -197,7 +270,8 @@ CUDA tensor transport。两种情况都为每个 consumer rank 保留一个 FIFO
 
 `ParallelWorker` 的 command/result queue 传输方法名、参数、小型结果和 tensor reference。它们使用
 `SimpleQueue`，避免 background feeder 引入调度尾延迟。通过 `WorkerTensorChannel` 连接的大 tensor 留在直接
-数据路径。
+数据路径。该优化只在 pipeline 显式绑定 channel 的 edge 上生效；未绑定的 `ParallelWorker` 调用仍使用常规
+multiprocessing tensor transport。
 
 Channel contract 是有序且有界的：
 
@@ -271,9 +345,10 @@ python examples/run_examples.py --pipeline <name> --gpus 0,1,2,3
 2. 算法专用协议放在 `telefuser/distributed/` 下的聚焦模块中。
 3. 模型代码只负责 tensor layout 和模型语义。
 4. `WorkerTensorChannel` 只用于同机、单 producer、单 consumer group 的 edge。
-5. 没有明确拓扑缺口时，不新增 fallback、环境变量或公共配置字段。
-6. 优化 happy path 前，先定义顺序、所有权、取消、timeout 和 shutdown。
-7. 新 collective 或 IPC 同步规则必须添加真实多进程测试。
+5. 每条跨 stage channel 都由拥有相应 stage 拓扑的 pipeline 显式声明并管理。
+6. 没有明确拓扑缺口时，不新增 fallback、环境变量或公共配置字段。
+7. 优化 happy path 前，先定义顺序、所有权、取消、timeout 和 shutdown。
+8. 新 collective 或 IPC 同步规则必须添加真实多进程测试。
 
 不要因为控制路径已经存在就让大 tensor 绕行父进程；也不要用 device-wide synchronize 修补顺序问题，应通过
 process-group work handle 或 stream event 表达依赖。
@@ -282,6 +357,8 @@ process-group work handle 或 stream event 表达依赖。
 
 - CUDA IPC pool 只支持同一主机。
 - 稳定池化 profile 要求 tensor index、shape、dtype 和 source device 固定。
+- Direct channel 不遍历 dataclass 或任意自定义 output container。
+- 通用 actor 不会根据 stage 拓扑推断 channel ownership 或末端 reference cleanup。
 - Ring AllGather 用实现简单性换取每个 rank 的 K/V 副本显存。
 - 空间 VAE halo exchange 已复用 buffer，但当前仍会在依赖它的卷积前等待。
 - WAN pipeline-parallel 通信仍是独立的模型专用兼容区域。

@@ -187,6 +187,12 @@ denoise_worker = ParallelWorker(
 vae_worker = ParallelWorker(vae_stage, tensor_input_channels=(latent_channel,))
 ```
 
+Channel 不会自动创建。拥有 stage 拓扑的 pipeline 必须创建并持有每条 channel，把它传给两端的
+`ParallelWorker`，并在 consumer 和 producer worker 停止后关闭。Actor 或 scheduler edge 只携带
+`WorkerTensorRef` metadata；支持取消的 actor 流程必须通过 consumer worker 释放末端 reference。完整的跨
+stage wiring 与生命周期 contract 参见
+[通信架构](communication.md#跨-stage-的-worker-与-actor-数据流)。
+
 当 consumer rank 只处理互不重叠的 tensor slice 时可设置 `shard_dim`。Producer 只 staging 一次，各 rank 仅
 copy 自己的 slice。LingBot 空间并行 VAE 使用 `shard_dim=-2`，因此跨卡 peer-copy 聚合通信量保持为一个
 logical latent，而不会随 VAE world size 放大；计入 producer 本地 staging 后，设备搬运预算为两个 logical

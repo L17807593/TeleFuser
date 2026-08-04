@@ -188,6 +188,12 @@ denoise_worker = ParallelWorker(
 vae_worker = ParallelWorker(vae_stage, tensor_input_channels=(latent_channel,))
 ```
 
+Channel setup is not automatic. The pipeline that owns the stage topology must create and retain each channel, pass it
+to both `ParallelWorker` endpoints, and close it after the consumer and producer workers stop. Actor or scheduler
+edges carry only `WorkerTensorRef` metadata; cancellable actor flows must release terminal references through the
+consumer worker. See [Communication Architecture](communication.md#cross-stage-worker-and-actor-dataflow) for the
+complete cross-stage wiring and lifecycle contract.
+
 Set `shard_dim` when consumer ranks operate on disjoint tensor slices. The producer stages the tensor once and each
 rank copies only its slice. LingBot's spatial VAE uses `shard_dim=-2`, so aggregate peer-copy traffic stays at one
 logical latent instead of growing with the VAE world size. Including producer-local staging, the device-copy budget is

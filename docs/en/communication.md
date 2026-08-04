@@ -167,6 +167,82 @@ Producer worker                 Parent / control path              Consumer work
 The parent receives `WorkerTensorRef` objects and never materializes CUDA tensor contents. Nested dictionaries,
 tuples, and lists preserve their structure; duplicate tensor leaves are transported once per artifact.
 
+### Cross-stage worker and actor dataflow
+
+The intended cross-stage design separates orchestration from tensor movement:
+
+```text
+Pipeline scheduler
+      | invocation metadata
+      v
+Producer actor -> Producer ParallelWorker -> WorkerTensorChannel storage
+      |                                      |
+      | WorkerTensorRef                      | shared memory or CUDA IPC
+      v                                      v
+Consumer actor -> Consumer ParallelWorker -> rank-local tensor
+```
+
+The actor is the control-plane owner. It admits work, preserves ordering, correlates results with requests or
+sessions, and coordinates cancellation. The `ParallelWorker` owns stage execution and resolves input references on
+its worker ranks. `WorkerTensorChannel` is the data plane: the producer worker publishes lightweight references while
+the tensor storage moves independently of the actor and parent-process queues. Actors and schedulers should forward a
+`WorkerTensorRef` unchanged; they must not dereference it or move its tensor payload to another device.
+
+This path is opt-in for each pipeline edge. Constructing `ParallelWorker(stage)` alone does not create or discover a
+tensor channel. The pipeline owns topology and must explicitly create the channel and bind both endpoints:
+
+```python
+from telefuser.worker import ParallelWorker, WorkerTensorChannel
+
+latent_channel = WorkerTensorChannel(
+    consumer_world_size=vae_config.parallel_config.world_size,
+    timeout=max(dit_config.parallel_config.timeout, vae_config.parallel_config.timeout),
+)
+denoise_worker = ParallelWorker(
+    denoise_stage,
+    tensor_output_channel=latent_channel,
+    tensor_output_methods=("denoise",),
+)
+vae_worker = ParallelWorker(
+    vae_stage,
+    tensor_input_channels=(latent_channel,),
+)
+```
+
+An actor adapter may wrap either worker without changing the channel contract. The producer actor returns metadata to
+the scheduler, and the consumer actor passes that metadata to the consumer worker. The consumer rank resolves the
+reference immediately before invoking the stage method. If a method sometimes returns data that the parent must
+inspect, that call must use `_tensor_transport=False` and stay on the regular result path.
+
+Use the direct path only when the edge satisfies all of these conditions:
+
+| Edge | Transport |
+|------|-----------|
+| Same-host `ParallelWorker` group to one consumer worker group | `WorkerTensorChannel` |
+| Actor-to-actor control, ordering, status, or small metadata | Actor or scheduler queue |
+| Output that the parent must inspect or mutate | Regular worker result path |
+| Ray or another cross-node actor boundary | Runtime-provided transport |
+| Multiple independent consumer groups | Separate explicitly owned edges; one channel cannot fan out to groups |
+
+Direct-channel output traversal currently recognizes tensors nested in dictionaries, tuples, and lists. A stage that
+returns a dataclass or another custom container must normalize its transport output to a supported structure or remain
+on the regular result path.
+
+Cross-stage lifecycle is part of the transport contract, not an actor implementation detail:
+
+1. Create channels before constructing their producer and consumer workers.
+2. Let actor edges carry only the returned references and small metadata.
+3. Preserve producer FIFO order at every consumer.
+4. On terminal cancellation, call `discard_tensor_refs(..., sync=True)` on the consumer worker before dropping the
+   actor artifact.
+5. During shutdown, drain and close consumer actors/workers first, then producer actors/workers, and close channels
+   last.
+
+`ParallelWorkerStageActor` preserves references when it invokes a worker, but generic actor cleanup does not infer
+channel ownership. A pipeline with cancellable sessions must install a stage/session cleanup hook that releases its
+unconsumed references. LingBot implements this contract for condition and latent edges. Wan 2.2 uses the same channel
+mechanism for bidirectional VAE-to-denoise and denoise-to-VAE handoff.
+
 ### Persistent CUDA IPC pools
 
 Stable CUDA tensor profiles are keyed by tensor index, shape, dtype, and source device. Each profile owns a persistent
@@ -208,7 +284,8 @@ placement.
 
 `ParallelWorker` command and result queues carry method names, arguments, small results, and tensor references. They
 use `SimpleQueue` to avoid background feeder scheduling tails. Large tensors connected through a
-`WorkerTensorChannel` stay on the direct data path.
+`WorkerTensorChannel` stay on the direct data path. This optimization is active only on pipeline edges that explicitly
+bind a channel; unbound `ParallelWorker` calls use the regular multiprocessing tensor transport.
 
 The channel contract is ordered and bounded:
 
@@ -285,9 +362,10 @@ When adding a communication path:
 2. Put algorithm-specific protocols in a focused module under `telefuser/distributed/`.
 3. Keep model code responsible only for tensor layout and model semantics.
 4. Use `WorkerTensorChannel` only for a same-host, single-producer/single-consumer-group edge.
-5. Do not add a new fallback, environment variable, or public configuration field without a concrete topology gap.
-6. Specify ordering, ownership, cancellation, timeout, and shutdown before optimizing the happy path.
-7. Add a real multi-process test for any new collective or IPC synchronization rule.
+5. Declare and own every cross-stage channel in the pipeline that owns the corresponding stage topology.
+6. Do not add a new fallback, environment variable, or public configuration field without a concrete topology gap.
+7. Specify ordering, ownership, cancellation, timeout, and shutdown before optimizing the happy path.
+8. Add a real multi-process test for any new collective or IPC synchronization rule.
 
 Do not route large tensors through the parent merely because the control path already exists. Do not use a device-wide
 synchronize to repair an ordering bug; express the dependency with process-group work handles or stream events.
@@ -296,6 +374,8 @@ synchronize to repair an ordering bug; express the dependency with process-group
 
 - CUDA IPC pools are same-host only.
 - Stable pooled profiles require fixed tensor index, shape, dtype, and source device.
+- Direct-channel traversal does not inspect dataclasses or arbitrary custom output containers.
+- Generic actors do not infer channel ownership or terminal-reference cleanup from stage topology.
 - Ring AllGather trades implementation simplicity for replicated K/V memory.
 - Spatial VAE halo exchange reuses buffers but currently waits before the dependent convolution.
 - WAN pipeline-parallel communication remains a separate, model-specific compatibility area.
