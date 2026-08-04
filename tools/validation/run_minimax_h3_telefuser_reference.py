@@ -86,6 +86,7 @@ def main() -> None:
     parser.add_argument("--trajectory-artifact", type=Path)
     parser.add_argument("--trajectory-max-updates", type=int)
     args = parser.parse_args()
+    run_started = time.perf_counter()
 
     if args.trajectory_max_updates is not None and args.trajectory_artifact is None:
         parser.error("--trajectory-max-updates requires --trajectory-artifact")
@@ -121,6 +122,7 @@ def main() -> None:
             )
 
         pipeline_module.MiniMaxH3DenoisingStage = build_trajectory_stage
+    load_started = time.perf_counter()
     common = runpy.run_path(str(Path(__file__).resolve().parents[2] / "examples" / "minimax_h3" / "common.py"))
     load_minimax_h3_pipeline = common["load_minimax_h3_pipeline"]
     save_generation = common["save_generation"]
@@ -131,6 +133,7 @@ def main() -> None:
         num_inference_steps=args.num_inference_steps,
         ulysses_degree=args.ulysses_degree,
     )
+    load_seconds = time.perf_counter() - load_started
     if args.text_condition_artifact is not None or args.text_condition_input is not None:
         if pipeline.text_stage is None:
             raise RuntimeError("MiniMax H3 text stage is not initialized")
@@ -307,7 +310,7 @@ def main() -> None:
 
     torch.cuda.reset_peak_memory_stats(args.device)
     started_at = datetime.now(timezone.utc)
-    started = time.perf_counter()
+    generation_started = time.perf_counter()
     try:
         result = pipeline(
             task=request["task"],
@@ -322,10 +325,14 @@ def main() -> None:
         torch.cuda.synchronize(args.device)
         if args.dit_layer_artifact is not None:
             torch.save(captured_layers, args.dit_layer_artifact)
+        generation_compute_seconds = time.perf_counter() - generation_started
     finally:
+        shutdown_started = time.perf_counter()
         pipeline.stop()
-    generation_seconds = time.perf_counter() - started
+        shutdown_seconds = time.perf_counter() - shutdown_started
+    generation_seconds = time.perf_counter() - generation_started
     finished_at = datetime.now(timezone.utc)
+    artifact_started = time.perf_counter()
 
     frames = result.video[0].mul(255).clamp(0, 255).to(torch.uint8).numpy()
     audio = result.audio[0].float().numpy()
@@ -417,8 +424,22 @@ def main() -> None:
             "sha256": _sha256(args.trajectory_artifact),
         }
         manifest["trajectory_max_updates"] = args.trajectory_max_updates
+    timings = {
+        "load_seconds": load_seconds,
+        "generation_compute_seconds": generation_compute_seconds,
+        "shutdown_seconds": shutdown_seconds,
+        "generation_seconds": generation_seconds,
+        "artifact_seconds": time.perf_counter() - artifact_started,
+        "total_seconds": time.perf_counter() - run_started,
+    }
+    manifest["timings"] = timings
     args.manifest.write_text(json.dumps(manifest, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
-    print(json.dumps({"generation_seconds": generation_seconds, "artifacts": manifest["artifacts"]}, sort_keys=True))
+    print(
+        json.dumps(
+            {"timings": timings, "runtime_metrics": result.runtime_metrics, "artifacts": manifest["artifacts"]},
+            sort_keys=True,
+        )
+    )
 
 
 if __name__ == "__main__":

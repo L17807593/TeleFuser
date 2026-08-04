@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -119,6 +120,19 @@ class MiniMaxH3Pipeline(BasePipeline):
     def _resolve_stage_result(value: Any) -> Any:
         return value() if callable(value) else value
 
+    def _synchronize(self) -> None:
+        device = torch.device(self.device)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+
+    def _timed_call(self, function: Any, /, *args: Any, **kwargs: Any) -> tuple[Any, float]:
+        self._synchronize()
+        started = time.perf_counter()
+        value = function(*args, **kwargs)
+        value = self._resolve_stage_result(value)
+        self._synchronize()
+        return value, time.perf_counter() - started
+
     @staticmethod
     def _resolve_deferred_plan(
         canonical: dict[str, Any],
@@ -230,6 +244,8 @@ class MiniMaxH3Pipeline(BasePipeline):
             or self.denoising_stage is None
         ):
             raise RuntimeError("MiniMaxH3Pipeline.init must be called before generation")
+        self._synchronize()
+        pipeline_started = time.perf_counter()
         canonical = minimax_h3_validate_canonical_request(
             task=task,
             prompt=prompt,
@@ -240,6 +256,7 @@ class MiniMaxH3Pipeline(BasePipeline):
             audio_flow_shift=audio_flow_shift,
         )
         with ExitStack() as stack:
+            media_started = time.perf_counter()
             paths: dict[int, Path] = {}
             facts: dict[int, MiniMaxH3MaterialFacts] = {}
             for index, condition in enumerate(canonical["conditions"]):
@@ -264,33 +281,51 @@ class MiniMaxH3Pipeline(BasePipeline):
                 )
             canonical, plan = self._resolve_deferred_plan(canonical, facts)
             prepared = self.video_vae_stage.prepare_media(plan, paths, facts)
+            self._synchronize()
+            media_preparation_seconds = time.perf_counter() - media_started
             images = [item.image for item in prepared if item.image is not None]
             videos = [item.video_frames for item in prepared if item.video_frames is not None]
-            text = self.text_stage.encode(
+            text, text_encoding_seconds = self._timed_call(
+                self.text_stage.encode,
                 task=plan.task,
                 prompt=plan.prompt,
                 images=images,
                 videos=videos,
                 condition_labels=self._condition_labels(prepared),
             )
+            visual_encoding_seconds = 0.0
             if any(item.image is not None or item.video_frames is not None for item in prepared):
-                prepared = self.video_vae_stage.encode_visual(prepared)
+                prepared, visual_encoding_seconds = self._timed_call(self.video_vae_stage.encode_visual, prepared)
             duration_seconds = float(plan.shape["frame_count"]) / float(plan.shape["fps"])
+            audio_encoding_seconds = 0.0
             if any(item.has_audio for item in prepared):
-                prepared = self.audio_vae_stage.encode_audio(prepared, paths, facts, duration_seconds)
+                prepared, audio_encoding_seconds = self._timed_call(
+                    self.audio_vae_stage.encode_audio, prepared, paths, facts, duration_seconds
+                )
             steps = self.config.num_inference_steps if num_inference_steps is None else num_inference_steps
             if isinstance(steps, bool) or not isinstance(steps, int) or steps < 2:
                 raise ValueError("num_inference_steps must be an integer of at least 2")
-            denoised = self._resolve_stage_result(
-                self.denoising_stage.denoise(
-                    plan=plan,
-                    text=text,
-                    conditions=prepared,
-                    num_inference_steps=steps,
-                )
+            denoised, denoising_stage_seconds = self._timed_call(
+                self.denoising_stage.denoise,
+                plan=plan,
+                text=text,
+                conditions=prepared,
+                num_inference_steps=steps,
             )
-            video = self.video_vae_stage.decode_video(denoised.video_latent)
-            audio = self.audio_vae_stage.decode_audio(denoised.audio_latent)
+            video, video_decoding_seconds = self._timed_call(self.video_vae_stage.decode_video, denoised.video_latent)
+            audio, audio_decoding_seconds = self._timed_call(self.audio_vae_stage.decode_audio, denoised.audio_latent)
+            pipeline_seconds = time.perf_counter() - pipeline_started
+            runtime_metrics = {
+                **denoised.runtime_metrics,
+                "media_preparation_seconds": media_preparation_seconds,
+                "text_encoding_seconds": text_encoding_seconds,
+                "visual_encoding_seconds": visual_encoding_seconds,
+                "audio_encoding_seconds": audio_encoding_seconds,
+                "denoising_stage_seconds": denoising_stage_seconds,
+                "video_decoding_seconds": video_decoding_seconds,
+                "audio_decoding_seconds": audio_decoding_seconds,
+                "pipeline_seconds": pipeline_seconds,
+            }
             return MiniMaxH3Generation(
                 video=video[:, : int(plan.shape["frame_count"])],
                 audio=audio,
@@ -298,7 +333,7 @@ class MiniMaxH3Pipeline(BasePipeline):
                 audio_sample_rate=32_000,
                 plan=plan,
                 packed_sequence_length=int(denoised.packed["seq_len"]),
-                runtime_metrics=denoised.runtime_metrics,
+                runtime_metrics=runtime_metrics,
             )
 
 
