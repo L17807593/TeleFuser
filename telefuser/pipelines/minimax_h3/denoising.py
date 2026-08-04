@@ -234,10 +234,10 @@ class MiniMaxH3DenoisingStage(BaseStage):
         denoising_started = time.perf_counter()
         video_rows = torch.zeros(len(packed["img_pos"]), 96, dtype=torch.float32, device=device)
         audio_rows = torch.zeros(len(packed["audio_pos"]), 32, dtype=torch.float32, device=device)
-        video_update = packed["update_mask"].to(device)
-        audio_update = packed.get("audio_update_mask", torch.ones(len(packed["audio_pos"]), dtype=torch.bool)).to(
-            device
-        )
+        video_update_cpu = packed["update_mask"]
+        audio_update_cpu = packed.get("audio_update_mask", torch.ones(len(packed["audio_pos"]), dtype=torch.bool))
+        video_update = video_update_cpu.to(device)
+        audio_update = audio_update_cpu.to(device)
         video_rows[video_update] = video_target.to(device)
         audio_rows[audio_update] = audio_target.to(device)
         if visual_cond is not None:
@@ -249,51 +249,65 @@ class MiniMaxH3DenoisingStage(BaseStage):
         audio_shift = plan.audio_flow_shift or plan.default_audio_flow_shift
         video_sigmas = minimax_h3_time_shift_sigmas(num_steps=num_inference_steps, shift_scale=video_shift)
         audio_sigmas = minimax_h3_time_shift_sigmas(num_steps=num_inference_steps, shift_scale=audio_shift)
-        img_pos = packed["img_pos"].to(device)
-        audio_pos = packed["audio_pos"].to(device)
+        img_pos_cpu = packed["img_pos"]
+        audio_pos_cpu = packed["audio_pos"]
+        img_pos = img_pos_cpu.to(device)
+        audio_pos = audio_pos_cpu.to(device)
         text_pos = packed["text_pos"].to(device)
         target_img_pos = img_pos[video_update]
-        target_audio_row_start = int((~audio_update).sum())
+        target_audio_row_start = int((~audio_update_cpu).sum())
+        condition_img_pos = img_pos_cpu[~video_update_cpu]
+        target_audio_pos = audio_pos_cpu[audio_update_cpu]
+        condition_audio_pos = audio_pos_cpu[~audio_update_cpu]
+
+        seq_len = int(packed["seq_len"])
+        row_timesteps = torch.empty(seq_len, dtype=torch.float32)
+        x = torch.zeros(1, seq_len, 96, dtype=torch.float32, device=device)
+        audio_x = torch.zeros(1, seq_len, 32, dtype=torch.float32, device=device)
+        img_position_ids = packed["img_position_ids"].unsqueeze(0).float().to(device)
+        prompt_embeds = text.hidden_states.to(device)
+        cu_seqlens = packed["cu_seqlens"].to(device)
+        block_token_tags = token_tags.to(device)
 
         for step in range(len(video_sigmas) - 1):
             t_video = float(1.0 - video_sigmas[step])
             t_audio = float(1.0 - audio_sigmas[step])
-            row_timesteps = torch.full((int(packed["seq_len"]),), t_video, dtype=torch.float32)
-            row_timesteps[packed["img_pos"][~packed["update_mask"]]] = max(t_video, MINIMAX_H3_IMGVID_COND_TIMESTEP)
-            row_timesteps[packed["audio_pos"][audio_update.cpu()]] = t_audio
-            row_timesteps[packed["audio_pos"][~audio_update.cpu()]] = max(t_audio, MINIMAX_H3_AUDIO_REF_COND_TIMESTEP)
+            row_timesteps.fill_(t_video)
+            row_timesteps[condition_img_pos] = max(t_video, MINIMAX_H3_IMGVID_COND_TIMESTEP)
+            row_timesteps[target_audio_pos] = t_audio
+            row_timesteps[condition_audio_pos] = max(t_audio, MINIMAX_H3_AUDIO_REF_COND_TIMESTEP)
             unique_timesteps, inverse_indices = torch.unique(
                 row_timesteps,
                 sorted=True,
                 return_inverse=True,
             )
-            x = torch.zeros(1, int(packed["seq_len"]), 96, dtype=torch.float32, device=device)
-            audio_x = torch.zeros(1, int(packed["seq_len"]), 32, dtype=torch.float32, device=device)
             x[0].index_copy_(0, img_pos, video_rows)
             audio_x[0].index_copy_(0, audio_pos, audio_rows)
+            video_timestep = torch.tensor(t_video, device=device)
+            audio_timestep = torch.tensor(t_audio, device=device)
             video_velocity, audio_velocity = self.transformer(
                 x=x,
                 audio_x=audio_x,
-                img_position_ids=packed["img_position_ids"].unsqueeze(0).float().to(device),
+                img_position_ids=img_position_ids,
                 unique_timesteps=unique_timesteps.to(device),
                 inverse_indices=inverse_indices.to(device),
                 update_mask=video_update,
                 update_audio_mask=audio_update,
-                prompt_embeds=text.hidden_states.to(device),
+                prompt_embeds=prompt_embeds,
                 img_pos_info={"position_ids": img_pos},
                 audio_pos_info={"position_ids": audio_pos},
                 text_pos_info={"position_ids": text_pos},
                 img_pos_for_infer_output_info={"position_ids": target_img_pos},
-                packed_seq_params={"cu_seqlens_q": packed["cu_seqlens"].to(device)},
-                block_token_tags=token_tags.to(device),
+                packed_seq_params={"cu_seqlens_q": cu_seqlens},
+                block_token_tags=block_token_tags,
                 skip_mask_out_condition=True,
             )
             stepped = self.scheduler.step_denoising(
                 input_visual_latent=video_rows[video_update],
                 input_audio_latent=audio_rows[audio_update],
-                timestep=torch.tensor(t_video, device=device),
-                video_timestep=torch.tensor(t_video, device=device),
-                audio_timestep=torch.tensor(t_audio, device=device),
+                timestep=video_timestep,
+                video_timestep=video_timestep,
+                audio_timestep=audio_timestep,
                 noise_pred_visual=video_velocity,
                 noise_pred_audio=audio_velocity[target_audio_row_start:],
                 sigma_curr=video_sigmas[step],
