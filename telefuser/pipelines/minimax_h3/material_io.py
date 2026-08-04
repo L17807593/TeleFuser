@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
 import tempfile
@@ -22,6 +23,8 @@ class MiniMaxH3MaterialFacts:
     width: int | None = None
     height: int | None = None
     duration_seconds: float | None = None
+    video_duration_seconds: float | None = None
+    audio_duration_seconds: float | None = None
     sample_rate: int | None = None
     has_audio: bool = False
 
@@ -74,6 +77,18 @@ def _probe_av(path: Path) -> dict:
     return json.loads(result.stdout)
 
 
+def _positive_duration(value: object, *, stream_name: str, path: Path) -> float | None:
+    if value is None:
+        return None
+    try:
+        duration = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{stream_name} duration is invalid for {path}: {value!r}") from exc
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError(f"{stream_name} duration must be positive and finite for {path}, got {duration!r}")
+    return duration
+
+
 def minimax_h3_probe_material(path: Path, condition_type: str) -> MiniMaxH3MaterialFacts:
     if condition_type == "image":
         from PIL import Image, ImageOps
@@ -91,16 +106,32 @@ def minimax_h3_probe_material(path: Path, condition_type: str) -> MiniMaxH3Mater
         raise ValueError(f"{condition_type} material has no video stream: {path}")
     if condition_type in {"audio", "video_audio"} and audio is None:
         raise ValueError(f"{condition_type} material has no audio stream: {path}")
-    duration_value = (payload.get("format") or {}).get("duration")
+    duration_value = _positive_duration((payload.get("format") or {}).get("duration"), stream_name="media", path=path)
+    video_duration_value = _positive_duration(
+        None if video is None else video.get("duration"), stream_name="video", path=path
+    )
+    audio_duration_value = _positive_duration(
+        None if audio is None else audio.get("duration"), stream_name="audio", path=path
+    )
+    if video_duration_value is None:
+        video_duration_value = duration_value
+    if audio_duration_value is None:
+        audio_duration_value = duration_value
     if duration_value is None:
-        duration_value = (audio or video or {}).get("duration")
+        duration_value = video_duration_value or audio_duration_value
     if duration_value is None:
         raise ValueError(f"media duration is unavailable: {path}")
+    if video is not None and video_duration_value is None:
+        raise ValueError(f"video duration is unavailable: {path}")
+    if audio is not None and audio_duration_value is None:
+        raise ValueError(f"audio duration is unavailable: {path}")
     sample_rate = None if audio is None or audio.get("sample_rate") is None else int(audio["sample_rate"])
     return MiniMaxH3MaterialFacts(
         width=None if video is None else int(video["width"]),
         height=None if video is None else int(video["height"]),
-        duration_seconds=float(duration_value),
+        duration_seconds=duration_value,
+        video_duration_seconds=None if video is None else video_duration_value,
+        audio_duration_seconds=None if audio is None else audio_duration_value,
         sample_rate=sample_rate,
         has_audio=audio is not None,
     )

@@ -51,6 +51,91 @@ def test_deferred_fl2va_geometry_uses_first_keyframe_ratio() -> None:
     assert plan.shape["height"] % 32 == 0
 
 
+def test_ref2va_deferred_duration_uses_audio_stream_duration() -> None:
+    canonical = minimax_h3_validate_canonical_request(
+        task="ref2va",
+        prompt="move",
+        conditions=[
+            {
+                "type": "video",
+                "role": "reference",
+                "uri": "reference.mp4",
+                "start_time_seconds": 1.0,
+            }
+        ],
+        target={"short_edge": 768, "aspect_ratio": "auto"},
+        seed=0,
+    )
+    _, plan = MiniMaxH3Pipeline._resolve_deferred_plan(
+        canonical,
+        {
+            0: MiniMaxH3MaterialFacts(
+                width=1920,
+                height=1080,
+                duration_seconds=10.0,
+                video_duration_seconds=10.0,
+                audio_duration_seconds=6.0,
+                has_audio=True,
+            )
+        },
+    )
+    assert plan.shape["frame_count"] == 124
+
+
+def test_ref2va_deferred_duration_rejects_silent_video() -> None:
+    canonical = minimax_h3_validate_canonical_request(
+        task="ref2va",
+        prompt="move",
+        conditions=[{"type": "video", "role": "reference", "uri": "silent.mp4"}],
+        target={"short_edge": 768, "aspect_ratio": "auto"},
+        seed=0,
+    )
+    with pytest.raises(ValueError, match="exactly one probed condition with an audio stream"):
+        MiniMaxH3Pipeline._resolve_deferred_plan(
+            canonical,
+            {
+                0: MiniMaxH3MaterialFacts(
+                    width=1920,
+                    height=1080,
+                    duration_seconds=6.0,
+                    video_duration_seconds=6.0,
+                    has_audio=False,
+                )
+            },
+        )
+
+
+def test_ref2va_start_time_must_precede_soundtrack_end() -> None:
+    canonical = minimax_h3_validate_canonical_request(
+        task="ref2va",
+        prompt="move",
+        conditions=[
+            {
+                "type": "video",
+                "role": "reference",
+                "uri": "reference.mp4",
+                "start_time_seconds": 7.0,
+            }
+        ],
+        target={"short_edge": 768, "aspect_ratio": "auto", "duration_seconds": 4.0},
+        seed=0,
+    )
+    with pytest.raises(ValueError, match="soundtrack duration"):
+        MiniMaxH3Pipeline._resolve_deferred_plan(
+            canonical,
+            {
+                0: MiniMaxH3MaterialFacts(
+                    width=1920,
+                    height=1080,
+                    duration_seconds=10.0,
+                    video_duration_seconds=10.0,
+                    audio_duration_seconds=6.0,
+                    has_audio=True,
+                )
+            },
+        )
+
+
 def test_ref2va_labels_preserve_mixed_material_order() -> None:
     materials = [
         MiniMaxH3MaterialPlanItem(0, "reference", "image", "a", "image.reference_preserve"),

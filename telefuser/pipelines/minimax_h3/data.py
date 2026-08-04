@@ -256,7 +256,9 @@ def _validate_ref2va_conditions(conditions: Sequence[Mapping[str, Any]]) -> None
 
 def minimax_h3_validate_reference_media_facts(
     conditions: Sequence[Mapping[str, Any]],
-    duration_seconds_by_condition: Mapping[int, float],
+    *,
+    video_duration_seconds_by_condition: Mapping[int, float],
+    audio_duration_seconds_by_condition: Mapping[int, float],
 ) -> None:
     """Validate Ref2VA clip and aggregate durations after local media probing."""
 
@@ -264,24 +266,18 @@ def minimax_h3_validate_reference_media_facts(
     audio_total = 0.0
     for index, condition in enumerate(conditions):
         condition_type = condition.get("type")
-        if condition_type not in {"video", "video_audio", "audio"}:
-            continue
-        if index not in duration_seconds_by_condition:
-            raise ValueError(f"conditions[{index}] is missing probed duration")
-        duration = duration_seconds_by_condition[index]
-        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration):
-            raise ValueError(f"conditions[{index}] duration must be a finite number")
-        duration = float(duration)
-        if not MINIMAX_H3_REF2VA_MIN_CLIP_SECONDS <= duration <= MINIMAX_H3_REF2VA_MAX_CLIP_SECONDS:
-            raise ValueError(
-                f"conditions[{index}] duration must be in "
-                f"[{MINIMAX_H3_REF2VA_MIN_CLIP_SECONDS:g}, {MINIMAX_H3_REF2VA_MAX_CLIP_SECONDS:g}] seconds, "
-                f"got {duration:g}"
-            )
         if condition_type in {"video", "video_audio"}:
-            video_total += duration
+            video_total += _validated_reference_duration(
+                video_duration_seconds_by_condition,
+                index=index,
+                stream_name="video",
+            )
         if condition_type in {"audio", "video_audio"}:
-            audio_total += duration
+            audio_total += _validated_reference_duration(
+                audio_duration_seconds_by_condition,
+                index=index,
+                stream_name="audio",
+            )
     if video_total > MINIMAX_H3_REF2VA_MAX_TOTAL_SECONDS:
         raise ValueError(
             f"reference video total duration must not exceed {MINIMAX_H3_REF2VA_MAX_TOTAL_SECONDS:g} seconds, "
@@ -292,6 +288,27 @@ def minimax_h3_validate_reference_media_facts(
             f"reference audio total duration must not exceed {MINIMAX_H3_REF2VA_MAX_TOTAL_SECONDS:g} seconds, "
             f"got {audio_total:g}"
         )
+
+
+def _validated_reference_duration(
+    durations: Mapping[int, float],
+    *,
+    index: int,
+    stream_name: str,
+) -> float:
+    if index not in durations:
+        raise ValueError(f"conditions[{index}] is missing probed {stream_name} duration")
+    duration = durations[index]
+    if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration):
+        raise ValueError(f"conditions[{index}] {stream_name} duration must be a finite number")
+    duration = float(duration)
+    if not MINIMAX_H3_REF2VA_MIN_CLIP_SECONDS <= duration <= MINIMAX_H3_REF2VA_MAX_CLIP_SECONDS:
+        raise ValueError(
+            f"conditions[{index}] {stream_name} duration must be in "
+            f"[{MINIMAX_H3_REF2VA_MIN_CLIP_SECONDS:g}, {MINIMAX_H3_REF2VA_MAX_CLIP_SECONDS:g}] seconds, "
+            f"got {duration:g}"
+        )
+    return duration
 
 
 def minimax_h3_validate_canonical_request(
