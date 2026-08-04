@@ -134,9 +134,6 @@ class MiniMaxH3EulerAncestralEta0SchedulerAdapter:
         if config:
             raise ValueError(f"{type(self).__name__} does not accept config fields: {sorted(config)}")
 
-    def set_shift(self, _flow_shift: float) -> None:
-        """Ignore flow shift, matching the previous loader-specific path."""
-
     def step_denoising(
         self,
         *,
@@ -160,6 +157,10 @@ class MiniMaxH3EulerAncestralEta0SchedulerAdapter:
         visual_sigma_next = sigma_next if video_sigma_next is None else video_sigma_next
         audio_sigma_curr = sigma_curr if audio_sigma_curr is None else audio_sigma_curr
         audio_sigma_next = sigma_next if audio_sigma_next is None else audio_sigma_next
+        if input_visual_latent.shape != noise_pred_visual.shape:
+            raise ValueError("input_visual_latent and noise_pred_visual shapes must match")
+        if input_audio_latent.shape != noise_pred_audio.shape:
+            raise ValueError("input_audio_latent and noise_pred_audio shapes must match")
         visual_sigma_curr = _validate_timestep_sigma_pair(
             visual_timestep,
             visual_sigma_curr,
@@ -170,25 +171,27 @@ class MiniMaxH3EulerAncestralEta0SchedulerAdapter:
             audio_sigma_curr,
             "audio",
         )
+        visual_sigma_next = _validate_sigma(visual_sigma_next, "video_sigma_next")
+        audio_sigma_next = _validate_sigma(audio_sigma_next, "audio_sigma_next")
 
-        denoised_visual = minimax_h3_rf_v_to_x0(
+        denoised_visual = _minimax_h3_rf_v_to_x0(
             input_visual_latent,
             noise_pred_visual,
             visual_timestep,
         )
-        denoised_audio = minimax_h3_rf_v_to_x0(
+        denoised_audio = _minimax_h3_rf_v_to_x0(
             input_audio_latent,
             noise_pred_audio,
             audio_timestep,
         )
         return {
-            "output_visual_latent": minimax_h3_euler_eta0_step(
+            "output_visual_latent": _minimax_h3_euler_eta0_step(
                 input_visual_latent,
                 denoised_visual,
                 sigma_curr=visual_sigma_curr,
                 sigma_next=visual_sigma_next,
             ),
-            "output_audio_latent": minimax_h3_euler_eta0_step(
+            "output_audio_latent": _minimax_h3_euler_eta0_step(
                 input_audio_latent,
                 denoised_audio,
                 sigma_curr=audio_sigma_curr,
@@ -196,8 +199,6 @@ class MiniMaxH3EulerAncestralEta0SchedulerAdapter:
             ),
         }
 
-
-EntryClass = MiniMaxH3EulerAncestralEta0SchedulerAdapter
 
 __all__ = [
     "MiniMaxH3EulerAncestralEta0SchedulerAdapter",

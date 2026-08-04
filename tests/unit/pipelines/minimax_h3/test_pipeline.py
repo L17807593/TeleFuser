@@ -235,6 +235,8 @@ def test_trajectory_stage_captures_selected_boundaries_without_changing_result(t
     assert artifact["observed_transformer_steps"] == 3
     assert artifact["observed_scheduler_steps"] == 3
     assert set(artifact["steps"]) == {"0", "1", "2"}
+    assert torch.count_nonzero(artifact["steps"]["0"]["scheduler_input"]["input_visual_latent"]) > 0
+    assert torch.count_nonzero(artifact["steps"]["0"]["scheduler_input"]["input_audio_latent"]) > 0
     assert torch.equal(
         artifact["steps"]["0"]["scheduler_input"]["noise_pred_visual"],
         torch.zeros_like(artifact["steps"]["0"]["scheduler_input"]["noise_pred_visual"]),
