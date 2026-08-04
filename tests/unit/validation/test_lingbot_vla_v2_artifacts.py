@@ -36,11 +36,13 @@ def _metadata() -> dict[str, object]:
         "artifact_kind": "telefuser_regression",
         "checkpoint_manifest_sha256": "checkpoint",
         "processor_manifest_sha256": "processor",
+        "norm_stats_sha256": "norm-stats",
         "input_sha256": "input",
         "seed": 7,
         "num_steps": 2,
         "torch_dtype": "bfloat16",
         "attention_backend": "eager",
+        "moe_backend": "deterministic_torch_reference",
     }
 
 
@@ -133,6 +135,16 @@ def test_compare_artifacts_rejects_different_artifact_identity(tmp_path: Path) -
     candidate = _write_artifact(tmp_path, "candidate", _arrays(), candidate_metadata)
 
     with pytest.raises(ValueError, match="input_sha256"):
+        compare_artifacts(reference, candidate, rtol=0.0, atol=0.0)
+
+
+def test_compare_artifacts_rejects_different_moe_backends(tmp_path: Path) -> None:
+    candidate_metadata = _metadata()
+    candidate_metadata["moe_backend"] = "upstream_triton"
+    reference = _write_artifact(tmp_path, "reference", _arrays())
+    candidate = _write_artifact(tmp_path, "candidate", _arrays(), candidate_metadata)
+
+    with pytest.raises(ValueError, match="moe_backend"):
         compare_artifacts(reference, candidate, rtol=0.0, atol=0.0)
 
 

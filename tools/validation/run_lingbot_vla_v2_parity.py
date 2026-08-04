@@ -32,11 +32,13 @@ FINAL_ACTION_KEYS = ("canonical_normalized_actions", "actions")
 IDENTITY_METADATA_KEYS = (
     "checkpoint_manifest_sha256",
     "processor_manifest_sha256",
+    "norm_stats_sha256",
     "input_sha256",
     "seed",
     "num_steps",
     "torch_dtype",
     "attention_backend",
+    "moe_backend",
 )
 _STEP_KEY = re.compile(r"^(timestep|x_t|velocity)_step_([0-9]+)$")
 

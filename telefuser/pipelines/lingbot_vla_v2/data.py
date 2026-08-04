@@ -94,9 +94,7 @@ class LingBotVlaV2InputProcessor:
                 f"model max_state_dim is {self.max_state_dim}, RobotWin requires {robot_profile.canonical_dim}"
             )
 
-    def _process_images(
-        self, images: Mapping[str, ImageInput]
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _process_images(self, images: Mapping[str, ImageInput]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         missing = [key for key in ROBOTWIN_CAMERA_KEYS if key not in images]
         if missing:
             raise ValueError(f"RobotWin observation is missing camera keys: {missing}")
@@ -104,7 +102,7 @@ class LingBotVlaV2InputProcessor:
         processed_images: list[torch.Tensor] = []
         grids: list[torch.Tensor] = []
         for key in self.robot_profile.camera_keys:
-            image = self.image_resize(_image_to_chw_uint8(images[key]))
+            image = self.image_resize(_image_to_chw_uint8(images[key]).to(dtype=torch.float32))
             output = self.processor.image_processor(image)
             pixels = output["pixel_values"] if isinstance(output, dict) else output.pixel_values
             grid = output.get("image_grid_thw") if isinstance(output, dict) else getattr(output, "image_grid_thw", None)
@@ -113,9 +111,7 @@ class LingBotVlaV2InputProcessor:
             if pixels.ndim == 3 and pixels.shape[0] == 1:
                 pixels = pixels.squeeze(0)
             if pixels.ndim != 2:
-                raise ValueError(
-                    f"Qwen3-VL image processor must return [patches, features], got {tuple(pixels.shape)}"
-                )
+                raise ValueError(f"Qwen3-VL image processor must return [patches, features], got {tuple(pixels.shape)}")
             if grid is None or grid.numel() < 3:
                 raise ValueError("Qwen3-VL image processor must return image_grid_thw")
             processed_images.append(pixels)

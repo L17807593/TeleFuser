@@ -10,7 +10,6 @@ from typing import Mapping, Sequence
 
 import torch
 
-
 ROBOTWIN_CAMERA_KEYS = (
     "observation.images.cam_high",
     "observation.images.cam_left_wrist",
@@ -53,8 +52,7 @@ class RobotWinProfile:
     def __init__(self, norm_stats: Mapping[str, Mapping[str, object]]) -> None:
         self._stats = {
             key: {
-                stat_name: torch.as_tensor(stat_value, dtype=torch.float32)
-                for stat_name, stat_value in values.items()
+                stat_name: torch.as_tensor(stat_value, dtype=torch.float64) for stat_name, stat_value in values.items()
             }
             for key, values in norm_stats.items()
         }
@@ -162,9 +160,11 @@ class RobotWinProfile:
     def _normalize(self, key: str, value: torch.Tensor) -> torch.Tensor:
         low = self._stats[key]["q01"]
         high = self._stats[key]["q99"]
-        return (value - low) / (high - low + 1e-6) * 2.0 - 1.0
+        normalized = (value.to(dtype=torch.float64) - low) / (high - low + 1e-6) * 2.0 - 1.0
+        return normalized.to(dtype=value.dtype)
 
     def _unnormalize(self, key: str, value: torch.Tensor) -> torch.Tensor:
         low = self._stats[key]["q01"]
         high = self._stats[key]["q99"]
-        return (value + 1.0) / 2.0 * (high - low + 1e-6) + low
+        unnormalized = (value.to(dtype=torch.float64) + 1.0) / 2.0 * (high - low + 1e-6) + low
+        return unnormalized.to(dtype=value.dtype)

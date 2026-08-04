@@ -61,6 +61,7 @@ model code to establish and verify a strict local baseline:
   --task "pick up the red block" \
   --state-json '[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]' \
   --seed 7 \
+  --deterministic-moe \
   --output work_dirs/vla_regression/baseline_seed7.npz
 
 # Repeat the same command with:
@@ -79,3 +80,33 @@ content hash of every checkpoint shard is required. Keep generated artifacts und
 
 This is a TeleFuser regression check, not upstream parity. It detects changes to the current implementation but does
 not establish equivalence with the official repository.
+
+## Official Upstream Parity
+
+The strict upstream baseline pins `Robbyant/lingbot-vla-v2` at commit
+`be27333c9b5f2663b0ec33f069dd7dfd67fa32b5`. Keep the checkout, uv environment, cache, and artifacts under
+`work_dirs`; Git ignores them. Create the isolated runtime with:
+
+```bash
+mkdir -p work_dirs/.uv-cache-upstream work_dirs/.uv-tmp-upstream
+UV_CACHE_DIR="$PWD/work_dirs/.uv-cache-upstream" TMPDIR="$PWD/work_dirs/.uv-tmp-upstream" uv venv work_dirs/.venv-lingbot-upstream --python .venv-vla/bin/python
+UV_CACHE_DIR="$PWD/work_dirs/.uv-cache-upstream" TMPDIR="$PWD/work_dirs/.uv-tmp-upstream" uv pip install --python work_dirs/.venv-lingbot-upstream/bin/python -r tools/validation/requirements-lingbot-vla-v2-upstream.txt
+UV_CACHE_DIR="$PWD/work_dirs/.uv-cache-upstream" TMPDIR="$PWD/work_dirs/.uv-tmp-upstream" uv pip install --python work_dirs/.venv-lingbot-upstream/bin/python --no-deps "lerobot @ https://github.com/huggingface/lerobot/archive/refs/tags/v0.4.2.tar.gz"
+git clone https://github.com/Robbyant/lingbot-vla-v2 work_dirs/lingbot-vla-v2-upstream
+git -C work_dirs/lingbot-vla-v2-upstream checkout be27333c9b5f2663b0ec33f069dd7dfd67fa32b5
+```
+
+Generate the reference with `capture_lingbot_vla_v2_upstream.py` in the upstream uv environment and the candidate
+with `capture_lingbot_vla_v2_telefuser.py` in `.venv-vla`. Pass identical model, processor, camera, task, state, seed,
+and device arguments to both commands, add `--deterministic-moe`, and pass `--upstream-root` to the upstream command.
+Then compare them with the strict comparator shown above. Generated artifacts belong in `work_dirs/vla_upstream_parity`.
+
+This is a minimal inference-parity runtime, not a LeRobot training environment. The upstream setup itself combines
+LeRobot 0.4.2 metadata constraints with versions outside those constraints, so LeRobot is installed with `--no-deps`;
+the capture import and end-to-end run are the runtime checks.
+
+The official code hard-codes FlashAttention during construction. The upstream capture replaces that selection only
+inside its validation process so both sides use eager attention on the Python 3.10.12 / PyTorch 2.11 stack. Production
+inference keeps the upstream Triton MoE path through `telefuser.ops`; strict capture uses `--deterministic-moe` because
+the upstream kernel uses atomic accumulation and is not bitwise repeatable across separate processes. Artifact metadata
+records both `attention_backend` and `moe_backend`, and the comparator rejects mixed-backend artifacts.

@@ -1,0 +1,17 @@
+# Isolated runtime for the fixed LingBot-VLA v2 upstream parity capture.
+# Install this file into a dedicated uv venv; do not install it into TeleFuser's venv.
+accelerate==1.7.0
+av==15.0.0
+datasets==3.6.0
+einops==0.8.1
+huggingface-hub==0.34.3
+numpy==2.2.6
+pillow==12.3.0
+psutil==7.0.0
+pydantic==2.13.4
+pyyaml==6.0.3
+safetensors==0.6.2
+torch==2.11.0
+torchdata==0.11.0
+torchvision==0.26.0
+transformers==4.57.3

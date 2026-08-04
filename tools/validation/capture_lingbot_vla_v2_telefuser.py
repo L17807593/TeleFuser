@@ -170,6 +170,7 @@ def capture_artifact(
     output: Path,
     device: str,
     full_checkpoint_hash: bool,
+    deterministic_moe: bool,
 ) -> tuple[Path, Path]:
     if len(image_paths) != len(ROBOTWIN_CAMERA_KEYS):
         raise ValueError(f"expected {len(ROBOTWIN_CAMERA_KEYS)} camera paths, got {len(image_paths)}")
@@ -178,6 +179,10 @@ def capture_artifact(
     output.parent.mkdir(parents=True, exist_ok=True)
 
     pipeline = _build_pipeline(model_root, qwen3vl_root, device)
+    if deterministic_moe:
+        for module in pipeline.policy_stage.policy.modules():
+            if hasattr(module, "_use_robby_moe_kernel"):
+                module._use_robby_moe_kernel = False
     capture = TensorCapture()
     try:
         observation = LingBotVlaV2Observation(
@@ -209,6 +214,10 @@ def capture_artifact(
                 include_contents=full_checkpoint_hash,
             ),
             "checkpoint_hash_mode": "full_sha256" if full_checkpoint_hash else "filename_and_size",
+            "norm_stats_sha256": _sha256_file(
+                Path(__file__).resolve().parents[2]
+                / "telefuser/pipelines/lingbot_vla_v2/assets/robotwin_norm_stats.json"
+            ),
             "processor_manifest_sha256": _manifest_sha256(
                 _processor_files(qwen3vl_root),
                 include_contents=True,
@@ -218,6 +227,7 @@ def capture_artifact(
             "num_steps": trace.step,
             "torch_dtype": str(pipeline.torch_dtype).removeprefix("torch."),
             "attention_backend": str(flow_model.config.attention_implementation),
+            "moe_backend": "deterministic_torch_reference" if deterministic_moe else "upstream_triton",
             "device": str(target_device),
             "device_name": torch.cuda.get_device_name(target_device) if target_device.type == "cuda" else "cpu",
             "torch_version": torch.__version__,
@@ -262,6 +272,11 @@ def main() -> None:
         action="store_true",
         help="Hash all checkpoint bytes instead of the faster filename-and-size manifest",
     )
+    parser.add_argument(
+        "--deterministic-moe",
+        action="store_true",
+        help="Disable the upstream atomic Triton MoE kernel for bitwise cross-process parity",
+    )
     args = parser.parse_args()
 
     paths = (
@@ -285,6 +300,7 @@ def main() -> None:
         output=args.output,
         device=args.device,
         full_checkpoint_hash=args.full_checkpoint_hash,
+        deterministic_moe=args.deterministic_moe,
     )
     print(f"Saved LingBot-VLA v2 capture: {artifact}")
     print(f"Saved LingBot-VLA v2 metadata: {metadata}")

@@ -24,8 +24,10 @@ def test_normalize_state_uses_robotwin_joint_order() -> None:
     arm = torch.cat((state[0:6], state[7:13]))
     effector = state[[6, 13]]
     assert canonical.shape == (55,)
-    assert torch.allclose(canonical[0:12], arm / (2.0 + 1e-6) * 2.0 - 1.0)
-    assert torch.allclose(canonical[28:30], (effector + 1.0) / (2.0 + 1e-6) * 2.0 - 1.0)
+    expected_arm = (arm.to(torch.float64) / (2.0 + 1e-6) * 2.0 - 1.0).to(torch.float32)
+    expected_effector = ((effector.to(torch.float64) + 1.0) / (2.0 + 1e-6) * 2.0 - 1.0).to(torch.float32)
+    assert torch.equal(canonical[0:12], expected_arm)
+    assert torch.equal(canonical[28:30], expected_effector)
     assert torch.count_nonzero(canonical[12:28]) == 0
     assert torch.count_nonzero(canonical[30:]) == 0
 

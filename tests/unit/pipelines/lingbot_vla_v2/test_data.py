@@ -12,12 +12,12 @@ from telefuser.pipelines.lingbot_vla_v2.robot_profile import ROBOTWIN_CAMERA_KEY
 
 class _ImageProcessor:
     def __init__(self) -> None:
-        self.values: list[int] = []
+        self.values: list[float] = []
 
     def __call__(self, image: torch.Tensor) -> dict[str, torch.Tensor]:
-        assert image.dtype == torch.uint8
+        assert image.dtype == torch.float32
         assert image.shape == (3, 8, 8)
-        value = int(image[0, 0, 0])
+        value = float(image[0, 0, 0])
         self.values.append(value)
         return {
             "pixel_values": torch.full((4, 6), float(value)),
@@ -73,7 +73,7 @@ def test_prepare_preserves_robotwin_camera_order_and_tensor_contract() -> None:
 
     inputs = processor.prepare(observation)
 
-    assert image_processor.values == [10, 20, 30]
+    assert image_processor.values == pytest.approx([10.0, 20.0, 30.0], abs=1e-5)
     assert tokenizer.rendered_task == observation.task
     assert tokenizer.padding_side == "right"
     assert inputs.images.shape == (1, 3, 4, 6)
@@ -115,4 +115,4 @@ def test_prepare_resizes_each_camera_before_qwen_processing() -> None:
 
     processor.prepare(LingBotVlaV2Observation(observation.task, observation.state, images))
 
-    assert image_processor.values == [10, 20, 30]
+    assert image_processor.values == pytest.approx([10.0, 20.0, 30.0], abs=1e-5)

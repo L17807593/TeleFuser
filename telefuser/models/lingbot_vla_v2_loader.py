@@ -1406,7 +1406,7 @@ OFFICIAL_6B_MODEL_CONFIG: dict[str, Any] = {
     "post_training": False,
     "adanorm_time": True,
     "moe_implementation": "fused",
-    "use_robby_moe_kernel": False,
+    "use_robby_moe_kernel": True,
     "attention_implementation": "eager",
     "precompute_grid_thw": True,
     "vlm_causal": True,
