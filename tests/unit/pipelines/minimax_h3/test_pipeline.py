@@ -333,7 +333,7 @@ def test_example_loader_allows_release_length_parallel_denoising(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from examples.minimax_h3 import common
+    from telefuser.pipelines.minimax_h3 import example_utils as common
 
     component_root = tmp_path / "Ref2VA"
     for name in ("transformer", "text_encoder"):
@@ -378,7 +378,7 @@ def test_example_writer_preserves_complete_generated_audio(
 ) -> None:
     from types import SimpleNamespace
 
-    from examples.minimax_h3 import common
+    from telefuser.pipelines.minimax_h3 import example_utils as common
 
     commands = []
     monkeypatch.setattr(common, "save_wav", lambda *args, **kwargs: None)
