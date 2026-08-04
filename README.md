@@ -230,6 +230,7 @@ telefuser/
 | `WanVideo` (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Main video generation family, including async and service examples in [examples/wan_video/README.md](examples/wan_video/README.md) |
 | `HunyuanVideo` | T2V, I2V | Supported via [examples/hunyuan_video/README.md](examples/hunyuan_video/README.md) |
 | `LTX Video` | I2V + Audio | Unified audio-video generation via [examples/ltx_video/README.md](examples/ltx_video/README.md) |
+| `MiniMax H3` | T2VA, FL2VA, Ref2VA + Audio | Local 768p joint audio-video generation via [examples/minimax_h3/README.md](examples/minimax_h3/README.md) |
 | `LongCat-Video` | T2V, I2V, VC | Long-form generation and continuation via [examples/longcat_video/README.md](examples/longcat_video/README.md) |
 | **NEW** `LingBot-Video` | T2I, T2V, TI2V, MoE refiner | Dense/MoE generation with native CFG/SP and an in-memory base-to-refiner path; see [examples/lingbot_video/README.md](examples/lingbot_video/README.md) |
 
@@ -253,6 +254,7 @@ See [examples/README.md](examples/README.md) for the example runner and baseline
 - [docs/en/latent_cache.md](docs/en/latent_cache.md): CacheSeek latent cache integration
 - [docs/en/feature_cache.md](docs/en/feature_cache.md): `AdaTaylorCache`
 - [docs/en/model_loading.md](docs/en/model_loading.md): model loading patterns
+- [docs/en/minimax_h3.md](docs/en/minimax_h3.md): MiniMax H3 tasks, checkpoint layout, examples, limitations, and service compatibility gate
 - [docs/en/attention.md](docs/en/attention.md): attention backends and configuration
 - [docs/en/torch_compile_compatibility.md](docs/en/torch_compile_compatibility.md): compile-related constraints
 - [docs/en/adding_new_model.md](docs/en/adding_new_model.md): integrating new models
