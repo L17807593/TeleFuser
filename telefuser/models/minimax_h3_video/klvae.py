@@ -132,14 +132,10 @@ class AutoencoderKL(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         self.pixel_norm_type = kwargs.get("pixel_norm_type", "imagenet")
 
         if kwargs.get("encoder_parallel", False) or kwargs.get("decoder_parallel", False):
-            raise ValueError(
-                "MiniMax H3 VAE spatial sharding is unsupported; use complete-tile parallel decode instead"
-            )
-        parallel_tiling = kwargs.get("parallel_tiling", False)
-        if hasattr(self, "parallel_tiling") and parallel_tiling != self.parallel_tiling:
-            logger.warning("Do not support changing parallel tiling after initialization")
-        else:
-            self.parallel_tiling = parallel_tiling
+            raise ValueError("MiniMax H3 VAE spatial sharding is unsupported")
+        if kwargs.get("parallel_tiling", False):
+            raise ValueError("MiniMax H3 VAE parallel tiling is unsupported")
+        self.parallel_tiling = False
 
         processor_kwargs = {
             "vae_ratio": self.vae_ratio,
