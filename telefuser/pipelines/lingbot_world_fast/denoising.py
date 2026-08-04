@@ -179,7 +179,7 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         self.empty_cache_after_call = False
         self._cache_registry: dict[int, _DenoisingCacheState] = {}
         self._cache_pool: _DenoisingCachePool | None = None
-        self._observed_condition_bytes = 0
+        self._observed_session_state_bytes = 0
         self._vae_decode_stage: LingBotWorldFastVAEDecodeStage | None = None
         self._pending_vae_decode_latents: dict[int, deque[torch.Tensor]] = {}
         if model_runtime_config.parallel_config.world_size == 1 and model_runtime_config.compile_config.enabled:
@@ -328,13 +328,57 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         return head_dim, self.dit.num_heads, self.dit.num_heads // ulysses_world_size
 
     def estimate_session_cache_bytes(self, batch_size: int, kv_size: int, max_sequence_length: int) -> int:
-        """Return exact persistent DiT KV bytes for one session on this rank."""
+        """Return persistent DiT KV and observed retained-state bytes for one session on this rank."""
         head_dim, num_heads, local_num_heads = self._cache_dimensions()
         element_size = torch.empty((), dtype=self.torch_dtype).element_size()
         self_kv = 2 * self.dit.num_layers * batch_size * kv_size * local_num_heads * head_dim * element_size
         cross_kv = 2 * self.dit.num_layers * batch_size * max_sequence_length * num_heads * head_dim * element_size
         cursors = self.dit.num_layers * 2 * torch.empty((), dtype=torch.int64).element_size()
-        return self_kv + cross_kv + cursors + getattr(self, "_observed_condition_bytes", 0)
+        return self_kv + cross_kv + cursors + getattr(self, "_observed_session_state_bytes", 0)
+
+    @staticmethod
+    def _retained_tensor_bytes(*values: object) -> int:
+        """Count unique tensor storages retained by session-owned state."""
+        storages: set[tuple[str, int | None, int]] = set()
+        total = 0
+
+        def visit(value: object) -> None:
+            nonlocal total
+            if isinstance(value, torch.Tensor):
+                storage = value.untyped_storage()
+                key = (value.device.type, value.device.index, storage.data_ptr())
+                if key not in storages:
+                    storages.add(key)
+                    total += storage.nbytes()
+                return
+            if isinstance(value, dict):
+                for item in value.values():
+                    visit(item)
+                return
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item)
+
+        for value in values:
+            visit(value)
+        return total
+
+    def _observe_session_state(self, state: _DenoisingCacheState) -> None:
+        retained_inputs = {
+            key: state.session_input_cache.get(key)
+            for key in ("projected_context", "causal_rope")
+            if key in state.session_input_cache
+        }
+        retained_bytes = self._retained_tensor_bytes(
+            state.timesteps,
+            state.prompt_emb,
+            state.image_condition_latent,
+            retained_inputs,
+        )
+        self._observed_session_state_bytes = max(
+            getattr(self, "_observed_session_state_bytes", 0),
+            retained_bytes,
+        )
 
     def configure_cache_pool(
         self,
@@ -451,6 +495,7 @@ class LingBotWorldFastDenoisingStage(BaseStage):
                     device=self.device,
                     dtype=self.torch_dtype,
                 )
+            self._observe_session_state(state)
         except Exception:
             if pool is not None and pool_slot is not None:
                 pool.release(pool_slot)
@@ -505,8 +550,6 @@ class LingBotWorldFastDenoisingStage(BaseStage):
             if not isinstance(exported, torch.Tensor) or exported.ndim != 4 or exported.shape[1] < 1:
                 raise ValueError("LingBot image condition latent must have shape (channels, frames, height, width)")
             state.image_condition_latent = exported.to(device=device, dtype=dtype)
-            condition_bytes = state.image_condition_latent.numel() * state.image_condition_latent.element_size()
-            self._observed_condition_bytes = max(getattr(self, "_observed_condition_bytes", 0), condition_bytes)
         latent_condition = state.image_condition_latent
         if latent_condition is None:
             raise RuntimeError("LingBot image condition metadata arrived before the session latent")
@@ -739,6 +782,7 @@ class LingBotWorldFastDenoisingStage(BaseStage):
                     _prepared_control_is_sharded=state.prepared_control_is_sharded,
                     update_cache_only=True,
                 )
+            self._observe_session_state(state)
             profile = None
             if benchmark_events is not None:
                 clean_end.record()

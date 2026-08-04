@@ -50,6 +50,39 @@ def test_worker_cache_retains_session_prompt_embedding() -> None:
     assert stage._cache_registry[11].timesteps.device == stage.device
 
 
+def test_session_cache_estimate_includes_retained_inputs_but_not_transient_control() -> None:
+    stage = LingBotWorldFastDenoisingStage.__new__(LingBotWorldFastDenoisingStage)
+    stage.device = torch.device("cpu")
+    stage.torch_dtype = torch.float32
+    stage.dit = SimpleNamespace(dim=8, num_heads=2, num_layers=2, device_mesh=None)
+    stage._observed_session_state_bytes = 0
+    baseline = stage.estimate_session_cache_bytes(1, 4, 8)
+    prompt = torch.empty(1, 3, dtype=torch.float32)
+    projected = torch.empty(1, 2, dtype=torch.float32)
+    rope = (torch.empty(2, dtype=torch.float32), torch.empty(2, dtype=torch.float32))
+    state = SimpleNamespace(
+        timesteps=torch.empty(4, dtype=torch.int64),
+        prompt_emb=prompt,
+        image_condition_latent=torch.empty(5, dtype=torch.bfloat16),
+        session_input_cache={
+            "projected_context": projected,
+            "causal_rope": ((1, 2, 3), rope),
+            "prepared_control": torch.empty(1024, dtype=torch.float32),
+        },
+    )
+
+    stage._observe_session_state(state)
+
+    expected_retained = stage._retained_tensor_bytes(
+        state.timesteps,
+        prompt,
+        state.image_condition_latent,
+        projected,
+        rope,
+    )
+    assert stage.estimate_session_cache_bytes(1, 4, 8) == baseline + expected_retained
+
+
 def test_worker_cache_retains_image_condition_and_materializes_chunks_locally() -> None:
     stage = _cache_stage()
     _initialize_cache(stage, 11)
@@ -103,13 +136,14 @@ def test_preallocated_cache_pool_exhausts_and_reuses_slots() -> None:
     stage._cache_registry = {}
     stage._cache_pool = None
 
+    expected_pool_bytes = stage.estimate_session_cache_bytes(1, 4, 8)
     profile = stage.configure_cache_pool(capacity=2, batch_size=1, kv_size=4, max_sequence_length=8)
     _initialize_cache(stage, 11)
     _initialize_cache(stage, 12)
 
     assert profile.capacity == 2
     assert profile.allocated_bytes == 2 * profile.bytes_per_session
-    assert profile.bytes_per_session == stage.estimate_session_cache_bytes(1, 4, 8)
+    assert profile.bytes_per_session == expected_pool_bytes
     assert {stage._cache_registry[handle].pool_slot for handle in (11, 12)} == {0, 1}
     assert _initialize_cache(stage, 13) is False
     assert not stage.has_cache(13)

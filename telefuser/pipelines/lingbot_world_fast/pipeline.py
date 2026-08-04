@@ -142,6 +142,7 @@ class LingBotWorldFastPipeline(BasePipeline):
         self.width_division_factor = 16
         self._next_cache_handle = 0
         self._cache_handle_lock = threading.Lock()
+        self._observed_parent_prompt_bytes = 0
         self._streaming_runtime: LingBotWorldFastStreamingRuntime | None = None
         self._streaming_runtime_lock = threading.Lock()
 
@@ -187,10 +188,12 @@ class LingBotWorldFastPipeline(BasePipeline):
             for snapshot in stage_snapshots:
                 snapshots.append({**snapshot, "role": role})
         if torch.cuda.is_available():
-            parent_devices = {torch.device(self.device), getattr(self, "text_device", torch.device(self.device))}
+            session_device = torch.device(self.device)
+            parent_devices = {session_device, getattr(self, "text_device", session_device)}
             for device in parent_devices:
                 if device.type == "cuda":
-                    snapshots.append({**asdict(capture_device_memory_snapshot(device)), "role": "pipeline"})
+                    role = "pipeline_session" if device == session_device else "pipeline"
+                    snapshots.append({**asdict(capture_device_memory_snapshot(device)), "role": role})
 
         unique: dict[tuple[int, int], dict[str, int | str]] = {}
         for snapshot in snapshots:
@@ -219,6 +222,7 @@ class LingBotWorldFastPipeline(BasePipeline):
         )
         snapshots = self.stage_memory_snapshots()
         persistent_bytes_by_role = {
+            "pipeline_session": int(getattr(self, "_observed_parent_prompt_bytes", 0)),
             "vae_encode": int(self._call_stage(self.vae_encode_worker, "estimate_session_cache_bytes")),
             "vae_decode": int(self._call_stage(self.vae_decode_worker, "estimate_session_cache_bytes")),
         }
@@ -231,10 +235,12 @@ class LingBotWorldFastPipeline(BasePipeline):
                 persistent_bytes_per_session=persistent_bytes,
                 replaced_warmup_transient_bytes=persistent_bytes,
             ),
-            **{
-                role: SessionMemoryBudget(persistent_bytes_per_session=bytes_per_session)
-                for role, bytes_per_session in persistent_bytes_by_role.items()
-            },
+            "pipeline_session": SessionMemoryBudget(
+                persistent_bytes_per_session=persistent_bytes_by_role["pipeline_session"],
+                replaced_warmup_transient_bytes=persistent_bytes_by_role["pipeline_session"],
+            ),
+            "vae_encode": SessionMemoryBudget(persistent_bytes_per_session=persistent_bytes_by_role["vae_encode"]),
+            "vae_decode": SessionMemoryBudget(persistent_bytes_per_session=persistent_bytes_by_role["vae_decode"]),
         }
         plan: SessionCapacityPlan = calculate_session_capacity(
             snapshots,
@@ -430,7 +436,13 @@ class LingBotWorldFastPipeline(BasePipeline):
         prompt_emb = self.text_encoder(ids, mask)
         for i, v in enumerate(seq_lens):
             prompt_emb[i, v:] = 0
-        return prompt_emb.to(self.device)
+        prompt_emb = prompt_emb.to(self.device)
+        if prompt_emb.device.type == "cuda":
+            self._observed_parent_prompt_bytes = max(
+                getattr(self, "_observed_parent_prompt_bytes", 0),
+                prompt_emb.untyped_storage().nbytes(),
+            )
+        return prompt_emb
 
     @staticmethod
     def _best_output_size(w: int, h: int, expected_area: int, dw: int = 16, dh: int = 16) -> tuple[int, int]:

@@ -138,7 +138,6 @@ def test_vae_encode_stage_encodes_bounded_prefix_once_and_repeats_tail() -> None
     first_packet = encode(stage, 1, 0, 5, 4, 2, 2, torch.float32)
     tail_packet = encode(stage, 1, 4, 5, 4, 2, 2, torch.float32)
     resolver = LingBotWorldFastDenoisingStage.__new__(LingBotWorldFastDenoisingStage)
-    resolver._observed_condition_bytes = 0
     denoise_state = SimpleNamespace(image_condition_latent=None)
     first = resolver._resolve_image_condition(
         denoise_state,
