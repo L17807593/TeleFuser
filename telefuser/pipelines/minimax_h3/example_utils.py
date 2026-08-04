@@ -1,0 +1,245 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Shared local-checkpoint loader and artifact writer for MiniMax H3 examples."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import tempfile
+import urllib.parse
+from pathlib import Path
+from typing import Any
+
+import torch
+
+from telefuser.core.config import ModelRuntimeConfig, OffloadConfig, ParallelConfig, WeightOffloadType
+from telefuser.core.module_manager import ModuleManager
+from telefuser.models.minimax_h3_audio_vae import MiniMaxH3AudioVAE
+from telefuser.models.minimax_h3_dit import MiniMaxH3DiT
+from telefuser.models.minimax_h3_encoder import MiniMaxH3Encoder
+from telefuser.models.minimax_h3_video_vae import MiniMaxH3VideoVAE
+from telefuser.pipelines.minimax_h3.pipeline import (
+    MiniMaxH3Generation,
+    MiniMaxH3Pipeline,
+    MiniMaxH3PipelineConfig,
+)
+from telefuser.pipelines.minimax_h3.task_profiles import partition_for_task
+from telefuser.utils.audio import save_wav
+from telefuser.utils.video import save_video
+
+MINIMAX_H3_EXAMPLE_DATA = Path(__file__).resolve().parents[3] / "examples" / "data" / "minimax-h3"
+MINIMAX_H3_DEFAULT_FL2VA_IMAGE = MINIMAX_H3_EXAMPLE_DATA / "fl2va-reference.png"
+MINIMAX_H3_DEFAULT_REF2VA_VIDEO = MINIMAX_H3_EXAMPLE_DATA / "ref2va-reference.mp4"
+MINIMAX_H3_DEFAULT_REF2VA_AUDIO = MINIMAX_H3_EXAMPLE_DATA / "ref2va-voice.mp3"
+MINIMAX_H3_DEFAULT_REQUEST = MINIMAX_H3_EXAMPLE_DATA / "ref2va.json"
+
+_REQUEST_KEYS = frozenset(
+    {
+        "task",
+        "prompt",
+        "conditions",
+        "target",
+        "seed",
+        "flow_shift",
+        "audio_flow_shift",
+        "num_inference_steps",
+    }
+)
+
+
+def load_minimax_h3_request(request_path: str | Path) -> dict[str, Any]:
+    """Load a JSON request and resolve relative material paths beside it."""
+    path = Path(request_path).expanduser().resolve()
+    with path.open(encoding="utf-8") as request_file:
+        request = json.load(request_file)
+    if not isinstance(request, dict):
+        raise ValueError("MiniMax H3 request JSON must contain an object")
+    unknown = set(request) - _REQUEST_KEYS
+    if unknown:
+        raise ValueError(f"MiniMax H3 request JSON has unknown fields: {sorted(unknown)}")
+    missing = {"task", "prompt", "target"} - set(request)
+    if missing:
+        raise ValueError(f"MiniMax H3 request JSON is missing fields: {sorted(missing)}")
+
+    resolved = dict(request)
+    conditions = request.get("conditions", [])
+    if not isinstance(conditions, list):
+        raise ValueError("MiniMax H3 request conditions must be a list")
+    resolved_conditions: list[Any] = []
+    for index, condition in enumerate(conditions):
+        if not isinstance(condition, dict):
+            raise ValueError(f"MiniMax H3 request conditions[{index}] must be an object")
+        item = dict(condition)
+        uri = item.get("uri")
+        if isinstance(uri, str) and uri and not urllib.parse.urlparse(uri).scheme and not Path(uri).is_absolute():
+            item["uri"] = str((path.parent / uri).resolve())
+        resolved_conditions.append(item)
+    resolved["conditions"] = resolved_conditions
+    return resolved
+
+
+def partition_for_minimax_h3_request(request: dict[str, Any]) -> str:
+    """Return the original checkpoint partition required by a request."""
+    return partition_for_task(request.get("task")).upper()
+
+
+def _checkpoint_shards(component: Path) -> list[str]:
+    shards = sorted(str(path) for path in component.glob("model-*.safetensors"))
+    if not shards:
+        raise FileNotFoundError(f"no model safetensor shards found in {component}")
+    return shards
+
+
+def load_minimax_h3_pipeline(
+    model_root: str | Path,
+    *,
+    partition: str,
+    device: str = "cuda:0",
+    num_inference_steps: int = 50,
+    ulysses_degree: int = 1,
+    enable_fsdp: bool = False,
+) -> MiniMaxH3Pipeline:
+    if partition not in {"FL2VA", "Ref2VA"}:
+        raise ValueError("partition must be 'FL2VA' or 'Ref2VA'")
+    if ulysses_degree not in {1, 2, 4}:
+        raise ValueError("ulysses_degree must be 1, 2, or 4")
+    if enable_fsdp and ulysses_degree == 1:
+        raise ValueError("enable_fsdp requires --ulysses-degree 2 or 4 in the example runtime")
+    component_root = Path(model_root) / partition
+    if not component_root.is_dir():
+        raise FileNotFoundError(f"MiniMax H3 partition not found: {component_root}")
+    runtime_device = torch.device(device)
+    offload = OffloadConfig(
+        offload_type=WeightOffloadType.MODEL_CPU_OFFLOAD,
+        pin_cpu_memory=False,
+    )
+    bf16_runtime = ModelRuntimeConfig(
+        device_type=runtime_device.type,
+        device_id=runtime_device.index or 0,
+        torch_dtype=torch.bfloat16,
+        offload_config=offload,
+    )
+    dit_runtime = ModelRuntimeConfig(
+        device_type=runtime_device.type,
+        device_id=runtime_device.index or 0,
+        torch_dtype=torch.bfloat16,
+        offload_config=offload,
+        parallel_config=ParallelConfig(
+            device_ids=list(range(ulysses_degree)),
+            sp_ulysses_degree=ulysses_degree,
+            enable_fsdp=enable_fsdp,
+            timeout=1800,
+        ),
+    )
+    fp32_runtime = ModelRuntimeConfig(
+        device_type=runtime_device.type,
+        device_id=runtime_device.index or 0,
+        torch_dtype=torch.float32,
+        offload_config=offload,
+    )
+
+    manager = ModuleManager(device="cpu", torch_dtype=torch.bfloat16)
+    transformer_dir = component_root / "transformer"
+    manager.load_model(
+        _checkpoint_shards(transformer_dir),
+        device="cpu",
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
+        name="minimax_h3_transformer",
+        model_class=MiniMaxH3DiT,
+        converter_kwargs={"config_path": transformer_dir / "config.json"},
+    )
+    encoder_dir = component_root / "text_encoder"
+    manager.load_model(
+        _checkpoint_shards(encoder_dir),
+        device="cpu",
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
+        name="minimax_h3_text_encoder",
+        model_class=MiniMaxH3Encoder,
+        converter_kwargs={"config_path": encoder_dir},
+    )
+    video_vae_dir = component_root / "video_vae"
+    manager.load_model(
+        str(video_vae_dir / "source" / "model.safetensors"),
+        device="cpu",
+        torch_dtype=torch.float32,
+        low_cpu_mem_usage=True,
+        name="minimax_h3_video_vae",
+        model_class=MiniMaxH3VideoVAE,
+        converter_kwargs={"config_path": video_vae_dir},
+    )
+    audio_vae_dir = component_root / "audio_vae"
+    manager.load_model(
+        str(audio_vae_dir / "model.safetensors"),
+        device="cpu",
+        torch_dtype=torch.float32,
+        low_cpu_mem_usage=True,
+        name="minimax_h3_audio_vae",
+        model_class=MiniMaxH3AudioVAE,
+        converter_kwargs={"config_path": audio_vae_dir},
+    )
+
+    pipeline = MiniMaxH3Pipeline(device=device)
+    pipeline.init(
+        manager,
+        MiniMaxH3PipelineConfig(
+            processor_path=str(component_root / "processor"),
+            text_encoder_config=bf16_runtime,
+            dit_config=dit_runtime,
+            video_vae_config=fp32_runtime,
+            audio_vae_config=fp32_runtime,
+            num_inference_steps=num_inference_steps,
+        ),
+    )
+    return pipeline
+
+
+def save_generation(result: MiniMaxH3Generation, output_path: str | Path) -> None:
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    frames = result.video[0].mul(255).clamp(0, 255).to(torch.uint8)
+    waveform = result.audio[0]
+    with tempfile.TemporaryDirectory() as directory:
+        video_path = Path(directory) / "video.mp4"
+        audio_path = Path(directory) / "audio.wav"
+        save_wav(waveform, result.audio_sample_rate, str(audio_path))
+        save_video(
+            frames,
+            str(video_path),
+            fps=float(result.video_fps),
+            quality=6,
+        )
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(video_path),
+                "-i",
+                str(audio_path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                str(output),
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+
+__all__ = [
+    "MINIMAX_H3_DEFAULT_FL2VA_IMAGE",
+    "MINIMAX_H3_DEFAULT_REF2VA_AUDIO",
+    "MINIMAX_H3_DEFAULT_REF2VA_VIDEO",
+    "MINIMAX_H3_DEFAULT_REQUEST",
+    "load_minimax_h3_pipeline",
+    "load_minimax_h3_request",
+    "partition_for_minimax_h3_request",
+    "save_generation",
+]
