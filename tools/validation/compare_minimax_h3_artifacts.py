@@ -4,26 +4,19 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 from pathlib import Path
 
 import numpy as np
 
+from tools.validation.minimax_h3_validation_common import sha256 as _sha256
+
 MIN_VIDEO_COSINE = 0.99
 MIN_VIDEO_PSNR_DB = 28.0
 MIN_AUDIO_COSINE = 0.94
 MIN_AUDIO_PSNR_DB = 30.0
 DEFAULT_AUDIO_SAMPLE_RATE = 32_000
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _compare(reference_path: Path, candidate_path: Path, *, data_range: float) -> dict[str, object]:
