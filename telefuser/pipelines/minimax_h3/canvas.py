@@ -6,16 +6,13 @@ Geometry behavior:
 - cover-crop: aspect-preserving max-scale LANCZOS resize + center crop,
   upscaling refused unless explicitly allowed.
 
-Both the Qwen presentation (pixel_values) and the visual-condition tokenizer consume
-the SAME prepared canvas image, so preparation
-is cached per request in batch.extra.
+Both Qwen presentation and the visual-condition tokenizer consume the same
+prepared canvas image supplied by the pipeline.
 """
 
 from __future__ import annotations
 
 from typing import Any
-
-MINIMAX_H3_CANVAS_MULTIPLE = 32
 
 
 def minimax_h3_cover_crop_plan(
@@ -91,7 +88,6 @@ def minimax_h3_stretch_keyframe_canvas(
 
 
 __all__ = [
-    "MINIMAX_H3_CANVAS_MULTIPLE",
     "minimax_h3_cover_crop_plan",
     "minimax_h3_prepare_keyframe_canvas",
     "minimax_h3_stretch_keyframe_canvas",
