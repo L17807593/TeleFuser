@@ -13,9 +13,9 @@ TARGET = {"short_edge": 768, "aspect_ratio": "16:9", "duration_seconds": 5.0}
 
 
 @pytest.mark.parametrize(
-    ("task", "conditions", "partition", "visual", "audio", "chains"),
+    ("task", "conditions", "partition", "chains"),
     [
-        ("t2va", [], "fl2va", [], [], []),
+        ("t2va", [], "fl2va", []),
         (
             "fl2va",
             [
@@ -23,8 +23,6 @@ TARGET = {"short_edge": 768, "aspect_ratio": "16:9", "duration_seconds": 5.0}
                 {"type": "image", "uri": "file:///last.png", "role": "keyframe", "frame_index": -1},
             ],
             "fl2va",
-            [0, 1],
-            [],
             ["image.target_canvas", "image.target_canvas"],
         ),
         (
@@ -41,8 +39,6 @@ TARGET = {"short_edge": 768, "aspect_ratio": "16:9", "duration_seconds": 5.0}
                 {"type": "video_audio", "uri": "file:///av.mp4", "role": "reference"},
             ],
             "ref2va",
-            [0, 1, 3],
-            [1, 2, 3],
             [
                 "image.reference_preserve",
                 "video.reference_preserve",
@@ -52,12 +48,10 @@ TARGET = {"short_edge": 768, "aspect_ratio": "16:9", "duration_seconds": 5.0}
         ),
     ],
 )
-def test_public_tasks_resolve_to_exact_partition_and_encoder_plan(
+def test_public_tasks_resolve_to_exact_partition_and_material_plan(
     task: str,
     conditions: list[dict[str, object]],
     partition: str,
-    visual: list[int],
-    audio: list[int],
     chains: list[str],
 ) -> None:
     canonical = minimax_h3_validate_canonical_request(
@@ -67,8 +61,6 @@ def test_public_tasks_resolve_to_exact_partition_and_encoder_plan(
 
     assert partition_for_task(task) == partition
     assert plan.task == task
-    assert plan.encoders["visual"] == visual
-    assert plan.encoders["audio"] == audio
     assert [material.material_chain for material in plan.materials] == chains
     assert plan.shape["frame_count"] == 124
     assert plan.shape["video_latent_t"] == 37
@@ -85,8 +77,18 @@ def test_fl2va_signatures_preserve_first_and_last_semantics() -> None:
                 task="fl2va", prompt="contract", conditions=conditions, target=TARGET, seed=0
             )
         )
-        assert plan.condition_mask["semantic_frame_indices"] == indices
-        assert plan.condition_mask["pixel_frame_indices"] == [123 if index == -1 else index for index in indices]
+        assert [material.frame_index for material in plan.materials] == indices
+        assert [material.resolved_frame_index for material in plan.materials] == [
+            123 if index == -1 else index for index in indices
+        ]
+
+
+def test_task_names_are_normalized_once() -> None:
+    canonical = minimax_h3_validate_canonical_request(
+        task=" T2VA ", prompt="contract", conditions=[], target=TARGET, seed=0
+    )
+    assert canonical["task"] == "t2va"
+    assert partition_for_task(" T2VA ") == "fl2va"
 
 
 @pytest.mark.parametrize("duration", [3.9, 15.1])

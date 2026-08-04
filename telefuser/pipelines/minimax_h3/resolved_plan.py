@@ -25,12 +25,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from telefuser.pipelines.minimax_h3.constants import (
+    MINIMAX_H3_CANVAS_MULTIPLE,
     MINIMAX_H3_SUPPORTED_FPS,
 )
-from telefuser.pipelines.minimax_h3.task_profiles import (
-    MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES,
-    minimax_h3_task_profile,
-)
+from telefuser.pipelines.minimax_h3.task_profiles import minimax_h3_task_profile
 from telefuser.pipelines.minimax_h3.time_request import (
     minimax_h3_align_frame_count,
     minimax_h3_audio_latent_t,
@@ -40,7 +38,6 @@ from telefuser.pipelines.minimax_h3.time_request import (
 MINIMAX_H3_SHAPE_POLICY_VERSION = "adapt_shape_v1"
 MINIMAX_H3_BASE_SHORT_EDGE = 768
 MINIMAX_H3_MAX_PIXELS = MINIMAX_H3_BASE_SHORT_EDGE * 1344
-MINIMAX_H3_CANVAS_MULTIPLE = 32
 MINIMAX_H3_MIN_ASPECT_RATIO = 1.0 / 4.0
 MINIMAX_H3_MAX_ASPECT_RATIO = 4.0
 
@@ -66,14 +63,11 @@ class MiniMaxH3ResolvedPlan:
     prompt: str
     seed: int | None
     materials: tuple[MiniMaxH3MaterialPlanItem, ...]
-    encoders: dict
-    branches: tuple[dict, ...]
     default_flow_shift: float
     default_audio_flow_shift: float
     flow_shift: float | None
     audio_flow_shift: float | None
     shape: dict
-    condition_mask: dict
 
 
 def _parse_aspect_ratio(value: str) -> tuple[int, int]:
@@ -264,31 +258,6 @@ def minimax_h3_resolve_plan(canonical: Mapping[str, Any]) -> MiniMaxH3ResolvedPl
         if key not in canonical:
             raise ValueError(f"canonical request missing {key!r}")
     profile = minimax_h3_task_profile(str(canonical["task"]))
-    if profile.task == "fl2va":
-        conditions = canonical["conditions"]
-        signatures = (
-            [
-                (
-                    condition.get("type"),
-                    condition.get("role"),
-                    condition.get("frame_index"),
-                )
-                for condition in conditions
-            ]
-            if isinstance(conditions, (list, tuple)) and all(isinstance(condition, Mapping) for condition in conditions)
-            else []
-        )
-        frame_signature = tuple(signature[2] for signature in signatures)
-        if (
-            not signatures
-            or any(signature[:2] != ("image", "keyframe") for signature in signatures)
-            or frame_signature not in MINIMAX_H3_FL2VA_KEYFRAME_SIGNATURES
-        ):
-            raise ValueError(
-                "fl2va ResolvedPlan requires one or two ordered image/keyframe "
-                "conditions with frame_index [0], [-1], or [0, -1], got "
-                f"{signatures!r}"
-            )
     shape = _resolve_shape(
         canonical["target"],
         geometry_source=profile.geometry_source,
@@ -297,40 +266,14 @@ def minimax_h3_resolve_plan(canonical: Mapping[str, Any]) -> MiniMaxH3ResolvedPl
     )
 
     materials: list[MiniMaxH3MaterialPlanItem] = []
-    visual_encode: list[int] = []
-    audio_encode: list[int] = []
-    keyframe_semantic_indices: list[int] = []
-    keyframe_pixel_indices: list[int] = []
-    seen_keyframe_pixel_indices: dict[int, int] = {}
     for index, cond in enumerate(canonical["conditions"]):
         rule = profile.rule_for(role=str(cond["role"]), condition_type=str(cond["type"]))
         frame_index = cond.get("frame_index")
         resolved_frame_index = None
         if rule.requires_frame_index:
-            if frame_index is None:
-                raise ValueError(f"conditions[{index}].frame_index is required")
             semantic_frame_index = int(frame_index)
             frame_count = int(shape["frame_count"])
-            if semantic_frame_index == -1:
-                resolved_frame_index = frame_count - 1
-            elif 0 <= semantic_frame_index < frame_count:
-                resolved_frame_index = semantic_frame_index
-            else:
-                raise ValueError(
-                    f"conditions[{index}].frame_index must be -1 or in "
-                    f"[0, {frame_count}) after 17n+5 frame alignment, got "
-                    f"{semantic_frame_index}"
-                )
-            previous = seen_keyframe_pixel_indices.get(resolved_frame_index)
-            if previous is not None:
-                raise ValueError(
-                    f"conditions[{index}].frame_index resolves to "
-                    f"{resolved_frame_index}, already bound by "
-                    f"conditions[{previous}]"
-                )
-            seen_keyframe_pixel_indices[resolved_frame_index] = index
-            keyframe_semantic_indices.append(semantic_frame_index)
-            keyframe_pixel_indices.append(resolved_frame_index)
+            resolved_frame_index = frame_count - 1 if semantic_frame_index == -1 else semantic_frame_index
         materials.append(
             MiniMaxH3MaterialPlanItem(
                 condition_index=index,
@@ -343,37 +286,12 @@ def minimax_h3_resolve_plan(canonical: Mapping[str, Any]) -> MiniMaxH3ResolvedPl
                 start_time_seconds=float(cond.get("start_time_seconds", 0.0)),
             )
         )
-        if rule.visual_tokenizer_encode:
-            visual_encode.append(index)
-        if rule.audio_tokenizer_encode:
-            audio_encode.append(index)
-
-    encoders = {
-        "qwen": {
-            "prompt": canonical["prompt"],
-            "ordered_condition_indices": list(range(len(canonical["conditions"]))),
-        },
-        "visual": visual_encode,
-        "audio": audio_encode,
-    }
-
-    condition_mask: dict[str, Any] = {}
-    if keyframe_pixel_indices:
-        condition_mask = {
-            # Both arrays are request-ordered.  Semantic indices feed Qwen and
-            # the RoPE rule; resolved
-            # indices are concrete output frames.
-            "semantic_frame_indices": keyframe_semantic_indices,
-            "pixel_frame_indices": keyframe_pixel_indices,
-        }
 
     return MiniMaxH3ResolvedPlan(
         task=profile.task,
         prompt=str(canonical["prompt"]),
         seed=canonical.get("seed"),
         materials=tuple(materials),
-        encoders=encoders,
-        branches=profile.branches,
         default_flow_shift=float(profile.default_flow_shift),
         default_audio_flow_shift=float(profile.default_audio_flow_shift),
         flow_shift=(float(canonical["flow_shift"]) if canonical.get("flow_shift") is not None else None),
@@ -381,46 +299,14 @@ def minimax_h3_resolve_plan(canonical: Mapping[str, Any]) -> MiniMaxH3ResolvedPl
             float(canonical["audio_flow_shift"]) if canonical.get("audio_flow_shift") is not None else None
         ),
         shape=shape,
-        condition_mask=condition_mask,
     )
-
-
-MINIMAX_H3_CANONICAL_REQUEST_EXTRA_KEY = "minimax_h3_canonical_request"
-MINIMAX_H3_RESOLVED_PLAN_EXTRA_KEY = "minimax_h3_resolved_plan"
-
-
-def minimax_h3_plan_from_batch(batch: Any) -> MiniMaxH3ResolvedPlan | None:
-    """Resolve (once) and cache the plan for a Req carrying a canonical request.
-
-    Returns None when the request predates the canonical schema (such
-    requests keep their existing behavior).
-    """
-    extra = getattr(batch, "extra", None)
-    if not isinstance(extra, Mapping):
-        return None
-    cached = extra.get(MINIMAX_H3_RESOLVED_PLAN_EXTRA_KEY)
-    if cached is not None:
-        if not isinstance(cached, MiniMaxH3ResolvedPlan):
-            raise ValueError(f"batch.extra[{MINIMAX_H3_RESOLVED_PLAN_EXTRA_KEY!r}] must be a MiniMaxH3ResolvedPlan")
-    canonical = extra.get(MINIMAX_H3_CANONICAL_REQUEST_EXTRA_KEY)
-    if cached is not None:
-        return cached
-    if canonical is None:
-        return None
-    plan = minimax_h3_resolve_plan(canonical)
-    if isinstance(extra, dict):
-        extra[MINIMAX_H3_RESOLVED_PLAN_EXTRA_KEY] = plan
-    return plan
 
 
 __all__ = [
     "MINIMAX_H3_BASE_SHORT_EDGE",
     "MINIMAX_H3_CANVAS_MULTIPLE",
-    "MINIMAX_H3_CANONICAL_REQUEST_EXTRA_KEY",
     "MINIMAX_H3_MAX_PIXELS",
-    "MINIMAX_H3_RESOLVED_PLAN_EXTRA_KEY",
     "MiniMaxH3ResolvedPlan",
-    "minimax_h3_plan_from_batch",
     "minimax_h3_resolve_plan",
     "minimax_h3_resolve_spatial_shape",
 ]

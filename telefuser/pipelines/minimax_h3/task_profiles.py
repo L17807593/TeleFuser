@@ -13,10 +13,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from telefuser.pipelines.minimax_h3.constants import (
-    MINIMAX_H3_DEFAULT_BRANCHES,
-)
-
 MINIMAX_H3_CONDITION_ROLE_KEYFRAME = "keyframe"
 MINIMAX_H3_CONDITION_ROLE_REFERENCE = "reference"
 
@@ -35,21 +31,20 @@ MINIMAX_H3_TASK_PARTITIONS = MappingProxyType(
 
 
 def canonical_minimax_h3_task(task: str) -> str:
-    """Normalize a public task name (no aliases are currently defined)."""
+    """Normalize and validate a public task name."""
 
-    return task
+    if not isinstance(task, str) or not task.strip():
+        raise ValueError("MiniMax H3 task must be a non-empty string")
+    normalized = task.strip().lower()
+    if normalized not in MINIMAX_H3_TASK_PARTITIONS:
+        raise ValueError(f"unsupported MiniMax H3 task {task!r}")
+    return normalized
 
 
 def partition_for_task(task: str) -> str:
     """Return the deployment partition serving *task*."""
 
-    if not isinstance(task, str) or not task.strip():
-        raise ValueError("MiniMax H3 task must be a non-empty string")
-    normalized = task.strip().lower()
-    try:
-        return MINIMAX_H3_TASK_PARTITIONS[normalized]
-    except KeyError as exc:
-        raise ValueError(f"unsupported MiniMax H3 task {task!r}") from exc
+    return MINIMAX_H3_TASK_PARTITIONS[canonical_minimax_h3_task(task)]
 
 
 MINIMAX_H3_FINITE_ASPECT_RATIOS = (
@@ -92,8 +87,6 @@ class MiniMaxH3ConditionRule:
     condition_type: str
     material_chain: str
     requires_frame_index: bool = False
-    visual_tokenizer_encode: bool = False
-    audio_tokenizer_encode: bool = False
 
 
 @dataclass(frozen=True)
@@ -103,10 +96,8 @@ class MiniMaxH3TaskProfile:
     task: str
     conditions_required: bool
     condition_rules: tuple[MiniMaxH3ConditionRule, ...]
-    branches: tuple[dict, ...]
     default_flow_shift: float
     default_audio_flow_shift: float
-    required_components: tuple[str, ...]
     aspect_ratio_forced_auto: bool
     geometry_source: str  # "explicit_target" | "first_keyframe" | "model_default"
     # For ref2va video, target may omit duration_seconds
@@ -130,25 +121,13 @@ class MiniMaxH3TaskProfile:
         raise ValueError(f"task {self.task!r} does not allow condition role={role!r} type={condition_type!r}")
 
 
-_BASE_COMPONENTS = (
-    "processor",
-    "text_encoder",
-    "tokenizer",
-    "transformer",
-    "video_vae",
-    "audio_vae",
-)
-
-_BRANCHES = tuple(dict(branch) for branch in MINIMAX_H3_DEFAULT_BRANCHES)
 MINIMAX_H3_TASK_PROFILES: dict[str, MiniMaxH3TaskProfile] = {
     MINIMAX_H3_TASK_T2VA: MiniMaxH3TaskProfile(
         task=MINIMAX_H3_TASK_T2VA,
         conditions_required=False,
         condition_rules=(),
-        branches=_BRANCHES,
         default_flow_shift=12.0,
         default_audio_flow_shift=3.0,
-        required_components=_BASE_COMPONENTS,
         aspect_ratio_forced_auto=False,
         geometry_source="explicit_target",
         auto_aspect_ratio="16:9",
@@ -163,13 +142,10 @@ MINIMAX_H3_TASK_PROFILES: dict[str, MiniMaxH3TaskProfile] = {
                 condition_type="image",
                 material_chain="image.target_canvas",
                 requires_frame_index=True,
-                visual_tokenizer_encode=True,
             ),
         ),
-        branches=_BRANCHES,
         default_flow_shift=12.0,
         default_audio_flow_shift=3.0,
-        required_components=_BASE_COMPONENTS,
         # FL follows the resolved target geometry projected by the caller.
         # Its first/last keyframes are prepared against that target canvas.
         aspect_ratio_forced_auto=False,
@@ -186,36 +162,28 @@ MINIMAX_H3_TASK_PROFILES: dict[str, MiniMaxH3TaskProfile] = {
                 role=MINIMAX_H3_CONDITION_ROLE_REFERENCE,
                 condition_type="image",
                 material_chain="image.reference_preserve",
-                visual_tokenizer_encode=True,
             ),
             MiniMaxH3ConditionRule(
                 role=MINIMAX_H3_CONDITION_ROLE_REFERENCE,
                 condition_type="video",
                 material_chain="video.reference_preserve",
-                visual_tokenizer_encode=True,
                 # ref2va video: the reference video's ORIGINAL soundtrack is the
                 # audio reference; -17 rows cover the full pre-truncation track.
                 # Route the same material into the audio encoder.
-                audio_tokenizer_encode=True,
             ),
             MiniMaxH3ConditionRule(
                 role=MINIMAX_H3_CONDITION_ROLE_REFERENCE,
                 condition_type="video_audio",
                 material_chain="video_audio.reference_preserve",
-                visual_tokenizer_encode=True,
-                audio_tokenizer_encode=True,
             ),
             MiniMaxH3ConditionRule(
                 role=MINIMAX_H3_CONDITION_ROLE_REFERENCE,
                 condition_type="audio",
                 material_chain="audio",
-                audio_tokenizer_encode=True,
             ),
         ),
-        branches=_BRANCHES,
         default_flow_shift=12.0,
         default_audio_flow_shift=3.0,
-        required_components=_BASE_COMPONENTS,
         # ref2va video may use an explicit aspect ratio such as "7:4":
         # ref2va allows explicit aspect ratios; "auto" falls back to the
         # policy default (references never bind target geometry).
