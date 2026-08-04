@@ -299,7 +299,8 @@ def test_pipeline_wraps_multi_gpu_denoising_stage_and_closes_worker(monkeypatch:
 
     monkeypatch.setattr(pipeline_module.AutoProcessor, "from_pretrained", lambda *args, **kwargs: object())
     monkeypatch.setattr(pipeline_module, "MiniMaxH3TextEncodingStage", _Stage)
-    monkeypatch.setattr(pipeline_module, "MiniMaxH3VAEStage", _Stage)
+    monkeypatch.setattr(pipeline_module, "MiniMaxH3VideoVAEStage", _Stage)
+    monkeypatch.setattr(pipeline_module, "MiniMaxH3AudioVAEStage", _Stage)
     monkeypatch.setattr(pipeline_module, "MiniMaxH3DenoisingStage", _Stage)
     monkeypatch.setattr(pipeline_module, "ParallelWorker", _Worker)
     monkeypatch.setattr(pipeline_module.dist, "is_initialized", lambda: False)

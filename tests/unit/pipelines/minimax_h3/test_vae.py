@@ -1,11 +1,14 @@
 import numpy as np
-import pytest
 import torch
 
 from telefuser.core.config import ModelRuntimeConfig
 from telefuser.core.module_manager import ModuleManager
 from telefuser.pipelines.minimax_h3.resolved_plan import MiniMaxH3MaterialPlanItem
-from telefuser.pipelines.minimax_h3.vae import MiniMaxH3PreparedCondition, MiniMaxH3VAEStage
+from telefuser.pipelines.minimax_h3.vae import (
+    MiniMaxH3AudioVAEStage,
+    MiniMaxH3PreparedCondition,
+    MiniMaxH3VideoVAEStage,
+)
 
 
 class _VideoVAEProbe(torch.nn.Module):
@@ -34,7 +37,7 @@ def test_reference_video_uses_uint8_numpy_preprocessing_path() -> None:
     manager.add_module(video_vae, "minimax_h3_video_vae")
     manager.add_module(audio_vae, "minimax_h3_audio_vae")
     runtime = ModelRuntimeConfig(device_type="cpu", torch_dtype=torch.float32)
-    stage = MiniMaxH3VAEStage(manager, runtime, runtime)
+    stage = MiniMaxH3VideoVAEStage(manager, runtime)
     material = MiniMaxH3MaterialPlanItem(
         0,
         "reference",
@@ -56,17 +59,18 @@ def test_reference_video_uses_uint8_numpy_preprocessing_path() -> None:
     assert encoded[0].visual_rows is not None
 
 
-def test_vae_stage_rejects_different_component_placement() -> None:
+def test_vae_stages_accept_independent_component_placement() -> None:
     manager = ModuleManager(device="cpu")
     manager.add_module(_VideoVAEProbe(), "minimax_h3_video_vae")
     manager.add_module(torch.nn.Linear(1, 1), "minimax_h3_audio_vae")
+    video_config = ModelRuntimeConfig(device_type="cpu", device_id=0)
+    audio_config = ModelRuntimeConfig(device_type="cpu", device_id=1)
 
-    with pytest.raises(ValueError, match="same device and offload configuration"):
-        MiniMaxH3VAEStage(
-            manager,
-            ModelRuntimeConfig(device_type="cpu", device_id=0),
-            ModelRuntimeConfig(device_type="cpu", device_id=1),
-        )
+    video_stage = MiniMaxH3VideoVAEStage(manager, video_config)
+    audio_stage = MiniMaxH3AudioVAEStage(manager, audio_config)
+
+    assert video_stage.model_runtime_config is video_config
+    assert audio_stage.model_runtime_config is audio_config
 
 
 def test_video_decode_keeps_cpu_path_in_fp32() -> None:
@@ -75,7 +79,7 @@ def test_video_decode_keeps_cpu_path_in_fp32() -> None:
     manager.add_module(video_vae, "minimax_h3_video_vae")
     manager.add_module(torch.nn.Linear(1, 1), "minimax_h3_audio_vae")
     runtime = ModelRuntimeConfig(device_type="cpu", torch_dtype=torch.float32)
-    stage = MiniMaxH3VAEStage(manager, runtime, runtime)
+    stage = MiniMaxH3VideoVAEStage(manager, runtime)
 
     frames = stage.decode_video(torch.zeros(1, 24, 1, 2, 2))
 
