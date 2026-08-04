@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 import shutil
@@ -14,16 +13,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from tools.validation.minimax_h3_validation_common import sha256 as _sha256
+
 _CASES = ("t2va", "fl2va", "ref2va")
 _MAX_DOWNLOAD_BYTES = 2 * 1024**3
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _extract_request(script: Path) -> dict[str, object]:

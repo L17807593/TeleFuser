@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -22,14 +21,7 @@ from telefuser.models.minimax_h3_dit import (
     _rotate_half,
 )
 from telefuser.ops.attention import attention
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+from tools.validation.minimax_h3_validation_common import sha256 as _sha256
 
 
 def _load_block(

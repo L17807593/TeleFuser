@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib.metadata
 import json
 import shutil
@@ -15,26 +14,15 @@ from typing import Any
 
 import numpy as np
 
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _json_sha256(value: object) -> str:
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
-def _model_config_hashes(component_root: Path) -> dict[str, str]:
-    return {
-        str(path.relative_to(component_root)): _sha256(path)
-        for path in sorted(component_root.rglob("*.json"))
-        if path.is_file()
-    }
+from tools.validation.minimax_h3_validation_common import (
+    json_sha256 as _json_sha256,
+)
+from tools.validation.minimax_h3_validation_common import (
+    model_config_hashes as _model_config_hashes,
+)
+from tools.validation.minimax_h3_validation_common import (
+    sha256 as _sha256,
+)
 
 
 def _json_value(value: Any) -> Any:
