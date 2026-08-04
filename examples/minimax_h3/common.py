@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
+import urllib.parse
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -20,8 +23,64 @@ from telefuser.pipelines.minimax_h3.pipeline import (
     MiniMaxH3Pipeline,
     MiniMaxH3PipelineConfig,
 )
+from telefuser.pipelines.minimax_h3.task_profiles import partition_for_task
 from telefuser.utils.audio import save_wav
 from telefuser.utils.video import save_video
+
+MINIMAX_H3_EXAMPLE_DATA = Path(__file__).resolve().parents[1] / "data" / "minimax-h3"
+MINIMAX_H3_DEFAULT_FL2VA_IMAGE = MINIMAX_H3_EXAMPLE_DATA / "fl2va-reference.png"
+MINIMAX_H3_DEFAULT_REF2VA_VIDEO = MINIMAX_H3_EXAMPLE_DATA / "ref2va-reference.mp4"
+MINIMAX_H3_DEFAULT_REF2VA_AUDIO = MINIMAX_H3_EXAMPLE_DATA / "ref2va-voice.mp3"
+MINIMAX_H3_DEFAULT_REQUEST = MINIMAX_H3_EXAMPLE_DATA / "ref2va.json"
+
+_REQUEST_KEYS = frozenset(
+    {
+        "task",
+        "prompt",
+        "conditions",
+        "target",
+        "seed",
+        "flow_shift",
+        "audio_flow_shift",
+        "num_inference_steps",
+    }
+)
+
+
+def load_minimax_h3_request(request_path: str | Path) -> dict[str, Any]:
+    """Load a JSON request and resolve relative material paths beside it."""
+    path = Path(request_path).expanduser().resolve()
+    with path.open(encoding="utf-8") as request_file:
+        request = json.load(request_file)
+    if not isinstance(request, dict):
+        raise ValueError("MiniMax H3 request JSON must contain an object")
+    unknown = set(request) - _REQUEST_KEYS
+    if unknown:
+        raise ValueError(f"MiniMax H3 request JSON has unknown fields: {sorted(unknown)}")
+    missing = {"task", "prompt", "target"} - set(request)
+    if missing:
+        raise ValueError(f"MiniMax H3 request JSON is missing fields: {sorted(missing)}")
+
+    resolved = dict(request)
+    conditions = request.get("conditions", [])
+    if not isinstance(conditions, list):
+        raise ValueError("MiniMax H3 request conditions must be a list")
+    resolved_conditions: list[Any] = []
+    for index, condition in enumerate(conditions):
+        if not isinstance(condition, dict):
+            raise ValueError(f"MiniMax H3 request conditions[{index}] must be an object")
+        item = dict(condition)
+        uri = item.get("uri")
+        if isinstance(uri, str) and uri and not urllib.parse.urlparse(uri).scheme and not Path(uri).is_absolute():
+            item["uri"] = str((path.parent / uri).resolve())
+        resolved_conditions.append(item)
+    resolved["conditions"] = resolved_conditions
+    return resolved
+
+
+def partition_for_minimax_h3_request(request: dict[str, Any]) -> str:
+    """Return the original checkpoint partition required by a request."""
+    return partition_for_task(request.get("task")).upper()
 
 
 def _checkpoint_shards(component: Path) -> list[str]:
@@ -38,11 +97,14 @@ def load_minimax_h3_pipeline(
     device: str = "cuda:0",
     num_inference_steps: int = 50,
     ulysses_degree: int = 1,
+    enable_fsdp: bool = False,
 ) -> MiniMaxH3Pipeline:
     if partition not in {"FL2VA", "Ref2VA"}:
         raise ValueError("partition must be 'FL2VA' or 'Ref2VA'")
     if ulysses_degree not in {1, 2, 4}:
         raise ValueError("ulysses_degree must be 1, 2, or 4")
+    if enable_fsdp and ulysses_degree == 1:
+        raise ValueError("enable_fsdp requires --ulysses-degree 2 or 4 in the example runtime")
     component_root = Path(model_root) / partition
     if not component_root.is_dir():
         raise FileNotFoundError(f"MiniMax H3 partition not found: {component_root}")
@@ -65,6 +127,7 @@ def load_minimax_h3_pipeline(
         parallel_config=ParallelConfig(
             device_ids=list(range(ulysses_degree)),
             sp_ulysses_degree=ulysses_degree,
+            enable_fsdp=enable_fsdp,
             timeout=1800,
         ),
     )
@@ -170,4 +233,13 @@ def save_generation(result: MiniMaxH3Generation, output_path: str | Path) -> Non
         )
 
 
-__all__ = ["load_minimax_h3_pipeline", "save_generation"]
+__all__ = [
+    "MINIMAX_H3_DEFAULT_FL2VA_IMAGE",
+    "MINIMAX_H3_DEFAULT_REF2VA_AUDIO",
+    "MINIMAX_H3_DEFAULT_REF2VA_VIDEO",
+    "MINIMAX_H3_DEFAULT_REQUEST",
+    "load_minimax_h3_pipeline",
+    "load_minimax_h3_request",
+    "partition_for_minimax_h3_request",
+    "save_generation",
+]
