@@ -131,6 +131,60 @@ multiple audio-bearing conditions, duration must be explicit. Published limits a
 at most 9 images, 3 videos, 3 audio-bearing inputs, and 12 files total; each audio/video clip must be 2-15 seconds,
 total video and total audio duration must each be at most 15 seconds, and audio requires an image or video reference.
 
+## Standard Python And Serve Entrypoints
+
+All three executable modules expose `PPL_CONFIG`, `get_pipeline`, `run`, and `run_with_file`. The two fixed-partition
+generation modules also expose `PIPELINE_MANIFEST` for serving. `get_pipeline(parallelism, model_root)` uses
+`parallelism` as the Ulysses degree, while `run` returns the in-memory `MiniMaxH3Generation` and `run_with_file`
+writes the synchronized MP4 and returns its `output_path`.
+
+```python
+from examples.minimax_h3.minimax_h3_fl2va_h100 import get_pipeline, run_with_file
+
+pipeline = get_pipeline(4, "/path/to/MiniMaxAI_MiniMax-H3")
+try:
+    artifact = run_with_file(
+        pipeline,
+        task="i2v",
+        prompt="Steam rises from the ramen while the family talks.",
+        first_image_path="examples/data/minimax-h3/fl2va-reference.png",
+        output_path="outputs/minimax_h3_i2v.mp4",
+    )
+finally:
+    pipeline.stop()
+```
+
+Serve T2VA, first-frame I2VA, and first-and-last-frame FL2VA from the shared FL2VA checkpoint partition:
+
+```bash
+telefuser serve examples/minimax_h3/minimax_h3_fl2va_h100.py --gpu-num 4 --port 8000
+```
+
+The service contract advertises `t2v`, `i2v`, and `fl2v`. Submit `first_image_path` for `i2v`, and both
+`first_image_path` and `last_image_path` for `fl2v`. Output duration must be between 4 and 15 seconds:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/tasks/create \
+  -H "Content-Type: application/json" \
+  -d "{\"task\":\"i2v\",\"prompt\":\"Animate this dinner scene with synchronized dialogue.\",\"first_image_path\":\"https://example.com/first.png\",\"resolution\":\"768p\",\"aspect_ratio\":\"16:9\",\"target_video_length\":5}"
+```
+
+Ref2VA uses its own checkpoint partition and advertises the standard `s2v` service task, which maps to the
+model-specific Ref2VA task. Its required `conditions` parameter is the same ordered array accepted by the local
+pipeline, so heterogeneous image, video, `video_audio`, and audio references are not reordered by the example.
+Output duration must also be between 4 and 15 seconds:
+
+```bash
+telefuser serve examples/minimax_h3/minimax_h3_ref2va_h100.py --task s2v --gpu-num 4 --port 8001
+
+curl -X POST http://127.0.0.1:8001/v1/tasks/create \
+  -H "Content-Type: application/json" \
+  -d "{\"task\":\"s2v\",\"prompt\":\"Use <Video 1>, then <Audio 2>.\",\"conditions\":[{\"type\":\"video\",\"role\":\"reference\",\"uri\":\"https://example.com/motion.mp4\"},{\"type\":\"audio\",\"role\":\"reference\",\"uri\":\"https://example.com/voice.mp3\"}],\"resolution\":\"768p\",\"aspect_ratio\":\"16:9\",\"target_video_length\":5}"
+```
+
+Use `/v1/service/metadata` to inspect the active task contract. The JSON request runner remains the convenient local
+entrypoint for request files and resolves relative material paths beside the JSON file.
+
 ## Generation And Parallel Options
 
 The simple CLIs expose `--steps`, `--seed`, `--duration`, `--aspect-ratio`, `--flow-shift`, and
@@ -151,5 +205,5 @@ python examples/minimax_h3/minimax_h3_request_h100.py \
 ```
 
 H3 tensor parallelism, Ring attention, CFG parallelism, pipeline parallelism, and visual-VAE spatial parallelism are
-not enabled. The current service request schema also cannot preserve ordered heterogeneous Ref2VA materials; use
-these local Python examples until a shared ordered-material service contract is separately approved.
+not enabled. The dedicated service manifests expose the existing pipeline behavior without adding framework-level
+configuration fields or changing the shared request schema.
