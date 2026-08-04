@@ -17,15 +17,26 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from tools.validation.minimax_h3_validation_common import (
-    json_sha256 as _json_sha256,
-)
-from tools.validation.minimax_h3_validation_common import (
-    model_config_hashes as _model_config_hashes,
-)
-from tools.validation.minimax_h3_validation_common import (
-    sha256 as _sha256,
-)
+if __package__:
+    from tools.validation.minimax_h3_validation_common import (
+        json_sha256 as _json_sha256,
+    )
+    from tools.validation.minimax_h3_validation_common import (
+        model_config_hashes as _model_config_hashes,
+    )
+    from tools.validation.minimax_h3_validation_common import (
+        sha256 as _sha256,
+    )
+else:
+    from minimax_h3_validation_common import (
+        json_sha256 as _json_sha256,
+    )
+    from minimax_h3_validation_common import (
+        model_config_hashes as _model_config_hashes,
+    )
+    from minimax_h3_validation_common import (
+        sha256 as _sha256,
+    )
 
 
 def _array_summary(array: np.ndarray) -> dict[str, object]:
