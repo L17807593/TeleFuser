@@ -4,7 +4,7 @@
 # Deploy: mkdocs gh-deploy --force
 
 site_name: TeleFuser
-site_description: A high-performance framework for efficient multimodal generation model inference
+site_description: A streaming inference and serving framework for real-time world models and multimodal generation
 site_author: TeleAI Team
 site_url: https://tele-ai.github.io/TeleFuser
 
@@ -131,6 +131,7 @@ plugins:
             Configuration: 配置
             Tools: 工具
             Service: 服务指南
+            World Model Streaming Inference: 世界模型流式推理
             Stream Server: 流式服务
             Stream Scheduler: 流式调度器
             TeleFuser and AIPerf: TeleFuser 与 AIPerf
@@ -164,6 +165,7 @@ plugins:
 nav:
   - Home: index.md
   - User Guides:
+      - World Model Streaming Inference: world_model_streaming_inference.md
       - service.md
       - stream_server.md
       - stream_scheduler.md
@@ -218,7 +220,7 @@ extra:
           note: Thanks for your feedback! Help us improve by opening an issue.
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/TeleFuser/TeleFuser
+      link: https://github.com/Tele-AI/TeleFuser
       name: GitHub
 
 extra_css:

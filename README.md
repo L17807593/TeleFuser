@@ -1,6 +1,8 @@
 <div align="center">
-  <img src="assets/telefuser_logo.png" width="80%">
+  <img src="assets/telefuser_logo.png" width="80%" alt="TeleFuser">
 </div>
+
+# TeleFuser: Streaming Inference Framework for World Models and Multimodal Generation
 
 <p align="center">
   <a href="README_zh.md">中文</a> | English
@@ -13,7 +15,13 @@
   <img src="https://img.shields.io/badge/CUDA-12.8%2B-green" alt="CUDA">
 </p>
 
-TeleFuser is a high-performance runtime for world model inference and multimodal generation. It is designed for continuous, low-latency, stateful visual generation workloads such as real-time world models, speech-driven animation, and streaming visual systems.
+TeleFuser is an open-source streaming inference and serving framework for real-time world models and multimodal
+generation. It supports continuous video generation, stateful sessions, bidirectional control, distributed GPU
+inference, FastAPI serving, and LiveKit WebRTC streaming for workloads such as interactive world models,
+speech-driven animation, and streaming visual systems.
+
+See the [world model streaming inference guide](docs/en/world_model_streaming_inference.md) for the execution model,
+runtime path, supported workloads, and reproducible real-time gate.
 
 ## News 📰
 

@@ -1,6 +1,8 @@
 <div align="center">
-  <img src="assets/telefuser_logo.png" width="80%">
+  <img src="assets/telefuser_logo.png" width="80%" alt="TeleFuser">
 </div>
+
+# TeleFuser：面向世界模型与多模态生成的流式推理框架
 
 <p align="center">
   中文 | <a href="README.md">English</a>
@@ -13,7 +15,12 @@
   <img src="https://img.shields.io/badge/CUDA-12.8%2B-green" alt="CUDA">
 </p>
 
-TeleFuser 是一个面向世界模型推理与多模态生成的高性能运行时框架。它重点服务于实时世界模型、语音驱动动画、流式视觉生成等连续、低时延、有状态的视觉生成任务。
+TeleFuser 是一个开源的多模态生成与世界模型流式推理和服务框架，支持连续视频生成、有状态会话、双向交互、
+多 GPU 分布式推理、FastAPI 服务和 LiveKit WebRTC 流式传输，面向实时世界模型、语音驱动动画和流式
+视觉生成等连续、低时延任务。
+
+世界模型流式推理的执行模型、运行链路、支持任务和可复现实时门禁见
+[世界模型流式推理指南](docs/zh/world_model_streaming_inference.md)。
 
 ## News 📰
 

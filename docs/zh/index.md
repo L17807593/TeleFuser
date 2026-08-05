@@ -1,8 +1,15 @@
+---
+title: TeleFuser 世界模型与多模态生成流式推理框架
+description: >-
+  TeleFuser 是开源的世界模型与多模态生成流式推理和服务框架，支持实时视频生成、有状态会话、
+  多 GPU 分布式推理及 WebRTC 交互。
+---
+
 <section class="tf-hero" markdown>
 
 # TeleFuser
 
-一个面向世界模型推理和多模态生成的**高性能运行时**，覆盖长时运行流水线、分布式执行和生产服务接口。
+一个面向实时世界模型和多模态生成的开源**流式推理与服务框架**，覆盖连续流水线、多 GPU 分布式执行和生产服务接口。
 
 <div class="tf-badge-row" markdown>
 <span class="tf-badge">PyTorch 2.6+</span>
@@ -18,7 +25,7 @@
 
 <div class="feature-grid" markdown>
 <div class="feature-card" markdown>
-**世界模型运行时**
+**[世界模型运行时](world_model_streaming_inference.md)**
 
 连续执行、有状态会话和双向控制循环。
 </div>
@@ -65,6 +72,7 @@ AdaTaylorCache 和运行时缓存控制，面向重复生成工作负载。
 | WanVideo (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | 视频生成和编辑 |
 | HunyuanVideo | T2V, I2V | 视频生成 |
 | LTX Video | I2V + Audio | 视频生成 + 音频 |
+| MiniMax H3 | T2VA, FL2VA, Ref2VA + Audio | 本地 768p 音视频联合生成 |
 | FlashVSR | VSR | 视频超分辨率 |
 | LiveAct | S2V | 语音转视频 |
 | LongCat-Video | T2V, I2V | 长视频生成 |

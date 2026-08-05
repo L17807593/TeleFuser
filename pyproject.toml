@@ -5,14 +5,23 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "telefuser"
 dynamic = ["version"] 
-description = "A framework for efficient model inference with multimodal generation models"
+description = "A streaming inference and serving framework for world models and multimodal generation"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 license = "Apache-2.0"
 authors = [
     {name = "TeleAI Team"}
 ]
-keywords = ["multimodal", "diffusion", "transformer", "inference", "serving"]
+keywords = [
+    "multimodal-generation",
+    "world-model",
+    "video-generation",
+    "streaming-inference",
+    "distributed-inference",
+    "diffusion",
+    "serving",
+    "webrtc",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
