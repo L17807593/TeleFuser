@@ -24,6 +24,7 @@ def _indexed_scale_shift_bf16_kernel(
     scale_ptr,
     indices_ptr,
     hidden_size,
+    parameter_rows,
     stride_x_row,
     stride_shift_row,
     stride_scale_row,
@@ -34,9 +35,10 @@ def _indexed_scale_shift_bf16_kernel(
     columns = tl.arange(0, BLOCK_N)
     mask = columns < hidden_size
     index = tl.load(indices_ptr + row * stride_indices)
+    index_mask = mask & (index >= 0) & (index < parameter_rows)
     x = tl.load(x_ptr + row * stride_x_row + columns, mask=mask, other=0.0).to(tl.float32)
-    shift = tl.load(shift_ptr + index * stride_shift_row + columns, mask=mask, other=0.0).to(tl.float32)
-    scale = tl.load(scale_ptr + index * stride_scale_row + columns, mask=mask, other=0.0).to(tl.float32)
+    shift = tl.load(shift_ptr + index * stride_shift_row + columns, mask=index_mask, other=0.0).to(tl.float32)
+    scale = tl.load(scale_ptr + index * stride_scale_row + columns, mask=index_mask, other=0.0).to(tl.float32)
     one_plus_scale = _round_bf16_to_fp32(1.0 + scale)
     scaled = _round_bf16_to_fp32(x * one_plus_scale)
     tl.store(output_ptr + row * stride_x_row + columns, scaled + shift, mask=mask)
@@ -50,6 +52,7 @@ def _indexed_gate_bf16_kernel(
     other_ptr,
     indices_ptr,
     hidden_size,
+    parameter_rows,
     stride_x_row,
     stride_gate_row,
     stride_other_row,
@@ -60,8 +63,9 @@ def _indexed_gate_bf16_kernel(
     columns = tl.arange(0, BLOCK_N)
     mask = columns < hidden_size
     index = tl.load(indices_ptr + row * stride_indices)
+    index_mask = mask & (index >= 0) & (index < parameter_rows)
     x = tl.load(x_ptr + row * stride_x_row + columns, mask=mask, other=0.0).to(tl.float32)
-    gate = tl.load(gate_ptr + index * stride_gate_row + columns, mask=mask, other=0.0).to(tl.float32)
+    gate = tl.load(gate_ptr + index * stride_gate_row + columns, mask=index_mask, other=0.0).to(tl.float32)
     other = tl.load(other_ptr + row * stride_other_row + columns, mask=mask, other=0.0).to(tl.float32)
     gated = _round_bf16_to_fp32(gate * other)
     tl.store(output_ptr + row * stride_x_row + columns, x + gated, mask=mask)
@@ -84,6 +88,7 @@ def indexed_scale_shift_bf16_(
         scale,
         indices,
         hidden_size,
+        shift.shape[0],
         x.stride(0),
         shift.stride(0),
         scale.stride(0),
@@ -111,6 +116,7 @@ def indexed_gate_bf16_(
         other,
         indices,
         hidden_size,
+        gate.shape[0],
         x.stride(0),
         gate.stride(0),
         other.stride(0),
