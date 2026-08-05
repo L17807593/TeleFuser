@@ -49,6 +49,20 @@ class MiniMaxH3PreparedCondition:
     ref_audio_t: int = 0
     has_audio: bool = False
 
+    def as_denoising_payload(self) -> dict[str, Any]:
+        """Drop source media while preserving denoising inputs for tensor transport."""
+        return {
+            "material": self.material,
+            "kind": self.kind,
+            "visual_rows": self.visual_rows,
+            "audio_rows": self.audio_rows,
+            "latent_t": self.latent_t,
+            "latent_h": self.latent_h,
+            "latent_w": self.latent_w,
+            "ref_audio_t": self.ref_audio_t,
+            "has_audio": self.has_audio,
+        }
+
 
 @contextlib.contextmanager
 def _scoped_seed(seed: int, device: torch.device):
@@ -236,6 +250,21 @@ class MiniMaxH3VideoVAEStage(BaseStage):
     @with_model_offload(["video_vae"])
     @torch.inference_mode()
     def encode_visual(self, conditions: list[MiniMaxH3PreparedCondition]) -> list[MiniMaxH3PreparedCondition]:
+        return self._encode_visual(conditions, keep_rows_on_device=False)
+
+    @with_model_offload(["video_vae"])
+    @torch.inference_mode()
+    def encode_visual_for_denoising(self, conditions: list[MiniMaxH3PreparedCondition]) -> list[dict[str, Any]]:
+        """Encode channel-friendly condition rows without staging them through CPU."""
+        encoded = self._encode_visual(conditions, keep_rows_on_device=True)
+        return [condition.as_denoising_payload() for condition in encoded]
+
+    def _encode_visual(
+        self,
+        conditions: list[MiniMaxH3PreparedCondition],
+        *,
+        keep_rows_on_device: bool,
+    ) -> list[MiniMaxH3PreparedCondition]:
         output: list[MiniMaxH3PreparedCondition] = []
         parameter = next(self.video_vae.parameters())
         for condition in conditions:
@@ -254,7 +283,9 @@ class MiniMaxH3VideoVAEStage(BaseStage):
             mean = latent.new_tensor(self.video_vae.config.latents_mean).view(1, -1, 1, 1, 1)
             std = latent.new_tensor(self.video_vae.config.latents_std).view(1, -1, 1, 1, 1)
             normalized = latent.float().sub(mean).div(std)
-            rows = minimax_h3_patchify_video_latent(normalized, patch_size=(1, 2, 2)).cpu()
+            rows = minimax_h3_patchify_video_latent(normalized, patch_size=(1, 2, 2))
+            if not keep_rows_on_device:
+                rows = rows.cpu()
             output.append(
                 MiniMaxH3PreparedCondition(
                     **{

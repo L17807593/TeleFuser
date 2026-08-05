@@ -16,7 +16,7 @@ from transformers import AutoProcessor
 from telefuser.core.base_pipeline import BasePipeline
 from telefuser.core.config import ModelRuntimeConfig
 from telefuser.core.module_manager import ModuleManager
-from telefuser.worker import ParallelWorker
+from telefuser.worker import ParallelWorker, WorkerTensorChannel
 
 from .data import (
     minimax_h3_validate_canonical_request,
@@ -76,6 +76,10 @@ class MiniMaxH3Pipeline(BasePipeline):
         self.video_vae_stage: MiniMaxH3VideoVAEStage | ParallelWorker | None = None
         self.audio_vae_stage: MiniMaxH3AudioVAEStage | None = None
         self.denoising_stage: MiniMaxH3DenoisingStage | ParallelWorker | None = None
+        self._worker_tensor_channels: list[WorkerTensorChannel] = []
+        self._uses_direct_text_handoff = False
+        self._uses_direct_visual_handoff = False
+        self._uses_direct_video_latent_handoff = False
 
     def init(self, module_manager: ModuleManager, config: MiniMaxH3PipelineConfig) -> None:
         self.config = config
@@ -89,30 +93,87 @@ class MiniMaxH3Pipeline(BasePipeline):
             config.text_encoder_config,
             processor=processor,
         )
-        if config.text_encoder_config.parallel_config.world_size > 1 and not dist.is_initialized():
-            self.text_stage = ParallelWorker(text_stage)
-        else:
-            self.text_stage = text_stage
-            if dist.is_initialized():
-                text_stage.parallel_models()
         video_vae_stage = MiniMaxH3VideoVAEStage(
             module_manager,
             config.video_vae_config,
         )
-        if config.video_vae_config.parallel_config.world_size > 1 and not dist.is_initialized():
-            self.video_vae_stage = ParallelWorker(video_vae_stage)
+        self.audio_vae_stage = MiniMaxH3AudioVAEStage(module_manager, config.audio_vae_config)
+        denoising_stage = MiniMaxH3DenoisingStage(module_manager, config.dit_config)
+
+        standalone_workers = not dist.is_initialized()
+        text_parallel = standalone_workers and config.text_encoder_config.parallel_config.world_size > 1
+        video_vae_parallel = standalone_workers and config.video_vae_config.parallel_config.world_size > 1
+        denoising_parallel = standalone_workers and config.dit_config.parallel_config.world_size > 1
+        text_to_denoise_channel = None
+        visual_to_denoise_channel = None
+        denoise_to_video_vae_channel = None
+        if denoising_parallel:
+            denoise_world_size = config.dit_config.parallel_config.world_size
+            if text_parallel:
+                text_to_denoise_channel = WorkerTensorChannel(
+                    denoise_world_size,
+                    timeout=max(
+                        config.text_encoder_config.parallel_config.timeout,
+                        config.dit_config.parallel_config.timeout,
+                    ),
+                )
+                self._worker_tensor_channels.append(text_to_denoise_channel)
+            if video_vae_parallel:
+                visual_to_denoise_channel = WorkerTensorChannel(
+                    denoise_world_size,
+                    timeout=max(
+                        config.video_vae_config.parallel_config.timeout,
+                        config.dit_config.parallel_config.timeout,
+                    ),
+                )
+                denoise_to_video_vae_channel = WorkerTensorChannel(
+                    config.video_vae_config.parallel_config.world_size,
+                    timeout=max(
+                        config.video_vae_config.parallel_config.timeout,
+                        config.dit_config.parallel_config.timeout,
+                    ),
+                )
+                self._worker_tensor_channels.extend((visual_to_denoise_channel, denoise_to_video_vae_channel))
+
+        if text_parallel:
+            self.text_stage = ParallelWorker(
+                text_stage,
+                tensor_output_channel=text_to_denoise_channel,
+                tensor_output_methods=("encode_for_denoising",) if text_to_denoise_channel is not None else (),
+            )
+        else:
+            self.text_stage = text_stage
+            if dist.is_initialized():
+                text_stage.parallel_models()
+        if video_vae_parallel:
+            self.video_vae_stage = ParallelWorker(
+                video_vae_stage,
+                tensor_output_channel=visual_to_denoise_channel,
+                tensor_output_methods=("encode_visual_for_denoising",) if visual_to_denoise_channel is not None else (),
+                tensor_input_channels=(denoise_to_video_vae_channel,)
+                if denoise_to_video_vae_channel is not None
+                else (),
+            )
         else:
             self.video_vae_stage = video_vae_stage
             if dist.is_initialized():
                 video_vae_stage.parallel_models()
-        self.audio_vae_stage = MiniMaxH3AudioVAEStage(module_manager, config.audio_vae_config)
-        denoising_stage = MiniMaxH3DenoisingStage(module_manager, config.dit_config)
-        if config.dit_config.parallel_config.world_size > 1 and not dist.is_initialized():
-            self.denoising_stage = ParallelWorker(denoising_stage)
+        if denoising_parallel:
+            self.denoising_stage = ParallelWorker(
+                denoising_stage,
+                tensor_output_channel=denoise_to_video_vae_channel,
+                tensor_output_methods=("denoise_for_video_vae",) if denoise_to_video_vae_channel is not None else (),
+                tensor_input_channels=tuple(
+                    channel for channel in (text_to_denoise_channel, visual_to_denoise_channel) if channel is not None
+                ),
+            )
         else:
             self.denoising_stage = denoising_stage
             if dist.is_initialized():
                 denoising_stage.parallel_models()
+        self._uses_direct_text_handoff = text_to_denoise_channel is not None
+        self._uses_direct_visual_handoff = visual_to_denoise_channel is not None
+        self._uses_direct_video_latent_handoff = denoise_to_video_vae_channel is not None
         self._model_info = module_manager.get_model_info()
 
     def _get_stages(self) -> list[object]:
@@ -123,10 +184,18 @@ class MiniMaxH3Pipeline(BasePipeline):
         ]
 
     def stop(self) -> None:
-        for stage in self._get_stages():
+        # Release the two producer-to-DiT IPC mappings before their producer
+        # workers exit. The DiT-to-VAE channel makes fully consumer-first
+        # shutdown impossible without a worker-level release command.
+        stages = (self.denoising_stage, self.text_stage, self.video_vae_stage, self.audio_vae_stage)
+        for stage in stages:
+            if stage is None:
+                continue
             close = getattr(stage, "close", None)
             if callable(close):
                 close()
+        for channel in self._worker_tensor_channels:
+            channel.close()
 
     @staticmethod
     def _resolve_stage_result(value: Any) -> Any:
@@ -235,6 +304,10 @@ class MiniMaxH3Pipeline(BasePipeline):
                 labels.append(("video", counters["video"]))
         return labels
 
+    @staticmethod
+    def _condition_transport_payload(condition: MiniMaxH3PreparedCondition) -> dict[str, Any]:
+        return condition.as_denoising_payload()
+
     @torch.inference_mode()
     def __call__(
         self,
@@ -297,8 +370,11 @@ class MiniMaxH3Pipeline(BasePipeline):
             media_preparation_seconds = time.perf_counter() - media_started
             images = [item.image for item in prepared if item.image is not None]
             videos = [item.video_frames for item in prepared if item.video_frames is not None]
+            text_method = (
+                self.text_stage.encode_for_denoising if self._uses_direct_text_handoff else self.text_stage.encode
+            )
             text, text_encoding_seconds = self._timed_call(
-                self.text_stage.encode,
+                text_method,
                 task=plan.task,
                 prompt=plan.prompt,
                 images=images,
@@ -306,27 +382,59 @@ class MiniMaxH3Pipeline(BasePipeline):
                 condition_labels=self._condition_labels(prepared),
             )
             visual_encoding_seconds = 0.0
+            condition_payloads: list[dict[str, Any]] | None = None
             if any(item.image is not None or item.video_frames is not None for item in prepared):
-                prepared, visual_encoding_seconds = self._timed_call(self.video_vae_stage.encode_visual, prepared)
+                if self._uses_direct_visual_handoff:
+                    condition_payloads, visual_encoding_seconds = self._timed_call(
+                        self.video_vae_stage.encode_visual_for_denoising, prepared
+                    )
+                else:
+                    prepared, visual_encoding_seconds = self._timed_call(self.video_vae_stage.encode_visual, prepared)
             duration_seconds = float(plan.shape["frame_count"]) / float(plan.shape["fps"])
             audio_encoding_seconds = 0.0
             if any(item.has_audio for item in prepared):
                 prepared, audio_encoding_seconds = self._timed_call(
                     self.audio_vae_stage.encode_audio, prepared, paths, facts, duration_seconds
                 )
+            if self._uses_direct_visual_handoff:
+                if condition_payloads is None:
+                    condition_payloads = [self._condition_transport_payload(condition) for condition in prepared]
+                else:
+                    condition_payloads = [
+                        {
+                            **payload,
+                            "audio_rows": condition.audio_rows,
+                            "ref_audio_t": condition.ref_audio_t,
+                            "has_audio": condition.has_audio,
+                        }
+                        for payload, condition in zip(condition_payloads, prepared, strict=True)
+                    ]
+                denoising_conditions: list[MiniMaxH3PreparedCondition] | list[dict[str, Any]] = condition_payloads
+            else:
+                denoising_conditions = prepared
             steps = self.config.num_inference_steps if num_inference_steps is None else num_inference_steps
             if isinstance(steps, bool) or not isinstance(steps, int) or steps < 2:
                 raise ValueError("num_inference_steps must be an integer of at least 2")
-            denoised, denoising_stage_seconds = self._timed_call(
-                self.denoising_stage.denoise,
-                plan=plan,
-                text=text,
-                conditions=prepared,
-                num_inference_steps=steps,
-            )
-            video_device, video_decoding_seconds = self._timed_call(
-                self.video_vae_stage.decode_video, denoised.video_latent
-            )
+            if self._uses_direct_video_latent_handoff:
+                transported, denoising_stage_seconds = self._timed_call(
+                    self.denoising_stage.denoise_for_video_vae,
+                    plan=plan,
+                    text=text,
+                    conditions=denoising_conditions,
+                    num_inference_steps=steps,
+                )
+                video_latent = transported["video_latent"]
+                denoised = transported["remainder"]
+            else:
+                denoised, denoising_stage_seconds = self._timed_call(
+                    self.denoising_stage.denoise,
+                    plan=plan,
+                    text=text,
+                    conditions=denoising_conditions,
+                    num_inference_steps=steps,
+                )
+                video_latent = denoised.video_latent
+            video_device, video_decoding_seconds = self._timed_call(self.video_vae_stage.decode_video, video_latent)
             # Materialize exactly once in the caller. For a parallel VAE worker,
             # video_device arrives through CUDA IPC without routing 1.5 GB of
             # FP32 frames through multiprocessing shared-memory serialization.
