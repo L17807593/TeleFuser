@@ -456,9 +456,8 @@ stage 包含大量 CPU 计算时才需要提高该值；它不会修改父进程
 # 设备数必须等于各并行度乘积
 world_size = dp * cfg * sp_ring * sp_ulysses * pp * tp
 
-# SP 和 TP 不能同时启用
-if sp_degree > 1 and tp_degree > 1:
-    raise ValueError("SP and TP are mutually exclusive")
+# SP 和 TP 可以作为独立的 mesh 维度组合。
+# 所选 pipeline 必须实现并校验请求的组合。
 ```
 
 ## 使用示例

@@ -65,6 +65,7 @@ def test_minimax_h3_four_gpu_regression_contract() -> None:
     assert pipeline.resolution == "768p"
     assert pipeline.target_video_length == 5
     assert pipeline.use_run_with_file is True
+    assert pipeline.require_audio is True
     assert pipeline.ppl_config_overrides["num_inference_steps"] == 50
 
 

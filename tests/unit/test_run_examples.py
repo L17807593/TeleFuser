@@ -247,7 +247,7 @@ def test_video_comparison_rejects_missing_metrics(
     baseline.write_bytes(b"baseline")
     current.write_bytes(b"current")
     monkeypatch.setattr(run_examples, "_get_baseline_path", lambda *_args: str(baseline))
-    monkeypatch.setattr(run_examples, "compute_video_metrics", lambda *_args: metrics)
+    monkeypatch.setattr(run_examples, "compute_video_metrics", lambda *_args, **_kwargs: metrics)
 
     result = run_examples.compare_against_baseline(
         str(tmp_path), "wan/example.py", 1, str(current), "video", 25.0, 0.85, 0.02
@@ -257,6 +257,71 @@ def test_video_comparison_rejects_missing_metrics(
     assert result["message"] == "Video comparison produced no PSNR/SSIM metrics"
 
 
+def test_required_audio_metrics_compare_stream_contract_and_waveform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream_info = {"sample_rate": 32_000, "channels": 2, "duration": 5.0}
+    waveforms = {
+        "baseline.mp4": np.array([0.5, -0.25, 0.1, -0.2], dtype=np.float32),
+        "current.mp4": np.array([0.49, -0.24, 0.11, -0.19], dtype=np.float32),
+    }
+    monkeypatch.setattr(run_examples, "_probe_audio_stream", lambda _path: stream_info)
+    monkeypatch.setattr(
+        run_examples,
+        "_decode_audio",
+        lambda path, **_kwargs: waveforms[path],
+    )
+
+    metrics = run_examples._compute_audio_metrics("baseline.mp4", "current.mp4", required=True)
+
+    assert metrics["audio_cosine"] > 0.99
+    assert metrics["audio_duration_delta"] == 0.0
+
+
+def test_required_audio_metrics_reject_missing_current_track(monkeypatch: pytest.MonkeyPatch) -> None:
+    baseline_info = {"sample_rate": 32_000, "channels": 2, "duration": 5.0}
+    monkeypatch.setattr(
+        run_examples,
+        "_probe_audio_stream",
+        lambda path: baseline_info if path == "baseline.mp4" else None,
+    )
+
+    with pytest.raises(ValueError, match="Current video has no audio stream"):
+        run_examples._compute_audio_metrics("baseline.mp4", "current.mp4", required=True)
+
+
+def test_video_comparison_enforces_required_audio_cosine(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    baseline = tmp_path / "baseline.mp4"
+    current = tmp_path / "current.mp4"
+    baseline.write_bytes(b"baseline")
+    current.write_bytes(b"current")
+    monkeypatch.setattr(run_examples, "_get_baseline_path", lambda *_args: str(baseline))
+    monkeypatch.setattr(
+        run_examples,
+        "compute_video_metrics",
+        lambda *_args, **_kwargs: {"psnr": 30.0, "ssim": 0.95, "audio_cosine": 0.5},
+    )
+
+    result = run_examples.compare_against_baseline(
+        str(tmp_path),
+        "minimax_h3/example.py",
+        4,
+        str(current),
+        "video",
+        25.0,
+        0.85,
+        0.02,
+        require_audio=True,
+        audio_cosine_min=0.95,
+    )
+
+    assert not result["passed"]
+    assert "audio cosine 0.5000 < 0.9500" in result["message"]
+
+
 def test_video_comparison_rejects_unavailable_dependencies(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     baseline = tmp_path / "baseline.mp4"
     current = tmp_path / "current.mp4"
@@ -264,7 +329,7 @@ def test_video_comparison_rejects_unavailable_dependencies(monkeypatch: pytest.M
     current.write_bytes(b"current")
     monkeypatch.setattr(run_examples, "_get_baseline_path", lambda *_args: str(baseline))
 
-    def raise_missing_dependency(*_args: object) -> dict[str, float]:
+    def raise_missing_dependency(*_args: object, **_kwargs: object) -> dict[str, float]:
         raise ModuleNotFoundError("skimage")
 
     monkeypatch.setattr(run_examples, "compute_video_metrics", raise_missing_dependency)

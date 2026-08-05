@@ -461,9 +461,8 @@ pool.
 # Device count must equal product of parallel degrees
 world_size = dp * cfg * sp_ring * sp_ulysses * pp * tp
 
-# SP and TP cannot be enabled simultaneously
-if sp_degree > 1 and tp_degree > 1:
-    raise ValueError("SP and TP are mutually exclusive")
+# SP and TP may be combined as independent mesh dimensions.
+# The selected pipeline must implement and validate the requested combination.
 ```
 
 ## Usage Examples

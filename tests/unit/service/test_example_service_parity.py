@@ -28,6 +28,8 @@ from telefuser.service_types import PipelineRunStatus, TaskStatus
 
 SERVICE_EXAMPLES = {
     "wan21_i2v_service": (Path("examples/wan_video/wan21_14b_image_to_video_480p_service.py"), "i2v", True),
+    "minimax_h3_fl2va": (Path("examples/minimax_h3/minimax_h3_fl2va_h100.py"), "t2v", True),
+    "minimax_h3_ref2va": (Path("examples/minimax_h3/minimax_h3_ref2va_h100.py"), "s2v", True),
     "wan22_i2v_distill": (Path("examples/wan_video/wan22_14b_image_to_video_distill_h100.py"), "i2v", True),
     "lingbot_video_dense": (Path("examples/lingbot_video/lingbot_video_dense_1_3b.py"), "t2i", True),
     "lingbot_video_moe": (Path("examples/lingbot_video/lingbot_video_moe_30b.py"), "t2i", True),
@@ -86,7 +88,7 @@ def _parameter_value(parameter_type: str) -> object:
         "boolean": True,
         "integer": 7,
         "number": 1.5,
-        "array": [],
+        "array": [{"type": "image", "role": "reference", "uri": "input.png"}],
         "object": {},
     }
     return values.get(parameter_type, "test-value")
@@ -188,6 +190,9 @@ def test_task_request_reaches_example_entrypoint_with_contract_defaults(example_
             request_data[input_name] = str(input_path)
         else:
             request_data[input_name] = f"{input_name}.bin"
+    for name, parameter in task_contract.parameters.items():
+        if parameter.required and parameter.default is None:
+            request_data.setdefault(name, _parameter_value(parameter.type))
     request = TaskRequest(**request_data)
     explicit_fields = set(request.model_fields_set)
     asyncio.run(
@@ -280,6 +285,9 @@ def test_http_task_route_applies_example_contract_defaults(example_name: str, tm
     for input_name in task_contract.required_inputs:
         request_data[input_name] = f"{input_name}.bin"
 
+    for name, parameter in task_contract.parameters.items():
+        if parameter.required and parameter.default is None:
+            request_data.setdefault(name, _parameter_value(parameter.type))
     try:
         with TestClient(server.app) as client:
             response = client.post("/v1/tasks/create", json=request_data)

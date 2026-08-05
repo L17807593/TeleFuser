@@ -114,6 +114,7 @@ pipelines:
     resolution: "768p"
     target_video_length: 5
     use_run_with_file: true
+    require_audio: true
     ppl_config_overrides:
       num_inference_steps: 50
 
