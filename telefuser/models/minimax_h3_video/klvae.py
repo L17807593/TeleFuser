@@ -5,12 +5,15 @@ from typing import List, Union
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from PIL import Image
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.loaders.single_file_model import FromOriginalModelMixin
 from diffusers.models import ModelMixin
 from diffusers.utils import logging
+
+from telefuser.distributed.collectives import all_gather_stacked
 
 from .processor import (
     VAEProcessor,
@@ -29,10 +32,6 @@ def _resolve_temporal_cat_dtype():
 
 def _resolve_temporal_stream_cat():
     return True
-
-
-def get_tile_parallel_state():
-    return 0, 1
 
 
 class DiagonalGaussianDistribution(object):
@@ -133,9 +132,8 @@ class AutoencoderKL(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
         if kwargs.get("encoder_parallel", False) or kwargs.get("decoder_parallel", False):
             raise ValueError("MiniMax H3 VAE spatial sharding is unsupported")
-        if kwargs.get("parallel_tiling", False):
-            raise ValueError("MiniMax H3 VAE parallel tiling is unsupported")
-        self.parallel_tiling = False
+        self.parallel_tiling = bool(kwargs.get("parallel_tiling", False))
+        self.tile_parallel_group = None
 
         processor_kwargs = {
             "vae_ratio": self.vae_ratio,
@@ -157,6 +155,18 @@ class AutoencoderKL(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 setattr(self.processor, key, value)
         else:
             self.processor = VAEProcessor(**processor_kwargs)
+
+    def enable_parallel_tiling(self, group: dist.ProcessGroup) -> None:
+        self.tile_parallel_group = group
+        self.parallel_tiling = dist.get_world_size(group=group) > 1
+
+    def _tile_parallel_state(self) -> tuple[int, int]:
+        if not self.parallel_tiling or self.tile_parallel_group is None:
+            return 0, 1
+        return (
+            dist.get_rank(group=self.tile_parallel_group),
+            dist.get_world_size(group=self.tile_parallel_group),
+        )
 
     def split_tiles(self, input_len, is_decoder=False):
         tile_size = self.decoder_tile_size if is_decoder else self.tile_size
@@ -256,7 +266,7 @@ class AutoencoderKL(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         return output
 
     def _all_gather_tiled_results(self, tasks, num_tiles):
-        tile_rank, tile_world_size = get_tile_parallel_state()
+        tile_rank, tile_world_size = self._tile_parallel_state()
 
         if not tasks:
             raise ValueError(f"Found empty tasks on tile rank {tile_rank}")
@@ -282,7 +292,11 @@ class AutoencoderKL(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         # single equal-shape all-gather; the previous path paid for a barrier,
         # a shape all-gather, and then a padded data all-gather per temporal
         # clip.
-        gathered = [stacked]
+        gathered = all_gather_stacked(
+            stacked,
+            group=self.tile_parallel_group,
+            world_size=tile_world_size,
+        )
 
         results = [None] * num_tiles
         for rank, rank_tensors in enumerate(gathered):
@@ -315,7 +329,7 @@ class AutoencoderKL(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
     def tiled_encode(self, x):
         if self.parallel_tiling:  # Fast online encoding for large videos
-            tile_rank, tile_world_size = get_tile_parallel_state()
+            tile_rank, tile_world_size = self._tile_parallel_state()
         else:
             tile_rank, tile_world_size = 0, 1
 
@@ -363,7 +377,7 @@ class AutoencoderKL(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
     def tiled_decode(self, z):
         if self.parallel_tiling:  # Fast online decoding for large videos
-            tile_rank, tile_world_size = get_tile_parallel_state()
+            tile_rank, tile_world_size = self._tile_parallel_state()
         else:
             tile_rank, tile_world_size = 0, 1
 

@@ -84,4 +84,6 @@ def test_video_decode_keeps_cpu_path_in_fp32() -> None:
     frames = stage.decode_video(torch.zeros(1, 24, 1, 2, 2))
 
     assert frames.shape == (1, 1, 2, 2, 3)
+    assert frames.device.type == "cpu"
+    assert frames.dtype == torch.float32
     assert video_vae.prepared_dtype is None

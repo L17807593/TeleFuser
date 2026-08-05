@@ -10,6 +10,7 @@ from telefuser.models.minimax_h3_dit import (
     MiniMaxH3DiTConfig,
     _reorder_grouped_qkv_to_qkv,
 )
+from telefuser.ops.rotary import apply_qk_norm_rope_neox, apply_rotary_emb_neox
 
 
 def _small_config() -> MiniMaxH3DiTConfig:
@@ -29,6 +30,57 @@ def _small_config() -> MiniMaxH3DiTConfig:
         time_embed_dim=16,
         rope_inv_freq_len=1,
     )
+
+
+def test_partial_neox_rope_matches_h3_reference() -> None:
+    torch.manual_seed(0)
+    query = torch.randn(3, 2, 8)
+    key = torch.randn(3, 2, 8)
+    angles = torch.randn(3, 3)
+    cache = torch.cat((angles.cos(), angles.sin()), dim=-1)
+
+    actual_query, actual_key = apply_rotary_emb_neox(query, key, cache)
+
+    def reference(value: torch.Tensor) -> torch.Tensor:
+        first, second = value[..., :6].chunk(2, dim=-1)
+        cosine = angles.cos().unsqueeze(1)
+        sine = angles.sin().unsqueeze(1)
+        rotary = torch.cat((first * cosine - second * sine, second * cosine + first * sine), dim=-1)
+        return torch.cat((rotary, value[..., 6:]), dim=-1)
+
+    torch.testing.assert_close(actual_query, reference(query))
+    torch.testing.assert_close(actual_key, reference(key))
+
+
+def test_qk_norm_rope_native_fallback_matches_split_reference() -> None:
+    torch.manual_seed(0)
+    query = torch.randn(3, 2, 8, dtype=torch.bfloat16)
+    key = torch.randn_like(query)
+    q_weight = torch.randn(8, dtype=torch.bfloat16)
+    k_weight = torch.randn(8, dtype=torch.bfloat16)
+    angles = torch.randn(3, 3)
+    cache = torch.cat((angles.cos(), angles.sin()), dim=-1).to(torch.bfloat16)
+
+    def normalize(value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        variance = value.float().pow(2).mean(-1, keepdim=True)
+        return (value * torch.rsqrt(variance + 1e-5)).to(weight.dtype) * weight
+
+    expected_query, expected_key = apply_rotary_emb_neox(
+        normalize(query, q_weight),
+        normalize(key, k_weight),
+        cache,
+    )
+    actual_query, actual_key = apply_qk_norm_rope_neox(
+        query,
+        key,
+        q_weight,
+        k_weight,
+        cache,
+        eps=1e-5,
+    )
+
+    assert torch.equal(actual_query, expected_query)
+    assert torch.equal(actual_key, expected_key)
 
 
 def test_released_architecture_has_exact_parameter_contract() -> None:
@@ -82,6 +134,38 @@ def test_grouped_qkv_reorder_matches_sglang_vector() -> None:
     torch.testing.assert_close(actual, expected)
 
 
+def test_enable_tp_shards_fused_projections_by_logical_section() -> None:
+    model = MiniMaxH3DiT(_small_config())
+    block = model.blocks[0]
+    original_qkv = block.attn.qkv_proj.weight.detach().clone()
+    original_out = block.attn.out_proj.weight.detach().clone()
+    original_fc1 = block.mlp.fc1.weight.detach().clone()
+    original_fc2 = block.mlp.fc2.weight.detach().clone()
+    original_adaln = block.adaln_proj.linear.weight.detach().clone()
+    tp_group = MagicMock()
+
+    with (
+        patch("telefuser.models.minimax_h3_dit.get_tp_world_size", return_value=2),
+        patch("telefuser.models.minimax_h3_dit.get_tp_rank", return_value=1),
+        patch("telefuser.models.minimax_h3_dit.get_tp_group", return_value=tp_group),
+    ):
+        model.enable_tp(MagicMock())
+
+    q, k, v = original_qkv.chunk(3, dim=0)
+    expected_qkv = torch.cat((q.chunk(2)[1], k.chunk(2)[1], v.chunk(2)[1]), dim=0)
+    gate, up = original_fc1.chunk(2, dim=0)
+    expected_fc1 = torch.cat((gate.chunk(2)[1], up.chunk(2)[1]), dim=0)
+    torch.testing.assert_close(block.attn.qkv_proj.weight, expected_qkv)
+    torch.testing.assert_close(block.attn.out_proj.weight, original_out.chunk(2, dim=1)[1])
+    torch.testing.assert_close(block.mlp.fc1.weight, expected_fc1)
+    torch.testing.assert_close(block.mlp.fc2.weight, original_fc2.chunk(2, dim=1)[1])
+    torch.testing.assert_close(block.adaln_proj.linear.weight, original_adaln.chunk(2, dim=0)[1])
+    assert block.attn.num_heads == 2
+    assert block.attn.inner_dim == 16
+    assert block.mlp.intermediate_size == 32
+    assert model.tp_flag is True
+
+
 def test_small_packed_forward_returns_video_and_audio_rows() -> None:
     torch.manual_seed(0)
     model = MiniMaxH3DiT(_small_config()).eval()
@@ -108,6 +192,97 @@ def test_small_packed_forward_returns_video_and_audio_rows() -> None:
     assert audio.shape == (2, 2)
     assert torch.isfinite(video).all()
     assert torch.isfinite(audio).all()
+
+
+def test_tp_forward_batches_block_adaln_all_gather() -> None:
+    torch.manual_seed(0)
+    model = MiniMaxH3DiT(_small_config()).eval()
+    tp_group = MagicMock()
+    with (
+        patch("telefuser.models.minimax_h3_dit.get_tp_world_size", return_value=2),
+        patch("telefuser.models.minimax_h3_dit.get_tp_rank", return_value=0),
+        patch("telefuser.models.minimax_h3_dit.get_tp_group", return_value=tp_group),
+    ):
+        model.enable_tp(MagicMock())
+
+    sequence = 8
+    video_positions = torch.arange(4, 8)
+    audio_positions = torch.arange(2, 4)
+
+    def gather_rank_copies(tensor: torch.Tensor, *, dim: int, **_: object) -> torch.Tensor:
+        return torch.cat((tensor, tensor), dim=dim)
+
+    with (
+        patch("telefuser.models.minimax_h3_dit.all_gather_cat", side_effect=gather_rank_copies) as gather,
+        patch("telefuser.models.minimax_h3_dit.all_reduce_sum_"),
+    ):
+        video, audio = model(
+            x=torch.randn(1, sequence, 8),
+            audio_x=torch.randn(1, sequence, 2),
+            img_position_ids=torch.zeros(1, sequence, 3, dtype=torch.float64),
+            unique_timesteps=torch.tensor([0.5]),
+            inverse_indices=torch.zeros(sequence, dtype=torch.long),
+            update_mask=torch.ones(video_positions.numel(), dtype=torch.bool),
+            token_tags=torch.tensor([1, 1, 2, 2, 0, 0, 0, 0]),
+            prompt_embeds=torch.randn(2, 16),
+            img_pos_info={"position_ids": video_positions},
+            audio_pos_info={"position_ids": audio_positions},
+            text_pos_info={"position_ids": torch.arange(0, 2)},
+            img_pos_for_infer_output_info={"position_ids": video_positions},
+            packed_seq_params={"cu_seqlens_q": torch.tensor([0, sequence], dtype=torch.int32)},
+        )
+
+    assert video.shape == (4, 8)
+    assert audio.shape == (2, 2)
+    assert gather.call_count == 2
+    assert gather.call_args_list[0].args[0].shape[0] == len(model.blocks)
+
+
+def test_request_static_inputs_are_reused_across_denoising_steps() -> None:
+    torch.manual_seed(0)
+    model = MiniMaxH3DiT(_small_config()).eval()
+    sequence = 8
+    video_positions = torch.arange(4, 8)
+    audio_positions = torch.arange(2, 4)
+    inputs = {
+        "x": torch.randn(1, sequence, 8),
+        "audio_x": torch.randn(1, sequence, 2),
+        "img_position_ids": torch.zeros(1, sequence, 3, dtype=torch.float64),
+        "unique_timesteps": torch.tensor([0.5]),
+        "inverse_indices": torch.zeros(sequence, dtype=torch.long),
+        "update_mask": torch.ones(video_positions.numel(), dtype=torch.bool),
+        "token_tags": torch.tensor([1, 1, 2, 2, 0, 0, 0, 0]),
+        "prompt_embeds": torch.randn(2, 16),
+        "img_pos_info": {"position_ids": video_positions},
+        "audio_pos_info": {"position_ids": audio_positions},
+        "text_pos_info": {"position_ids": torch.arange(0, 2)},
+        "img_pos_for_infer_output_info": {"position_ids": video_positions},
+        "packed_seq_params": {"cu_seqlens_q": torch.tensor([0, sequence], dtype=torch.int32)},
+    }
+
+    with (
+        patch.object(model.token_refiner, "forward", wraps=model.token_refiner.forward) as token_refiner,
+        patch.object(model.rope, "forward", wraps=model.rope.forward) as rope,
+    ):
+        model(static_cache_key=1, **inputs)
+        model(static_cache_key=1, **inputs)
+        assert token_refiner.call_count == 1
+        assert rope.call_count == 1
+
+        model(static_cache_key=2, **inputs)
+        assert token_refiner.call_count == 2
+        assert rope.call_count == 2
+
+
+def test_time_embedder_reuses_device_frequency_cache() -> None:
+    model = MiniMaxH3DiT(_small_config()).eval()
+    timestep = torch.tensor([0.5])
+
+    model.time_embedder(timestep)
+    cached = model.time_embedder._frequency_cache[timestep.device]
+    model.time_embedder(timestep)
+
+    assert model.time_embedder._frequency_cache[timestep.device] is cached
 
 
 def test_enable_usp_rejects_uneven_head_partition() -> None:

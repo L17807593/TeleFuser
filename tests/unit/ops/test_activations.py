@@ -12,7 +12,10 @@ from telefuser.ops.activations import (
     FP32SiLU,
     LinearActivation,
     SwiGLU,
+    gelu_and_mul,
     get_activation,
+    silu_and_mul,
+    silu_and_mul_reuse_input,
 )
 from tests.conftest import requires_cuda
 
@@ -45,6 +48,35 @@ class TestGetActivation:
         """Test that invalid activation raises error."""
         with pytest.raises(ValueError, match="activation function invalid not found"):
             get_activation("invalid")
+
+
+def test_fused_gated_activations_fall_back_for_cpu_tensors() -> None:
+    x = torch.randn(2, 8)
+    gate, value = x.chunk(2, dim=-1)
+
+    torch.testing.assert_close(silu_and_mul(x), torch.nn.functional.silu(gate) * value)
+    torch.testing.assert_close(gelu_and_mul(x), torch.nn.functional.gelu(gate) * value)
+
+
+def test_reuse_input_falls_back_without_mutating_cpu_input() -> None:
+    value = torch.randn(3, 8)
+    original = value.clone()
+
+    torch.testing.assert_close(silu_and_mul_reuse_input(value), silu_and_mul(original))
+    torch.testing.assert_close(value, original)
+
+
+@requires_cuda
+def test_reuse_input_uses_rounded_inplace_cuda_path() -> None:
+    value = torch.randn(17, 64, device="cuda", dtype=torch.bfloat16)
+    original = value.clone()
+    gate, up = original.chunk(2, dim=-1)
+    expected = torch.nn.functional.silu(gate).to(torch.bfloat16) * up
+
+    output = silu_and_mul_reuse_input(value)
+
+    assert output.data_ptr() == value.data_ptr()
+    assert torch.equal(output, expected)
 
 
 class TestFP32SiLU:

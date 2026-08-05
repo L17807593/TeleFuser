@@ -42,6 +42,7 @@ class TestValidateParallelConfig:
             ([0, 1, 2, 3], 1, 1, 1, 2, 2),  # Sequence parallel
             ([0, 1], 1, 2, 1, 1, 1),  # CFG parallel
             ([0, 1, 2, 3, 4, 5, 6, 7], 2, 2, 1, 2, 1),  # Combined
+            ([0, 1, 2, 3], 1, 1, 2, 1, 2),  # Ulysses + tensor parallel
         ],
     )
     def test_valid_configurations(self, device_ids, dp, cfg, tp, sp_ring, sp_ulysses):
@@ -58,18 +59,17 @@ class TestValidateParallelConfig:
         _validate_parallel_config(config)
         assert config.world_size == len(device_ids)
 
-    def test_invalid_sp_and_tp_together(self):
-        """Test that SP and TP cannot be enabled together."""
+    def test_sp_and_tp_together(self):
+        """Test that SP and TP can form a two-dimensional mesh."""
         config = ParallelConfig(
             device_ids=[0, 1, 2, 3],
             dp_degree=1,
             cfg_degree=1,
             tp_degree=2,
-            sp_ring_degree=2,
-            sp_ulysses_degree=1,
+            sp_ring_degree=1,
+            sp_ulysses_degree=2,
         )
-        with pytest.raises(ValueError, match="Not allowed to enable sequence parallel and tensor parallel together"):
-            _validate_parallel_config(config)
+        _validate_parallel_config(config)
 
     def test_invalid_world_size_mismatch(self):
         """Test that device count must match parallel degrees."""
@@ -99,6 +99,7 @@ class TestCreateDeviceMeshFromConfig:
             ([0, 1, 2, 3], 1, 1, 1, 1, 4, ["ulysses"]),  # Ulysses only
             ([0, 1], 1, 2, 1, 1, 1, ["cfg"]),
             ([0, 1, 2, 3, 4, 5, 6, 7], 2, 2, 1, 2, 1, ["dp", "cfg", "ring"]),  # DP+CFG+Ring
+            ([0, 1, 2, 3], 1, 1, 2, 1, 2, ["ulysses", "tp"]),  # Ulysses + TP
         ],
     )
     @patch("telefuser.distributed.device_mesh.DeviceMesh")

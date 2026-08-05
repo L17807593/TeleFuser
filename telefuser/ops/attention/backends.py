@@ -28,6 +28,7 @@ FLASHINFER_AVAILABLE = False
 flash_attn2: Callable | None = None
 flash_attn3: Callable | None = None
 flash_attn4: Callable | None = None
+flash_attn4_varlen: Callable | None = None
 sageattention: object | None = None
 spas_sage2_attn_meansim_cuda: Callable | None = None
 flashinfer: object | None = None
@@ -35,7 +36,8 @@ flashinfer: object | None = None
 
 def _try_import_flash_attn() -> None:
     """Import Flash Attention 2/3/4."""
-    global FLASH_ATTN_4_AVAILABLE, FLASH_ATTN_3_AVAILABLE, FLASH_ATTN_2_AVAILABLE, flash_attn4, flash_attn3, flash_attn2
+    global FLASH_ATTN_4_AVAILABLE, FLASH_ATTN_3_AVAILABLE, FLASH_ATTN_2_AVAILABLE
+    global flash_attn4, flash_attn4_varlen, flash_attn3, flash_attn2
 
     if importlib.util.find_spec("flash_attn") is None:
         return
@@ -47,6 +49,12 @@ def _try_import_flash_attn() -> None:
         flash_attn4 = flash_attn4_impl
         FLASH_ATTN_4_AVAILABLE = True
         logger.debug("Flash Attention 4 available")
+        try:
+            from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_impl
+
+            flash_attn4_varlen = flash_attn4_varlen_impl
+        except (ModuleNotFoundError, ImportError):
+            logger.debug("Flash Attention 4 varlen interface unavailable")
     except (ModuleNotFoundError, ImportError):
         pass
 
@@ -205,6 +213,7 @@ __all__ = [
     "flash_attn2",
     "flash_attn3",
     "flash_attn4",
+    "flash_attn4_varlen",
     "sageattention",
     "flashinfer",
     "supports_return_lse",

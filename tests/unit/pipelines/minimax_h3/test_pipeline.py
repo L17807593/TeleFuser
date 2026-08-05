@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from telefuser.core.config import ModelRuntimeConfig, ParallelConfig
+from telefuser.core.config import ModelRuntimeConfig, ParallelConfig, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
 from telefuser.pipelines.minimax_h3.data import minimax_h3_validate_canonical_request
 from telefuser.pipelines.minimax_h3.denoising import MiniMaxH3DenoisingStage
@@ -284,7 +284,7 @@ def test_trajectory_stage_can_capture_only_first_update_from_full_schedule(tmp_p
     )
 
 
-def test_pipeline_wraps_multi_gpu_denoising_stage_and_closes_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pipeline_wraps_multi_gpu_stages_and_closes_workers(monkeypatch: pytest.MonkeyPatch) -> None:
     from telefuser.pipelines.minimax_h3 import pipeline as pipeline_module
 
     class _Stage:
@@ -312,14 +312,26 @@ def test_pipeline_wraps_multi_gpu_denoising_stage_and_closes_worker(monkeypatch:
         ModuleManager(device="cpu"),
         MiniMaxH3PipelineConfig(
             processor_path="processor",
+            text_encoder_config=ModelRuntimeConfig(
+                device_type="cpu",
+                parallel_config=ParallelConfig(device_ids=[0, 1], sp_ulysses_degree=2),
+            ),
             dit_config=ModelRuntimeConfig(
                 device_type="cpu",
                 parallel_config=ParallelConfig(device_ids=[0, 1], sp_ulysses_degree=2),
             ),
+            video_vae_config=ModelRuntimeConfig(
+                device_type="cpu",
+                parallel_config=ParallelConfig(device_ids=[0, 1], tp_degree=2),
+            ),
         ),
     )
+    assert isinstance(pipeline.text_stage, _Worker)
+    assert isinstance(pipeline.video_vae_stage, _Worker)
     assert isinstance(pipeline.denoising_stage, _Worker)
     pipeline.stop()
+    assert pipeline.text_stage.closed
+    assert pipeline.video_vae_stage.closed
     assert pipeline.denoising_stage.closed
 
 
@@ -365,11 +377,23 @@ def test_example_loader_allows_release_length_parallel_denoising(
         partition="Ref2VA",
         device="cpu",
         ulysses_degree=2,
+        tp_degree=2,
+        text_encoder_tp_degree=4,
     )
 
     config = captured["config"]
     assert config.dit_config.parallel_config.timeout == 1800
     assert config.dit_config.parallel_config.sp_ulysses_degree == 2
+    assert config.dit_config.parallel_config.tp_degree == 2
+    assert config.dit_config.parallel_config.enable_fsdp is False
+    assert config.dit_config.offload_config.offload_type is WeightOffloadType.NO_CPU_OFFLOAD
+    assert config.text_encoder_config.parallel_config.sp_ulysses_degree == 1
+    assert config.text_encoder_config.parallel_config.tp_degree == 4
+    assert config.text_encoder_config.parallel_config.enable_fsdp is False
+    assert config.text_encoder_config.offload_config.offload_type is WeightOffloadType.NO_CPU_OFFLOAD
+    assert config.video_vae_config.offload_config.offload_type is WeightOffloadType.NO_CPU_OFFLOAD
+    assert config.video_vae_config.parallel_config.tp_degree == 4
+    assert config.audio_vae_config.offload_config.offload_type is WeightOffloadType.NO_CPU_OFFLOAD
 
 
 def test_example_writer_preserves_complete_generated_audio(

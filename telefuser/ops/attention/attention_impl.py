@@ -36,6 +36,7 @@ from telefuser.ops.attention.backends import (
     flash_attn2,
     flash_attn3,
     flash_attn4,
+    flash_attn4_varlen,
     get_lse_fallback_impl,
     sageattention,
     sdpa_attn_cudnn,
@@ -71,6 +72,57 @@ def _packed_sdpa(
         )
     ]
     return torch.cat(outputs, dim=2)
+
+
+def _packed_flash_attention4(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    sequence_lengths: list[int],
+    *,
+    cu_seqlens: Tensor | None,
+    scale: float | None,
+    is_causal: bool,
+    return_lse: bool,
+    kwargs: dict[str, Any],
+) -> Tensor | tuple[Tensor, Tensor]:
+    """Run FlashAttention 4 varlen over sequences packed on the BSND axis."""
+    if q.shape != k.shape or q.shape != v.shape or q.ndim != 4 or q.shape[0] != 1:
+        raise ValueError("packed FlashAttention requires matching Q/K/V tensors with shape [1, sequence, heads, dim]")
+    if any(length <= 0 for length in sequence_lengths) or sum(sequence_lengths) != q.shape[1]:
+        raise ValueError("packed FlashAttention lengths must be positive and sum to the packed sequence dimension")
+    if cu_seqlens is None:
+        cumulative = [0]
+        for length in sequence_lengths:
+            cumulative.append(cumulative[-1] + length)
+        cu_seqlens = torch.tensor(cumulative, dtype=torch.int32, device=q.device)
+    elif cu_seqlens.ndim != 1 or cu_seqlens.numel() != len(sequence_lengths) + 1:
+        raise ValueError("cu_seqlens must contain one cumulative boundary per packed sequence")
+    else:
+        cu_seqlens = cu_seqlens.to(device=q.device, dtype=torch.int32)
+    if flash_attn4_varlen is None:
+        raise RuntimeError("FlashAttention 4 varlen backend is unavailable")
+    result = flash_attn4_varlen(
+        q[0],
+        k[0],
+        v[0],
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_k=cu_seqlens,
+        max_seqlen_q=max(sequence_lengths),
+        max_seqlen_k=max(sequence_lengths),
+        softmax_scale=scale,
+        causal=is_causal,
+        return_lse=return_lse,
+        **kwargs,
+    )
+    if isinstance(result, tuple):
+        output, lse = result[:2]
+    else:
+        output, lse = result, None
+    output = output.unsqueeze(0)
+    if return_lse:
+        return output, lse
+    return output
 
 
 class SparseAttentionState:
@@ -123,6 +175,7 @@ def attention(
     is_causal: bool = False,
     return_lse: bool = False,
     sequence_lengths: list[int] | None = None,
+    cu_seqlens: Tensor | None = None,
     **kwargs: Any,
 ) -> Tensor | tuple[Tensor, Tensor]:
     """Unified attention function.
@@ -140,6 +193,8 @@ def attention(
         output_layout: Output tensor layout.
         is_causal: Use causal masking.
         return_lse: Return log-sum-exp values.
+        sequence_lengths: Length of each sequence packed along the sequence axis.
+        cu_seqlens: Optional precomputed cumulative sequence lengths for varlen kernels.
         **kwargs: Implementation-specific arguments.
 
     Returns:
@@ -157,8 +212,8 @@ def attention(
     attn_impl = attention_config.attn_impl
     scale = scale if scale is not None else attention_config.scale
     is_causal = is_causal or attention_config.is_causal
-    if sequence_lengths is not None and attn_impl != AttnImplType.TORCH_SDPA:
-        raise ValueError("packed sequence attention currently requires TORCH_SDPA")
+    if sequence_lengths is not None and attn_impl not in {AttnImplType.TORCH_SDPA, AttnImplType.FLASH_ATTN_4}:
+        raise ValueError("packed sequence attention requires TORCH_SDPA or FLASH_ATTN_4")
 
     # Handle sparse attention
     if attn_impl in (AttnImplType.RADIAL_ATTN, AttnImplType.LOCAL_SPARSE_ATTN):
@@ -212,18 +267,45 @@ def attention(
 
     # Flash Attention implementations
     if attn_impl == AttnImplType.FLASH_ATTN_4 and FLASH_ATTN_4_AVAILABLE and flash_attn4 is not None:
-        result = flash_attn4(q, k, v, softmax_scale=scale, causal=is_causal, return_lse=return_lse, **kwargs)
+        if sequence_lengths is None:
+            result = flash_attn4(q, k, v, softmax_scale=scale, causal=is_causal, return_lse=return_lse, **kwargs)
+        elif flash_attn4_varlen is not None:
+            if attn_mask is not None or current_layout != "BSND":
+                raise ValueError("packed FlashAttention requires BSND layout without an attention mask")
+            result = _packed_flash_attention4(
+                q,
+                k,
+                v,
+                sequence_lengths,
+                cu_seqlens=cu_seqlens,
+                scale=scale,
+                is_causal=is_causal,
+                return_lse=return_lse,
+                kwargs=kwargs,
+            )
+        else:
+            result = None
         if isinstance(result, tuple):
             output, lse = result
         else:
             output = result
-    elif attn_impl == AttnImplType.FLASH_ATTN_3 and FLASH_ATTN_3_AVAILABLE and flash_attn3 is not None:
+    elif (
+        sequence_lengths is None
+        and attn_impl == AttnImplType.FLASH_ATTN_3
+        and FLASH_ATTN_3_AVAILABLE
+        and flash_attn3 is not None
+    ):
         result = flash_attn3(q, k, v, softmax_scale=scale, causal=is_causal, return_softmax_lse=return_lse, **kwargs)
         if return_lse:
             output, lse = result
         else:
             output = result
-    elif attn_impl == AttnImplType.FLASH_ATTN_2 and FLASH_ATTN_2_AVAILABLE and flash_attn2 is not None:
+    elif (
+        sequence_lengths is None
+        and attn_impl == AttnImplType.FLASH_ATTN_2
+        and FLASH_ATTN_2_AVAILABLE
+        and flash_attn2 is not None
+    ):
         result = flash_attn2(q, k, v, softmax_scale=scale, causal=is_causal, return_attn_probs=return_lse, **kwargs)
         if return_lse:
             output, lse, _ = result
@@ -231,7 +313,7 @@ def attention(
             output = result
 
     # PyTorch SDPA
-    elif attn_impl == AttnImplType.TORCH_CUDNN and SDPA_AVAILABLE:
+    elif sequence_lengths is None and attn_impl == AttnImplType.TORCH_CUDNN and SDPA_AVAILABLE:
         output = sdpa_attn_cudnn(q, k, v, attn_mask=attn_mask, scale=scale, is_causal=is_causal)
     elif attn_impl == AttnImplType.TORCH_SDPA and SDPA_AVAILABLE:
         if sequence_lengths is None:
@@ -242,7 +324,7 @@ def attention(
             output = _packed_sdpa(q, k, v, sequence_lengths, scale=scale, is_causal=is_causal)
 
     # Sage Attention variants
-    elif SAGE_ATTN_AVAILABLE and sageattention is not None:
+    elif sequence_lengths is None and SAGE_ATTN_AVAILABLE and sageattention is not None:
         # SageAttention tensor_layout: "NHD" for BSND, "HND" for BNSD
         sage_tensor_layout = "NHD" if current_layout == "BSND" else "HND"
         if attn_impl == AttnImplType.SAGE_ATTN_2_8_8:
@@ -286,7 +368,7 @@ def attention(
             output, lse = result if return_lse else (result, None)
 
     # Sparge Attention
-    elif attn_impl == AttnImplType.SPARGE_ATTN:
+    elif sequence_lengths is None and attn_impl == AttnImplType.SPARGE_ATTN:
         output = sparge_attn(q, k, v, attn_mask=attn_mask, scale=scale)
 
     # Fallback to SDPA

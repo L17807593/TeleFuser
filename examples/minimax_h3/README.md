@@ -191,11 +191,14 @@ The simple CLIs expose `--steps`, `--seed`, `--duration`, `--aspect-ratio`, `--f
 `--audio-flow-shift`. Supported explicit aspect ratios are `21:9`, `16:9`, `4:3`, `1:1`, `3:4`, and `9:16`;
 `auto` follows the task policy or first FL2VA keyframe.
 
-Use `--ulysses-degree 2` or `--ulysses-degree 4` to shard packed DiT attention. The encoder and VAEs remain
-sequential on `--device` (normally `cuda:0`). The degree must divide 56 attention heads, and scripts must run from
-their guarded entry points so worker processes can spawn safely.
+Use `--ulysses-degree 2` or `--ulysses-degree 4` to shard packed DiT attention. Four-GPU runs automatically enable
+FSDP2 so each worker keeps its DiT parameter shard resident for the denoising loop; the encoder and VAEs remain
+stage-offloaded on `--device` (normally `cuda:0`). The degree must divide 56 attention heads, and scripts must run
+from their guarded entry points so worker processes can spawn safely. H100 examples use packed FlashAttention 4 when
+available and fall back to packed PyTorch SDPA otherwise. When a compatible `tf-kernel` wheel is installed, H3 also
+uses its fused RMSNorm, SwiGLU, and partial NeoX RoPE kernels with native PyTorch fallbacks.
 
-FSDP can be combined with a multi-GPU Ulysses example:
+FSDP can also be selected explicitly for a two-GPU Ulysses example:
 
 ```bash
 python examples/minimax_h3/minimax_h3_request_h100.py \
@@ -203,6 +206,8 @@ python examples/minimax_h3/minimax_h3_request_h100.py \
   --enable-fsdp \
   --output outputs/minimax_h3_ref2va_fsdp.mp4
 ```
+
+Pass `--disable-fsdp` to a four-GPU command to run an offloaded Ulysses-only baseline.
 
 H3 tensor parallelism, Ring attention, CFG parallelism, pipeline parallelism, and visual-VAE spatial parallelism are
 not enabled. The dedicated service manifests expose the existing pipeline behavior without adding framework-level

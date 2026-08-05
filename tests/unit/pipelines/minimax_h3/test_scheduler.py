@@ -3,11 +3,37 @@
 import pytest
 import torch
 
+from telefuser.pipelines.minimax_h3.denoising import _minimax_h3_update_target_rows_
 from telefuser.pipelines.minimax_h3.scheduler import (
     MiniMaxH3EulerAncestralEta0SchedulerAdapter,
     minimax_h3_euler_eta0_step,
     minimax_h3_rf_v_to_x0,
 )
+
+
+def test_inplace_target_update_matches_public_scheduler_math() -> None:
+    torch.manual_seed(0)
+    state = torch.randn(7, 5)
+    velocity = torch.randn_like(state)
+    sigma_curr = 0.75
+    sigma_next = 0.25
+    ratio = torch.tensor(sigma_next / sigma_curr)
+    denoised = state + sigma_curr * velocity
+    expected = ratio * state + (1.0 - ratio) * denoised
+
+    actual = state.clone()
+    reusable_velocity = velocity.clone()
+    _minimax_h3_update_target_rows_(
+        actual,
+        reusable_velocity,
+        sigma_t=torch.tensor(sigma_curr),
+        sigma_curr=sigma_curr,
+        sigma_ratio=ratio,
+        one_minus_sigma_ratio=1.0 - ratio,
+        denoised_scratch=torch.empty_like(actual),
+    )
+
+    torch.testing.assert_close(actual, expected)
 
 
 def test_rf_velocity_conversion_and_eta0_step() -> None:

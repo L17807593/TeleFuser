@@ -16,10 +16,19 @@ import torch.nn as nn
 
 from telefuser.core.base_model import BaseModel
 from telefuser.core.config import AttentionConfig
-from telefuser.distributed.device_mesh import get_ulysses_group, get_ulysses_world_size
+from telefuser.distributed.collectives import all_gather_cat, all_reduce_sum_
+from telefuser.distributed.device_mesh import (
+    get_tp_group,
+    get_tp_rank,
+    get_tp_world_size,
+    get_ulysses_group,
+    get_ulysses_world_size,
+)
 from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequence_parallel_unshard
-from telefuser.distributed.ulysses_comm import ulysses_gather_heads, ulysses_scatter_heads
+from telefuser.distributed.ulysses_comm import ulysses_gather_heads_destination_major, ulysses_scatter_qkv
+from telefuser.ops import RMSNorm, apply_qk_norm_rope_neox, indexed_gate, indexed_scale_shift, silu_and_mul_reuse_input
 from telefuser.ops.attention import attention
+from telefuser.ops.rotary import apply_rotary_emb_neox
 
 MINIMAX_H3_ADALN_MODALITY_NUM = 3
 MINIMAX_H3_FP32_PARAM_NAMES = frozenset(
@@ -97,8 +106,8 @@ class MiniMaxH3DiTConfig:
         return 2 * self.hidden_size
 
 
-def _rms_norm(size: int, eps: float) -> nn.RMSNorm:
-    return nn.RMSNorm(size, eps=eps, dtype=torch.bfloat16)
+def _rms_norm(size: int, eps: float) -> RMSNorm:
+    return RMSNorm(size, eps=eps, dtype=torch.bfloat16)
 
 
 def _reorder_grouped_qkv_to_qkv(
@@ -124,9 +133,38 @@ def _reorder_grouped_qkv_to_qkv(
     )
 
 
-def _rotate_half(value: torch.Tensor) -> torch.Tensor:
-    first, second = value.chunk(2, dim=-1)
-    return torch.cat((-second, first), dim=-1)
+def _replace_parameter(module: nn.Module, name: str, value: torch.Tensor) -> None:
+    parameter = module.get_parameter(name)
+    setattr(module, name, nn.Parameter(value.contiguous(), requires_grad=parameter.requires_grad))
+
+
+def _shard_linear_output(
+    linear: nn.Linear,
+    *,
+    rank: int,
+    world_size: int,
+    sections: tuple[int, ...] | None = None,
+) -> None:
+    sections = sections or (linear.out_features,)
+    if sum(sections) != linear.out_features or any(size % world_size for size in sections):
+        raise ValueError(
+            f"linear output sections {sections} must sum to {linear.out_features} and divide TP degree {world_size}"
+        )
+    weight_sections = linear.weight.split(sections, dim=0)
+    local_weight = torch.cat(tuple(section.chunk(world_size, dim=0)[rank] for section in weight_sections), dim=0)
+    _replace_parameter(linear, "weight", local_weight)
+    if linear.bias is not None:
+        bias_sections = linear.bias.split(sections, dim=0)
+        local_bias = torch.cat(tuple(section.chunk(world_size, dim=0)[rank] for section in bias_sections), dim=0)
+        _replace_parameter(linear, "bias", local_bias)
+    linear.out_features //= world_size
+
+
+def _shard_linear_input(linear: nn.Linear, *, rank: int, world_size: int) -> None:
+    if linear.in_features % world_size:
+        raise ValueError(f"linear input size {linear.in_features} must divide TP degree {world_size}")
+    _replace_parameter(linear, "weight", linear.weight.chunk(world_size, dim=1)[rank])
+    linear.in_features //= world_size
 
 
 class MiniMaxH3Rope(nn.Module):
@@ -157,12 +195,16 @@ class MiniMaxH3TimeEmbedder(nn.Module):
             config.time_embed_dim,
             dtype=torch.float32,
         )
+        self._frequency_cache: dict[torch.device, torch.Tensor] = {}
 
     def forward(self, timestep: torch.Tensor) -> torch.Tensor:
         half = self.frequency_embedding_size // 2
-        frequencies = torch.exp(
-            -math.log(10000.0) * torch.arange(half, dtype=torch.float32, device=timestep.device) / half
-        )
+        frequencies = self._frequency_cache.get(timestep.device)
+        if frequencies is None:
+            frequencies = torch.exp(
+                -math.log(10000.0) * torch.arange(half, dtype=torch.float32, device=timestep.device) / half
+            )
+            self._frequency_cache[timestep.device] = frequencies
         args = timestep.float().reshape(-1, 1) * frequencies.reshape(1, -1)
         embedding = torch.cat((torch.cos(args), torch.sin(args)), dim=-1)
         return self.proj_out(nn.functional.silu(self.proj_in(embedding)))
@@ -179,10 +221,26 @@ class MiniMaxH3Attention(nn.Module):
         self.k_norm = _rms_norm(self.head_dim, config.qk_norm_eps)
         self.out_proj = nn.Linear(self.inner_dim, config.hidden_size, bias=False, dtype=torch.bfloat16)
         self.ulysses_group: dist.ProcessGroup | None = None
+        self.tp_group: dist.ProcessGroup | None = None
         self._communication_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
 
     def set_ulysses_group(self, group: dist.ProcessGroup | None) -> None:
         self.ulysses_group = group
+
+    def enable_tp(self, group: dist.ProcessGroup, *, rank: int, world_size: int) -> None:
+        if self.num_heads % world_size:
+            raise ValueError(f"attention heads ({self.num_heads}) must divide TP degree ({world_size})")
+        original_inner_dim = self.inner_dim
+        _shard_linear_output(
+            self.qkv_proj,
+            rank=rank,
+            world_size=world_size,
+            sections=(original_inner_dim, original_inner_dim, original_inner_dim),
+        )
+        _shard_linear_input(self.out_proj, rank=rank, world_size=world_size)
+        self.num_heads //= world_size
+        self.inner_dim //= world_size
+        self.tp_group = group
 
     def reset_communication_metrics(self) -> None:
         self._communication_events.clear()
@@ -195,22 +253,25 @@ class MiniMaxH3Attention(nn.Module):
         hidden: torch.Tensor,
         *,
         sequence_lengths: list[int],
-        rope_frequencies: torch.Tensor | None,
+        rope_cos_sin_cache: torch.Tensor | None,
         attention_config: AttentionConfig | None,
+        cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         sequence, _ = hidden.shape
         qkv = self.qkv_proj(hidden).reshape(sequence, 3, self.num_heads, self.head_dim)
         query, key, value = qkv.unbind(dim=1)
-        query = self.q_norm(query)
-        key = self.k_norm(key)
-        if rope_frequencies is not None:
-            rotary_dim = rope_frequencies.shape[-1]
-            cosine = rope_frequencies.cos().unsqueeze(1).to(query.dtype)
-            sine = rope_frequencies.sin().unsqueeze(1).to(query.dtype)
-            query_rotary, query_pass = query[..., :rotary_dim], query[..., rotary_dim:]
-            key_rotary, key_pass = key[..., :rotary_dim], key[..., rotary_dim:]
-            query = torch.cat((query_rotary * cosine + _rotate_half(query_rotary) * sine, query_pass), dim=-1)
-            key = torch.cat((key_rotary * cosine + _rotate_half(key_rotary) * sine, key_pass), dim=-1)
+        if rope_cos_sin_cache is not None:
+            query, key = apply_qk_norm_rope_neox(
+                query,
+                key,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                rope_cos_sin_cache,
+                eps=self.q_norm.eps,
+            )
+        else:
+            query = self.q_norm(query)
+            key = self.k_norm(key)
         query = query.unsqueeze(0)
         key = key.unsqueeze(0)
         value = value.unsqueeze(0)
@@ -220,8 +281,7 @@ class MiniMaxH3Attention(nn.Module):
             scatter_start = torch.cuda.Event(enable_timing=True)
             scatter_end = torch.cuda.Event(enable_timing=True)
             scatter_start.record()
-            qkv_wait = ulysses_scatter_heads(torch.cat((query, key, value), dim=-1), group)
-            query, key, value = qkv_wait().chunk(3, dim=-1)
+            query, key, value = ulysses_scatter_qkv(query, key, value, group)()
             scatter_end.record()
             self._communication_events.append((scatter_start, scatter_end))
         output = attention(
@@ -231,15 +291,19 @@ class MiniMaxH3Attention(nn.Module):
             attention_config=attention_config,
             scale=self.head_dim**-0.5,
             sequence_lengths=sequence_lengths,
+            cu_seqlens=cu_seqlens,
         )
         if use_ulysses:
             gather_start = torch.cuda.Event(enable_timing=True)
             gather_end = torch.cuda.Event(enable_timing=True)
             gather_start.record()
-            output = ulysses_gather_heads(output, group, num_heads=self.num_heads)()
+            output = ulysses_gather_heads_destination_major(output, group, num_heads=self.num_heads)()
             gather_end.record()
             self._communication_events.append((gather_start, gather_end))
-        return self.out_proj(output[0].reshape(sequence, self.inner_dim))
+        output = self.out_proj(output[0].reshape(sequence, self.inner_dim))
+        if self.tp_group is not None:
+            all_reduce_sum_((output,), group=self.tp_group)
+        return output
 
 
 class MiniMaxH3MLP(nn.Module):
@@ -247,10 +311,25 @@ class MiniMaxH3MLP(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(config.hidden_size, 2 * config.ffn_hidden_size, bias=False, dtype=torch.bfloat16)
         self.fc2 = nn.Linear(config.ffn_hidden_size, config.hidden_size, bias=False, dtype=torch.bfloat16)
+        self.intermediate_size = config.ffn_hidden_size
+        self.tp_group: dist.ProcessGroup | None = None
+
+    def enable_tp(self, group: dist.ProcessGroup, *, rank: int, world_size: int) -> None:
+        _shard_linear_output(
+            self.fc1,
+            rank=rank,
+            world_size=world_size,
+            sections=(self.intermediate_size, self.intermediate_size),
+        )
+        _shard_linear_input(self.fc2, rank=rank, world_size=world_size)
+        self.intermediate_size //= world_size
+        self.tp_group = group
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        gate, up = self.fc1(hidden).chunk(2, dim=-1)
-        return self.fc2(nn.functional.silu(gate) * up)
+        output = self.fc2(silu_and_mul_reuse_input(self.fc1(hidden)))
+        if self.tp_group is not None:
+            all_reduce_sum_((output,), group=self.tp_group)
+        return output
 
 
 class MiniMaxH3AdaLNProjection(nn.Module):
@@ -264,11 +343,31 @@ class MiniMaxH3AdaLNProjection(nn.Module):
             expand_ratio * modality_count * config.hidden_size,
             dtype=torch.bfloat16,
         )
+        self.tp_group: dist.ProcessGroup | None = None
+        self.tp_world_size = 1
 
-    def forward(self, embedding: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        output = self.linear(embedding)
+    def enable_tp(self, group: dist.ProcessGroup, *, rank: int, world_size: int) -> None:
+        _shard_linear_output(self.linear, rank=rank, world_size=world_size)
+        self.tp_group = group
+        self.tp_world_size = world_size
+
+    def project_local(self, embedding: torch.Tensor) -> torch.Tensor:
+        return self.linear(embedding)
+
+    def split_output(self, output: torch.Tensor) -> tuple[torch.Tensor, ...]:
         output = output.reshape(-1, self.expand_ratio * self.hidden_size)
         return tuple(output.chunk(self.expand_ratio, dim=-1))
+
+    def forward(self, embedding: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        output = self.project_local(embedding)
+        if self.tp_group is not None:
+            output = all_gather_cat(
+                output,
+                dim=-1,
+                group=self.tp_group,
+                world_size=self.tp_world_size,
+            )
+        return self.split_output(output)
 
 
 def _modulate(
@@ -277,7 +376,7 @@ def _modulate(
     scale: torch.Tensor,
     indices: torch.Tensor,
 ) -> torch.Tensor:
-    return hidden * (1 + scale.index_select(0, indices)) + shift.index_select(0, indices)
+    return indexed_scale_shift(hidden, shift, scale, indices)
 
 
 class MiniMaxH3TokenRefinerBlock(nn.Module):
@@ -298,7 +397,7 @@ class MiniMaxH3TokenRefinerBlock(nn.Module):
         hidden = hidden + self.attn(
             self.norm1(hidden),
             sequence_lengths=sequence_lengths,
-            rope_frequencies=None,
+            rope_cos_sin_cache=None,
             attention_config=attention_config,
         )
         return hidden + self.mlp(self.norm2(hidden))
@@ -347,23 +446,28 @@ class MiniMaxH3DiTBlock(nn.Module):
         adaln_input: torch.Tensor,
         combined_indices: torch.Tensor,
         sequence_lengths: list[int],
-        rope_frequencies: torch.Tensor,
+        rope_cos_sin_cache: torch.Tensor,
         attention_config: AttentionConfig | None,
+        cu_seqlens: torch.Tensor | None = None,
+        adaln_params: tuple[torch.Tensor, ...] | None = None,
     ) -> torch.Tensor:
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_proj(adaln_input)
+        if adaln_params is None:
+            adaln_params = self.adaln_proj(adaln_input)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = adaln_params
         residual = hidden
         value = _modulate(self.norm1(hidden), shift_msa, scale_msa, combined_indices)
         value = self.attn(
             value,
             sequence_lengths=sequence_lengths,
-            rope_frequencies=rope_frequencies,
+            rope_cos_sin_cache=rope_cos_sin_cache,
             attention_config=attention_config,
+            cu_seqlens=cu_seqlens,
         )
-        hidden = residual + gate_msa.index_select(0, combined_indices) * value
+        hidden = indexed_gate(residual, gate_msa, value, combined_indices)
         residual = hidden
         value = _modulate(self.norm2(hidden), shift_mlp, scale_mlp, combined_indices)
         value = self.mlp(value)
-        return residual + gate_mlp.index_select(0, combined_indices) * value
+        return indexed_gate(residual, gate_mlp, value, combined_indices)
 
 
 class MiniMaxH3FinalLayer(nn.Module):
@@ -404,6 +508,12 @@ class MiniMaxH3DiT(BaseModel):
         self.layer_name_list = ["blocks"]
         self.device_mesh: Any | None = None
         self.usp_flag = False
+        self.tp_flag = False
+        self._static_cache_key: Any | None = None
+        self._static_prompt: torch.Tensor | None = None
+        self._static_rope_cos_sin: torch.Tensor | None = None
+        self._static_sequence_lengths: list[int] | None = None
+        self._static_cu_seqlens: torch.Tensor | None = None
 
     def _preserve_fp32_boundaries(self) -> None:
         for name in MINIMAX_H3_FP32_PARAM_NAMES:
@@ -442,10 +552,62 @@ class MiniMaxH3DiT(BaseModel):
         return position_ids.reshape(-1).long()
 
     @staticmethod
-    def _sequence_lengths(packed: Any) -> list[int]:
+    def _cu_seqlens(packed: Any) -> torch.Tensor:
         cu = packed.get("cu_seqlens_q") if isinstance(packed, dict) else packed.cu_seqlens_q
-        values = [int(value) for value in cu.tolist()]
+        if cu is None:
+            raise ValueError("packed_seq_params.cu_seqlens_q is required")
+        return cu.reshape(-1)
+
+    @classmethod
+    def _sequence_lengths(cls, packed: Any) -> list[int]:
+        values = [int(value) for value in cls._cu_seqlens(packed).tolist()]
         return [stop - start for start, stop in zip(values[:-1], values[1:], strict=True) if stop > start]
+
+    def _static_inputs(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        device: torch.device,
+        text_positions: torch.Tensor,
+        rope_row_start: int = 0,
+        rope_row_stop: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, list[int], torch.Tensor]:
+        cache_key = kwargs.get("static_cache_key")
+        if (
+            cache_key is not None
+            and cache_key == self._static_cache_key
+            and self._static_prompt is not None
+            and self._static_rope_cos_sin is not None
+            and self._static_sequence_lengths is not None
+            and self._static_cu_seqlens is not None
+        ):
+            return (
+                self._static_prompt,
+                self._static_rope_cos_sin,
+                self._static_sequence_lengths,
+                self._static_cu_seqlens,
+            )
+
+        prompt = kwargs["prompt_embeds"].to(device=device, dtype=torch.bfloat16)
+        prompt = self.condition_proj(prompt[: text_positions.numel()])
+        prompt = self.token_refiner(prompt, attention_config=self.attention_config)
+        rope_position_ids = kwargs["img_position_ids"].to(device)
+        rope_position_ids = rope_position_ids[:, rope_row_start:rope_row_stop]
+        rope_frequencies = self.rope(rope_position_ids)
+        rope_half = rope_frequencies.shape[-1] // 2
+        rope_cos_sin_cache = torch.cat(
+            (rope_frequencies[..., :rope_half].cos(), rope_frequencies[..., :rope_half].sin()),
+            dim=-1,
+        ).to(torch.bfloat16)
+        sequence_lengths = self._sequence_lengths(kwargs["packed_seq_params"])
+        cu_seqlens = self._cu_seqlens(kwargs["packed_seq_params"]).to(device=device, dtype=torch.int32)
+        if cache_key is not None:
+            self._static_cache_key = cache_key
+            self._static_prompt = prompt
+            self._static_rope_cos_sin = rope_cos_sin_cache
+            self._static_sequence_lengths = sequence_lengths
+            self._static_cu_seqlens = cu_seqlens
+        return prompt, rope_cos_sin_cache, sequence_lengths, cu_seqlens
 
     def forward(self, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
         required = (
@@ -478,31 +640,78 @@ class MiniMaxH3DiT(BaseModel):
             kwargs["img_pos_for_infer_output_info"], "img_pos_for_infer_output_info"
         ).to(device)
 
-        prompt = kwargs["prompt_embeds"].to(device=device, dtype=torch.bfloat16)
-        live_text = text_positions.numel()
-        prompt = self.condition_proj(prompt[:live_text])
-        prompt = self.token_refiner(prompt, attention_config=self.attention_config)
-        hidden = torch.zeros(sequence, self.config.hidden_size, device=device, dtype=torch.bfloat16)
-        hidden.index_copy_(0, text_positions, prompt)
-        video_rows = video_state[0].index_select(0, image_positions).float()
-        audio_rows = audio_state[0].index_select(0, audio_positions).float()
-        hidden.index_copy_(0, image_positions, self.video_patch_proj(video_rows).to(torch.bfloat16))
-        hidden.index_copy_(0, audio_positions, self.audio_patch_proj(audio_rows).to(torch.bfloat16))
+        local_embedding_layout = kwargs.get("local_embedding_layout")
+        use_local_embedding = self.usp_flag and local_embedding_layout is not None
+        if use_local_embedding:
+            row_start = int(local_embedding_layout["row_start"])
+            row_stop = int(local_embedding_layout["row_stop"])
+            if row_start < 0 or row_stop <= row_start or row_stop > sequence:
+                raise ValueError("local_embedding_layout has an invalid packed row range")
+        else:
+            row_start = 0
+            row_stop = sequence
+
+        prompt, rope_cos_sin_cache, sequence_lengths, cu_seqlens = self._static_inputs(
+            kwargs,
+            device=device,
+            text_positions=text_positions,
+            rope_row_start=row_start,
+            rope_row_stop=row_stop,
+        )
+        if use_local_embedding:
+            hidden = torch.zeros(row_stop - row_start, self.config.hidden_size, device=device, dtype=torch.bfloat16)
+
+            def layout_tensor(name: str) -> torch.Tensor:
+                value = local_embedding_layout[name]
+                if not isinstance(value, torch.Tensor):
+                    raise ValueError(f"local_embedding_layout.{name} must be a tensor")
+                return value.to(device=device, dtype=torch.long)
+
+            text_source_ids = layout_tensor("text_source_ids")
+            text_row_ids = layout_tensor("text_row_ids")
+            if text_row_ids.numel():
+                hidden.index_copy_(0, text_row_ids, prompt.index_select(0, text_source_ids))
+            img_global_ids = layout_tensor("img_global_ids")
+            img_row_ids = layout_tensor("img_row_ids")
+            if img_row_ids.numel():
+                video_rows = video_state[0].index_select(0, img_global_ids).float()
+                hidden.index_copy_(0, img_row_ids, self.video_patch_proj(video_rows).to(torch.bfloat16))
+            audio_global_ids = layout_tensor("audio_global_ids")
+            audio_row_ids = layout_tensor("audio_row_ids")
+            if audio_row_ids.numel():
+                audio_rows = audio_state[0].index_select(0, audio_global_ids).float()
+                hidden.index_copy_(0, audio_row_ids, self.audio_patch_proj(audio_rows).to(torch.bfloat16))
+        else:
+            hidden = torch.zeros(sequence, self.config.hidden_size, device=device, dtype=torch.bfloat16)
+            hidden.index_copy_(0, text_positions, prompt)
+            video_rows = video_state[0].index_select(0, image_positions).float()
+            audio_rows = audio_state[0].index_select(0, audio_positions).float()
+            hidden.index_copy_(0, image_positions, self.video_patch_proj(video_rows).to(torch.bfloat16))
+            hidden.index_copy_(0, audio_positions, self.audio_patch_proj(audio_rows).to(torch.bfloat16))
 
         timesteps = kwargs["unique_timesteps"].reshape(-1).to(device)
         adaln_input = nn.functional.silu(self.time_embedder(timesteps)).to(torch.bfloat16)
         inverse_indices = kwargs["inverse_indices"].reshape(-1).long().to(device)
         if inverse_indices.numel() != sequence:
             raise ValueError("inverse_indices must cover the full packed sequence")
-        token_tags = kwargs.get("block_token_tags")
-        if token_tags is None:
-            token_tags = kwargs.get("token_tags")
-        if token_tags is None:
-            raise ValueError("token_tags or block_token_tags is required")
-        token_tags = token_tags.reshape(-1).long().to(device).clamp_min(0)
-        combined_indices = token_tags + inverse_indices * MINIMAX_H3_ADALN_MODALITY_NUM
-        rope_frequencies = self.rope(kwargs["img_position_ids"].to(device))
-        sequence_lengths = self._sequence_lengths(kwargs["packed_seq_params"])
+        local_inverse_indices = inverse_indices[row_start:row_stop]
+        combined_indices = kwargs.get("block_combined_indices")
+        if combined_indices is not None:
+            combined_indices = combined_indices.reshape(-1).long().to(device)
+            if combined_indices.numel() != row_stop - row_start:
+                raise ValueError("block_combined_indices must cover the local packed sequence")
+        else:
+            token_tags = kwargs.get("block_token_tags")
+            if token_tags is None:
+                token_tags = kwargs.get("token_tags")
+            if token_tags is None:
+                raise ValueError("token_tags or block_token_tags is required")
+            token_tags = token_tags.reshape(-1).long().to(device).clamp_min(0)
+            if token_tags.numel() == sequence:
+                token_tags = token_tags[row_start:row_stop]
+            if token_tags.numel() != row_stop - row_start:
+                raise ValueError("block token tags must cover the local packed sequence")
+            combined_indices = token_tags + local_inverse_indices * MINIMAX_H3_ADALN_MODALITY_NUM
         full_sequence = sequence
         if self.usp_flag:
             world_size = get_ulysses_world_size(self.device_mesh)
@@ -510,20 +719,41 @@ class MiniMaxH3DiT(BaseModel):
                 raise ValueError(
                     f"MiniMax H3 packed sequence length ({sequence}) must be divisible by Ulysses degree ({world_size})"
                 )
-            inverse_indices = inverse_indices.clone()
-            sequence_parallel_shard(
-                self.device_mesh,
-                [hidden, combined_indices, inverse_indices, rope_frequencies],
-                [0, 0, 0, 0],
+            if use_local_embedding:
+                inverse_indices = local_inverse_indices
+            else:
+                inverse_indices = inverse_indices.clone()
+                rope_cos_sin_cache = rope_cos_sin_cache.clone()
+                sequence_parallel_shard(
+                    self.device_mesh,
+                    [hidden, combined_indices, inverse_indices, rope_cos_sin_cache],
+                    [0, 0, 0, 0],
+                )
+        else:
+            inverse_indices = local_inverse_indices
+        block_adaln_params = None
+        if self.tp_flag:
+            local_adaln = torch.stack([block.adaln_proj.project_local(adaln_input) for block in self.blocks])
+            first_projection = self.blocks[0].adaln_proj
+            gathered_adaln = all_gather_cat(
+                local_adaln,
+                dim=-1,
+                group=first_projection.tp_group,
+                world_size=first_projection.tp_world_size,
             )
-        for block in self.blocks:
+            block_adaln_params = tuple(
+                block.adaln_proj.split_output(output) for block, output in zip(self.blocks, gathered_adaln)
+            )
+        for index, block in enumerate(self.blocks):
             hidden = block(
                 hidden,
                 adaln_input=adaln_input,
                 combined_indices=combined_indices,
                 sequence_lengths=sequence_lengths,
-                rope_frequencies=rope_frequencies,
+                rope_cos_sin_cache=rope_cos_sin_cache,
                 attention_config=self.attention_config,
+                cu_seqlens=cu_seqlens,
+                adaln_params=None if block_adaln_params is None else block_adaln_params[index],
             )
         video_logits, audio_logits = self.final_layer(
             hidden,
@@ -548,15 +778,45 @@ class MiniMaxH3DiT(BaseModel):
     def enable_usp(self, device_mesh: Any | None = None) -> None:
         self.device_mesh = device_mesh if device_mesh is not None else self.device_mesh
         world_size = get_ulysses_world_size(self.device_mesh)
-        if self.config.num_attention_heads % world_size:
+        local_num_heads = self.blocks[0].attn.num_heads
+        if local_num_heads % world_size:
             raise ValueError(
-                f"MiniMax H3 attention heads ({self.config.num_attention_heads}) must be divisible by "
+                f"MiniMax H3 local attention heads ({local_num_heads}) must be divisible by "
                 f"Ulysses degree ({world_size})"
             )
         group = get_ulysses_group(self.device_mesh) if world_size > 1 else None
         self.usp_flag = world_size > 1
         for block in self.blocks:
             block.attn.set_ulysses_group(group)
+
+    def enable_tp(self, device_mesh: Any | None = None) -> None:
+        self.device_mesh = device_mesh if device_mesh is not None else self.device_mesh
+        world_size = get_tp_world_size(self.device_mesh)
+        if world_size <= 1:
+            return
+        if self.tp_flag:
+            raise RuntimeError("MiniMax H3 tensor parallelism is already enabled")
+        group = get_tp_group(self.device_mesh)
+        if group is None:
+            raise RuntimeError("MiniMax H3 TP requires a tensor-parallel process group")
+        rank = get_tp_rank(self.device_mesh)
+        if self.config.num_attention_heads % world_size:
+            raise ValueError(
+                f"MiniMax H3 attention heads ({self.config.num_attention_heads}) must divide TP degree ({world_size})"
+            )
+        if self.config.ffn_hidden_size % world_size:
+            raise ValueError(
+                f"MiniMax H3 FFN size ({self.config.ffn_hidden_size}) must divide TP degree ({world_size})"
+            )
+        for block in self.token_refiner.blocks:
+            block.attn.enable_tp(group, rank=rank, world_size=world_size)
+            block.mlp.enable_tp(group, rank=rank, world_size=world_size)
+        for block in self.blocks:
+            block.attn.enable_tp(group, rank=rank, world_size=world_size)
+            block.mlp.enable_tp(group, rank=rank, world_size=world_size)
+            block.adaln_proj.enable_tp(group, rank=rank, world_size=world_size)
+        self.final_layer.adaln_proj.enable_tp(group, rank=rank, world_size=world_size)
+        self.tp_flag = True
 
     def reset_communication_metrics(self) -> None:
         for block in self.blocks:

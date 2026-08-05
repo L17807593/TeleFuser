@@ -27,6 +27,8 @@ KernelName = Literal[
     "fused_scale_shift",
     "fused_layernorm_scale_shift",
     "fused_add_layernorm_scale_shift",
+    "indexed_gate_bf16_",
+    "indexed_scale_shift_bf16_",
 ]
 
 
@@ -53,6 +55,14 @@ def _get_triton_kernel(name: KernelName) -> Callable:
         from telefuser.kernel.triton import fused_add_layernorm_scale_shift
 
         return fused_add_layernorm_scale_shift
+    elif name == "indexed_gate_bf16_":
+        from telefuser.kernel.triton import indexed_gate_bf16_
+
+        return indexed_gate_bf16_
+    elif name == "indexed_scale_shift_bf16_":
+        from telefuser.kernel.triton import indexed_scale_shift_bf16_
+
+        return indexed_scale_shift_bf16_
     raise ValueError(f"Unknown kernel: {name}")
 
 
@@ -297,6 +307,50 @@ def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch
     return fused_scale_shift(x, scale, shift, scale_constant=1.0)
 
 
+def indexed_scale_shift(
+    x: torch.Tensor,
+    shift: torch.Tensor,
+    scale: torch.Tensor,
+    indices: torch.Tensor,
+) -> torch.Tensor:
+    """Apply row-indexed scale and shift, reusing disposable CUDA BF16 input."""
+    if (
+        not torch.compiler.is_compiling()
+        and x.device.type == "cuda"
+        and x.dtype == shift.dtype == scale.dtype == torch.bfloat16
+        and x.ndim == shift.ndim == scale.ndim == 2
+        and indices.ndim == 1
+        and x.is_contiguous()
+        and shift.stride(-1) == 1
+        and scale.stride(-1) == 1
+    ):
+        kernel = _get_triton_kernel("indexed_scale_shift_bf16_")
+        return kernel(x, shift, scale, indices.contiguous())
+    return x * (1 + scale.index_select(0, indices)) + shift.index_select(0, indices)
+
+
+def indexed_gate(
+    x: torch.Tensor,
+    gate: torch.Tensor,
+    other: torch.Tensor,
+    indices: torch.Tensor,
+) -> torch.Tensor:
+    """Apply a row-indexed gated residual, reusing disposable CUDA BF16 input."""
+    if (
+        not torch.compiler.is_compiling()
+        and x.device.type == "cuda"
+        and x.dtype == gate.dtype == other.dtype == torch.bfloat16
+        and x.ndim == gate.ndim == other.ndim == 2
+        and indices.ndim == 1
+        and x.is_contiguous()
+        and gate.stride(-1) == 1
+        and other.is_contiguous()
+    ):
+        kernel = _get_triton_kernel("indexed_gate_bf16_")
+        return kernel(x, gate, other, indices.contiguous())
+    return x + gate.index_select(0, indices) * other
+
+
 def _fused_layer_norm_scale_shift(
     x: torch.Tensor,
     scale: torch.Tensor,
@@ -339,4 +393,6 @@ __all__ = [
     "AdaLayerNormContinuous",
     "fused_scale_shift",
     "modulate",
+    "indexed_gate",
+    "indexed_scale_shift",
 ]

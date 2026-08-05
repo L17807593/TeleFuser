@@ -72,8 +72,8 @@ class MiniMaxH3Pipeline(BasePipeline):
     def __init__(self, device: str | torch.device = "cuda", torch_dtype: torch.dtype = torch.bfloat16) -> None:
         super().__init__(device=device, torch_dtype=torch_dtype)
         self.config: MiniMaxH3PipelineConfig | None = None
-        self.text_stage: MiniMaxH3TextEncodingStage | None = None
-        self.video_vae_stage: MiniMaxH3VideoVAEStage | None = None
+        self.text_stage: MiniMaxH3TextEncodingStage | ParallelWorker | None = None
+        self.video_vae_stage: MiniMaxH3VideoVAEStage | ParallelWorker | None = None
         self.audio_vae_stage: MiniMaxH3AudioVAEStage | None = None
         self.denoising_stage: MiniMaxH3DenoisingStage | ParallelWorker | None = None
 
@@ -84,15 +84,27 @@ class MiniMaxH3Pipeline(BasePipeline):
             local_files_only=True,
             trust_remote_code=False,
         )
-        self.text_stage = MiniMaxH3TextEncodingStage(
+        text_stage = MiniMaxH3TextEncodingStage(
             module_manager,
             config.text_encoder_config,
             processor=processor,
         )
-        self.video_vae_stage = MiniMaxH3VideoVAEStage(
+        if config.text_encoder_config.parallel_config.world_size > 1 and not dist.is_initialized():
+            self.text_stage = ParallelWorker(text_stage)
+        else:
+            self.text_stage = text_stage
+            if dist.is_initialized():
+                text_stage.parallel_models()
+        video_vae_stage = MiniMaxH3VideoVAEStage(
             module_manager,
             config.video_vae_config,
         )
+        if config.video_vae_config.parallel_config.world_size > 1 and not dist.is_initialized():
+            self.video_vae_stage = ParallelWorker(video_vae_stage)
+        else:
+            self.video_vae_stage = video_vae_stage
+            if dist.is_initialized():
+                video_vae_stage.parallel_models()
         self.audio_vae_stage = MiniMaxH3AudioVAEStage(module_manager, config.audio_vae_config)
         denoising_stage = MiniMaxH3DenoisingStage(module_manager, config.dit_config)
         if config.dit_config.parallel_config.world_size > 1 and not dist.is_initialized():
@@ -280,7 +292,7 @@ class MiniMaxH3Pipeline(BasePipeline):
                     audio_duration_seconds_by_condition=audio_duration_facts,
                 )
             canonical, plan = self._resolve_deferred_plan(canonical, facts)
-            prepared = self.video_vae_stage.prepare_media(plan, paths, facts)
+            prepared = MiniMaxH3VideoVAEStage.prepare_media(plan, paths, facts)
             self._synchronize()
             media_preparation_seconds = time.perf_counter() - media_started
             images = [item.image for item in prepared if item.image is not None]
@@ -312,7 +324,13 @@ class MiniMaxH3Pipeline(BasePipeline):
                 conditions=prepared,
                 num_inference_steps=steps,
             )
-            video, video_decoding_seconds = self._timed_call(self.video_vae_stage.decode_video, denoised.video_latent)
+            video_device, video_decoding_seconds = self._timed_call(
+                self.video_vae_stage.decode_video, denoised.video_latent
+            )
+            # Materialize exactly once in the caller. For a parallel VAE worker,
+            # video_device arrives through CUDA IPC without routing 1.5 GB of
+            # FP32 frames through multiprocessing shared-memory serialization.
+            video = video_device.cpu()
             audio, audio_decoding_seconds = self._timed_call(self.audio_vae_stage.decode_audio, denoised.audio_latent)
             pipeline_seconds = time.perf_counter() - pipeline_started
             runtime_metrics = {
