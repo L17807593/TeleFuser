@@ -89,6 +89,7 @@ dev = [
     "pytest-cov>=4.0.0",
     "pre-commit==4.0.1",
     "scikit-image>=0.19.0",
+    "tomli>=2.0.0; python_version < '3.11'",
     "uv"
 ]
 
@@ -127,6 +128,12 @@ telefuser = "telefuser.entrypoints.cli.main:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["telefuser*"]
+
+[tool.setuptools.package-data]
+"telefuser.kernel.sol_attn" = [
+    "THIRD_PARTY_NOTICES.md",
+    "sm100/LICENSE.flash-attention",
+]
 
 [tool.pytest.ini_options]
 minversion = "7.0"
@@ -204,7 +211,8 @@ exclude = [
     "dist",
     "tf-kernel",
     "benchmarks",
-    "telefuser/_version.py"
+    "telefuser/_version.py",
+    "telefuser/kernel/sol_attn",
 ]
 
 [tool.ruff.lint]

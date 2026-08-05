@@ -31,6 +31,7 @@ class AttnImplType(Enum):
     # Sparse attention
     RADIAL_ATTN = auto()
     LOCAL_SPARSE_ATTN = auto()
+    SOL_ATTN = auto()
 ```
 
 ### AttentionConfig
@@ -51,6 +52,7 @@ Factory methods:
 - `AttentionConfig.dense_attention(attn_impl)` - Create dense attention config
 - `AttentionConfig.radial_attention(**kwargs)` - Create radial sparse attention config
 - `AttentionConfig.local_sparse_attention(**kwargs)` - Create local sparse attention config
+- `AttentionConfig.sol_attention(**kwargs)` - Create dynamic Sol-Attn config
 
 ### SparseAttentionConfig
 
@@ -59,13 +61,16 @@ Configuration for sparse attention:
 ```python
 @dataclass
 class SparseAttentionConfig:
-    sparse_impl: str | None = None           # "radial", "local", etc.
+    sparse_impl: str | None = None           # "radial", "local", "sol", etc.
     dense_timesteps: int = 40               # Use dense attention for initial timesteps
     dense_layers: int = 0                   # Use dense attention for initial layers
     decay_factor: float = 1.0               # Decay factor for attention window
     local_window_size: int = 6              # Window size for local sparse attention
     block_size: int = 128                   # Block size for sparse computation
     use_sage_attention: bool = False        # Use sage attention backend
+    sol_tau: float = 1.0                    # Sol-Attn routing threshold
+    sol_threshold_type: str = "diag"        # "diag" or "exact"
+    sol_kv_splits: int | str = "auto"       # "auto", 1, 2, or 4
 ```
 
 ## Calling Flow
@@ -155,12 +160,12 @@ else:
 
 ## Pipeline Support Status
 
-| Pipeline | Dense Attention | Sparse (Radial) | Notes |
-|----------|-----------------|-----------------|-------|
-| `Wan21VideoPipeline` | ✅ | ✅ | Full support for video generation |
-| `Wan22VideoPipeline` | ✅ | ✅ | Full support for video generation |
-| `QwenImagePipeline` | ✅ | ❌ | Image generation doesn't need temporal sparse attention |
-| `ZImagePipeline` | ✅ | ❌ | Image generation doesn't need temporal sparse attention |
+| Pipeline | Dense Attention | Radial | Sol-Attn | Notes |
+|----------|-----------------|--------|----------|-------|
+| `Wan21VideoPipeline` | Yes | Yes | Experimental | Sol-Attn covers eligible self-attention calls |
+| `Wan22VideoPipeline` | Yes | Yes | No | Sol-Attn is not wired into Wan2.2 yet |
+| `QwenImagePipeline` | Yes | No | No | Image generation doesn't need temporal sparse attention |
+| `ZImagePipeline` | Yes | No | No | Image generation doesn't need temporal sparse attention |
 
 ### Wan21VideoPipeline / Wan22VideoPipeline
 
@@ -184,6 +189,18 @@ When using radial attention:
 2. Creates `SparseAttentionState` with `MaskMap`
 3. Updates state per timestep/layer in denoising loop
 4. Automatically falls back to dense for early timesteps/layers
+
+Wan2.1 can select Sol-Attn through the same pipeline configuration surface:
+
+```python
+config = AttentionConfig.sol_attention()
+pipe_config.dit_config.attention_config = config
+```
+
+Sol-Attn is used only for contiguous, noncausal BF16 self-attention with equal Q/K/V
+shapes and head dimension 128. Unsupported calls, dense warmup layers or timesteps,
+and kernel runtime failures fall back to the existing dense attention path. Ring/USP
+also remains dense because its online merge requires log-sum-exp output.
 
 ### QwenImagePipeline / ZImagePipeline
 
@@ -218,8 +235,13 @@ pipe_config.dit_config.attention_config = config
 |---------|-------------|--------------|
 | `RADIAL_ATTN` | Radial attention for video | `flashinfer` or `sageattention` (tf-kernel prioritized) |
 | `LOCAL_SPARSE_ATTN` | Local window sparse attention | `block_sparse_attn` |
+| `SOL_ATTN` | Dynamic block-sparse video attention | Built in; BF16, head dimension 128, SM80+ |
 
 **Note on SageAttention Priority**: When `use_sage_attention=True` is set, the system will prioritize tf-kernel's sageattention implementation over the standalone `sageattention` package if both are available. This provides better performance and integration with the TeleFuser kernel library.
+
+**Sol-Attn packaging**: Sol-Attn ships with TeleFuser under `telefuser.kernel.sol_attn`; it does not require
+`tf-kernel`. The upstream runtime targets PyTorch 2.10+, CUDA 12.8+, and Triton 3.6+. Specialized CuTe DSL
+kernels are selected when that optional runtime is available, otherwise SM80+ uses the Triton implementation.
 
 ### Installing Sparge Attention
 
@@ -428,6 +450,7 @@ print(f"FlashInfer: {FLASHINFER_AVAILABLE}")
 | Flash Attention 4 | Build from source (cute interface) | SM90+ (H100, B100/B200) |
 | SageAttention | tf-kernel or [official source](https://github.com/thu-ml/SageAttention) | SM80+ |
 | Radial Attention | tf-kernel or [FlashInfer source](https://github.com/flashinfer-ai/flashinfer) | SM80+ |
+| Sol-Attn | Built into TeleFuser | SM80+; CuTe on supported SM90/100, Triton fallback |
 | Block Sparse | tf-kernel or [official source](https://github.com/mit-han-lab/Block-Sparse-Attention) | SM80+ |
 | Sparge Attention | Install from source (see above) | SM80, SM86, SM89, SM90 |
 

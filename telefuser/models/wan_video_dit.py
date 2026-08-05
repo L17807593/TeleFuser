@@ -10,7 +10,7 @@ from einops import rearrange
 from torch.distributed.device_mesh import DeviceMesh
 
 from telefuser.core.base_model import BaseModel
-from telefuser.core.config import AttentionConfig, AttnImplType, OffloadConfig
+from telefuser.core.config import AttentionConfig, AttnImplType, OffloadConfig, SparseAttentionConfig
 from telefuser.distributed.device_mesh import (
     get_pp_group,
     get_pp_rank,
@@ -37,7 +37,6 @@ from telefuser.offload import (
 from telefuser.offload.async_offload import AsyncOffloadManager
 from telefuser.ops.attention import MaskMap, SparseAttentionState
 from telefuser.ops.attention import attention as attn_func
-from telefuser.ops.attention import long_context_attention as long_attn_func
 from telefuser.ops.normalization import LayerNorm, RMSNorm, fused_scale_shift, modulate
 from telefuser.ops.rotary import apply_rotary_emb
 from telefuser.utils.logging import logger
@@ -116,6 +115,11 @@ class SelfAttention(nn.Module):
         self.norm_k = RMSNorm(dim, eps=eps)
         self.usp_flag = False
 
+    def _resolve_attention_config(self, sparse_state: SparseAttentionState | None) -> AttentionConfig:
+        if sparse_state is None and self.attention_config.is_sparse():
+            return AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_2)
+        return self.attention_config
+
     def async_usp_forward(
         self,
         x: torch.Tensor,
@@ -145,32 +149,15 @@ class SelfAttention(nn.Module):
             q = rearrange(q, "b n s d -> (b s) n d", s=seqlen, n=self.num_heads)
             k = rearrange(k, "b n s d -> (b s) n d", s=seqlen, n=self.num_heads)
             v = rearrange(v, "b n s d -> (b s) n d", s=seqlen, n=self.num_heads)
-
-            from telefuser.core.config import AttentionConfig
-
-            attention_config = AttentionConfig(
-                attn_impl=AttnImplType.RADIAL_ATTN,
-                sparse_config=sparse_state.config,
-            )
-            x = attn_func(
-                q,
-                k,
-                v,
-                attention_config=attention_config,
-                sparse_state=sparse_state,
-                input_layout="BSND",
-                output_layout="BSND",
-            )
-        else:
-            if self.attention_config.is_sparse():
-                from telefuser.core.config import AttentionConfig
-
-                dense_config = AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_2)
-                x = attn_func(q, k, v, attention_config=dense_config, input_layout="BSND", output_layout="BSND")
-            else:
-                x = attn_func(
-                    q, k, v, attention_config=self.attention_config, input_layout="BSND", output_layout="BSND"
-                )
+        x = attn_func(
+            q,
+            k,
+            v,
+            attention_config=self._resolve_attention_config(sparse_state),
+            sparse_state=sparse_state,
+            input_layout="BSND",
+            output_layout="BSND",
+        )
         out_wait = ulysses_gather_heads(x, group, num_heads=self.num_heads)
         out = out_wait()
         out = rearrange(out, "b s n d -> b s (n d)", n=self.num_heads)
@@ -205,75 +192,20 @@ class SelfAttention(nn.Module):
         q = rearrange(q, "b s (n d) -> b s n d", n=self.num_heads)
         k = rearrange(k, "b s (n d) -> b s n d", n=self.num_heads)
         v = rearrange(v, "b s (n d) -> b s n d", n=self.num_heads)
-        if self.usp_flag:
-            if sparse_state is not None and sparse_state.config.sparse_impl == "radial":
-                from telefuser.core.config import AttentionConfig
-
-                attention_config = AttentionConfig(
-                    attn_impl=AttnImplType.RADIAL_ATTN, sparse_config=sparse_state.config
-                )
-                x = long_attn_func(
-                    q,
-                    k,
-                    v,
-                    attention_config=attention_config,
-                    sparse_state=sparse_state,
-                    input_layout="BSND",
-                    output_layout="BSND",
-                    device_mesh=device_mesh,
-                )
-            else:
-                if self.attention_config.is_sparse():
-                    from telefuser.core.config import AttentionConfig
-
-                    dense_config = AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_2)
-                    x = long_attn_func(
-                        q,
-                        k,
-                        v,
-                        input_layout="BSND",
-                        output_layout="BSND",
-                        device_mesh=device_mesh,
-                        attention_config=dense_config,
-                    )
-                else:
-                    x = long_attn_func(
-                        q,
-                        k,
-                        v,
-                        input_layout="BSND",
-                        output_layout="BSND",
-                        device_mesh=device_mesh,
-                        attention_config=self.attention_config,
-                    )
-        elif sparse_state is not None and sparse_state.config.sparse_impl == "radial":
+        if sparse_state is not None and sparse_state.config.sparse_impl == "radial":
             seqlen = q.shape[2]
             q = rearrange(q, "b s n d -> (b s) n d", s=seqlen, n=self.num_heads)
             k = rearrange(k, "b s n d -> (b s) n d", s=seqlen, n=self.num_heads)
             v = rearrange(v, "b s n d -> (b s) n d", s=seqlen, n=self.num_heads)
-
-            from telefuser.core.config import AttentionConfig
-
-            attention_config = AttentionConfig(attn_impl=AttnImplType.RADIAL_ATTN, sparse_config=sparse_state.config)
-            x = attn_func(
-                q,
-                k,
-                v,
-                attention_config=attention_config,
-                sparse_state=sparse_state,
-                input_layout="BSND",
-                output_layout="BSND",
-            )
-        else:
-            if self.attention_config.is_sparse():
-                from telefuser.core.config import AttentionConfig
-
-                dense_config = AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_2)
-                x = attn_func(q, k, v, input_layout="BSND", output_layout="BSND", attention_config=dense_config)
-            else:
-                x = attn_func(
-                    q, k, v, input_layout="BSND", output_layout="BSND", attention_config=self.attention_config
-                )
+        x = attn_func(
+            q,
+            k,
+            v,
+            attention_config=self._resolve_attention_config(sparse_state),
+            sparse_state=sparse_state,
+            input_layout="BSND",
+            output_layout="BSND",
+        )
         x = rearrange(x, "b s n d -> b s (n d)", n=self.num_heads)
         return self.o(x)
 
@@ -569,11 +501,14 @@ class WanModel(BaseModel):
         freqs_sin: torch.Tensor,
         sparse_state: SparseAttentionState | None = None,
     ) -> torch.Tensor:
+        x, t_mod, freqs_cos, freqs_sin = self._apply_sol_token_order(
+            x, t_mod, freqs_cos, freqs_sin, sparse_state, reorder_tokens=True
+        )
         for block_id, block in enumerate(self.blocks):
             if sparse_state is not None:
                 sparse_state.update(layer_idx=block_id)
             x = block(x, context, t_mod, freqs_cos, freqs_sin, sparse_state=sparse_state, device_mesh=self.device_mesh)
-        return x
+        return self._restore_sol_token_order(x, sparse_state)
 
     def forward_blocks_pp(
         self,
@@ -588,10 +523,48 @@ class WanModel(BaseModel):
 
         Only processes the blocks assigned to this stage.
         """
+        x, t_mod, freqs_cos, freqs_sin = self._apply_sol_token_order(
+            x,
+            t_mod,
+            freqs_cos,
+            freqs_sin,
+            sparse_state,
+            reorder_tokens=self.pp_start_idx == 0,
+        )
         for block_id, block in enumerate(self.blocks[self.pp_start_idx : self.pp_end_idx]):
             if sparse_state is not None:
                 sparse_state.update(layer_idx=self.pp_start_idx + block_id)
             x = block(x, context, t_mod, freqs_cos, freqs_sin, sparse_state=sparse_state, device_mesh=self.device_mesh)
+        return self._restore_sol_token_order(x, sparse_state, enabled=self.pp_end_idx == len(self.blocks))
+
+    def _apply_sol_token_order(
+        self,
+        x: torch.Tensor,
+        t_mod: torch.Tensor,
+        freqs_cos: torch.Tensor,
+        freqs_sin: torch.Tensor,
+        sparse_state: SparseAttentionState | None,
+        *,
+        reorder_tokens: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if sparse_state is None or sparse_state.config.sparse_impl != "sol":
+            return x, t_mod, freqs_cos, freqs_sin
+        perm = self.sol_morton_perm.to(x.device)
+        if reorder_tokens:
+            x = x.index_select(1, perm)
+        if t_mod.shape[1] == perm.numel():
+            t_mod = t_mod.index_select(1, perm)
+        return x, t_mod, freqs_cos.index_select(0, perm), freqs_sin.index_select(0, perm)
+
+    def _restore_sol_token_order(
+        self,
+        x: torch.Tensor,
+        sparse_state: SparseAttentionState | None,
+        *,
+        enabled: bool = True,
+    ) -> torch.Tensor:
+        if enabled and sparse_state is not None and sparse_state.config.sparse_impl == "sol":
+            return x.index_select(1, self.sol_morton_inverse.to(x.device))
         return x
 
     def enable_usp(self):
@@ -1009,6 +982,55 @@ class WanModel(BaseModel):
         )
         self.sparse_attention_state = SparseAttentionState(config=sparse_config, mask_map=mask_map, model_type="wan")
         logger.info(f"Radial attention initialized: video_token_num={video_token_num}")
+
+    def enable_sol_attention(
+        self,
+        height: int,
+        width: int,
+        num_frames: int,
+        sparse_config: SparseAttentionConfig,
+    ) -> None:
+        """Enable Sol-Attn with the official Wan Morton3D token ordering."""
+        if sparse_config.sparse_impl != "sol":
+            raise ValueError("Sol-Attn requires a Sol sparse attention config")
+        latent_frames = (num_frames - 1) // 4 + 1
+        grid = (
+            latent_frames // self.patch_size[0],
+            height // (8 * self.patch_size[1]),
+            width // (8 * self.patch_size[2]),
+        )
+        perm, inverse = self._morton3d_permutation(grid)
+        self.register_buffer("sol_morton_perm", perm, persistent=False)
+        self.register_buffer("sol_morton_inverse", inverse, persistent=False)
+        logger.info(
+            f"Enabling Sol-Attn: grid={grid}, dense_layers={sparse_config.dense_layers}, "
+            f"dense_timesteps={sparse_config.dense_timesteps}, tau={sparse_config.sol_tau}"
+        )
+        self.sparse_attention_state = SparseAttentionState(config=sparse_config, mask_map=None, model_type="wan")
+
+    @staticmethod
+    def _morton3d_permutation(grid: tuple[int, int, int]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the canonical x/y/z-interleaved Morton permutation and inverse."""
+        frames, height, width = grid
+        total = frames * height * width
+        linear = torch.arange(total, dtype=torch.long)
+        frame_area = height * width
+        z = linear // frame_area
+        remainder = linear - z * frame_area
+        y = remainder // width
+        x = remainder - y * width
+
+        def part1by2(value: torch.Tensor) -> torch.Tensor:
+            value = value & 0x1FFFFF
+            value = (value | (value << 32)) & 0x1F00000000FFFF
+            value = (value | (value << 16)) & 0x1F0000FF0000FF
+            value = (value | (value << 8)) & 0x100F00F00F00F00F
+            value = (value | (value << 4)) & 0x10C30C30C30C30C3
+            return (value | (value << 2)) & 0x1249249249249249
+
+        code = part1by2(x) | (part1by2(y) << 1) | (part1by2(z) << 2)
+        perm = linear[torch.argsort(code)]
+        return perm, torch.argsort(perm)
 
     def create_sparse_state(self, numeral_timestep: int = 0, layer_idx: int = 0) -> SparseAttentionState | None:
         """Create/update sparse attention state for current step."""
