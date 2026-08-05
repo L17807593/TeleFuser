@@ -15,6 +15,7 @@ import torch
 from telefuser.core.config import (
     AttentionConfig,
     AttnImplType,
+    FeatureCacheConfig,
     ModelRuntimeConfig,
     OffloadConfig,
     ParallelConfig,
@@ -108,6 +109,7 @@ def load_minimax_h3_pipeline(
     text_encoder_tp_degree: int | None = None,
     enable_fsdp: bool | None = None,
     attn_impl: AttnImplType | str = AttnImplType.FLASH_ATTN_4,
+    feature_cache_config: FeatureCacheConfig | None = None,
 ) -> MiniMaxH3Pipeline:
     if partition not in {"FL2VA", "Ref2VA"}:
         raise ValueError("partition must be 'FL2VA' or 'Ref2VA'")
@@ -167,6 +169,7 @@ def load_minimax_h3_pipeline(
         torch_dtype=torch.bfloat16,
         offload_config=resident_offload,
         attention_config=AttentionConfig.dense_attention(attn_impl),
+        feature_cache_config=feature_cache_config or FeatureCacheConfig(),
         parallel_config=ParallelConfig(
             device_ids=list(range(world_size)),
             sp_ulysses_degree=ulysses_degree,

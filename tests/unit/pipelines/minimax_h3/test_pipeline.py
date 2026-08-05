@@ -3,7 +3,13 @@ from pathlib import Path
 import pytest
 import torch
 
-from telefuser.core.config import AttnImplType, ModelRuntimeConfig, ParallelConfig, WeightOffloadType
+from telefuser.core.config import (
+    AttnImplType,
+    FeatureCacheConfig,
+    ModelRuntimeConfig,
+    ParallelConfig,
+    WeightOffloadType,
+)
 from telefuser.core.module_manager import ModuleManager
 from telefuser.pipelines.minimax_h3.data import minimax_h3_validate_canonical_request
 from telefuser.pipelines.minimax_h3.denoising import MiniMaxH3DenoisingStage
@@ -187,6 +193,8 @@ def test_t2va_denoising_stage_runs_complete_packed_contract_on_cpu() -> None:
     assert result.runtime_metrics["peak_allocated_bytes"] == 0
     assert result.runtime_metrics["peak_reserved_bytes"] == 0
     assert result.runtime_metrics["communication_seconds"] == 0.0
+    assert result.runtime_metrics["feature_cache_computed_steps"] == 1
+    assert result.runtime_metrics["feature_cache_skipped_steps"] == 0
 
 
 def test_denoising_rejects_corrupt_transported_token_tags() -> None:
@@ -444,6 +452,7 @@ def test_example_loader_allows_release_length_parallel_denoising(
     monkeypatch.setattr(common, "ModuleManager", _Manager)
     monkeypatch.setattr(common, "MiniMaxH3Pipeline", _Pipeline)
 
+    feature_cache_config = FeatureCacheConfig(enabled=True, model_type="MiniMax-H3-Base")
     common.load_minimax_h3_pipeline(
         tmp_path,
         partition="Ref2VA",
@@ -452,6 +461,7 @@ def test_example_loader_allows_release_length_parallel_denoising(
         tp_degree=2,
         text_encoder_tp_degree=4,
         attn_impl="TORCH_SDPA",
+        feature_cache_config=feature_cache_config,
     )
 
     config = captured["config"]
@@ -460,6 +470,7 @@ def test_example_loader_allows_release_length_parallel_denoising(
     assert config.dit_config.parallel_config.tp_degree == 2
     assert config.dit_config.parallel_config.enable_fsdp is False
     assert config.dit_config.attention_config.attn_impl is AttnImplType.TORCH_SDPA
+    assert config.dit_config.feature_cache_config is feature_cache_config
     assert config.dit_config.offload_config.offload_type is WeightOffloadType.NO_CPU_OFFLOAD
     assert config.text_encoder_config.parallel_config.sp_ulysses_degree == 1
     assert config.text_encoder_config.parallel_config.tp_degree == 4

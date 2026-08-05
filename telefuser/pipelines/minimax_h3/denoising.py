@@ -339,6 +339,14 @@ class MiniMaxH3DenoisingStage(BaseStage):
         audio_shift = plan.audio_flow_shift or plan.default_audio_flow_shift
         video_sigmas = minimax_h3_time_shift_sigmas(num_steps=num_inference_steps, shift_scale=video_shift)
         audio_sigmas = minimax_h3_time_shift_sigmas(num_steps=num_inference_steps, shift_scale=audio_shift)
+        denoising_steps = len(video_sigmas) - 1
+        if len(audio_sigmas) - 1 != denoising_steps:
+            raise ValueError("MiniMax H3 video and audio schedules must have the same number of denoising steps")
+        self.setup_feature_cache(
+            self.transformer,
+            self.model_runtime_config.feature_cache_config,
+            denoising_steps,
+        )
         img_pos_cpu = packed["img_pos"]
         audio_pos_cpu = packed["audio_pos"]
         img_pos = img_pos_cpu.to(device)
@@ -534,6 +542,11 @@ class MiniMaxH3DenoisingStage(BaseStage):
             "peak_reserved_bytes": peak_reserved,
             "communication_seconds": communication_seconds,
         }
+        feature_cache = getattr(self.transformer, "feature_cache", None)
+        get_compute_steps = getattr(feature_cache, "get_compute_steps", None)
+        computed_steps = len(get_compute_steps()) if callable(get_compute_steps) else denoising_steps
+        runtime_metrics["feature_cache_computed_steps"] = computed_steps
+        runtime_metrics["feature_cache_skipped_steps"] = denoising_steps - computed_steps
         return MiniMaxH3DenoiseResult(video_latent, audio_latent, packed, runtime_metrics)
 
     def denoise_for_video_vae(

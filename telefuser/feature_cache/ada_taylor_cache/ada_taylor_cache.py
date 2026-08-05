@@ -528,7 +528,12 @@ class _AdaTaylorCacheCalibratorState:
         residual_x = x - ori_x
         if self.cnt >= 1:
             # Compute norm_ratio between current and previous residual
-            norm_ratio = ((residual_x.norm(dim=-1) / self.residual_cache.norm(dim=-1)).mean()).item()
+            current_norm = residual_x.norm(dim=-1)
+            previous_norm = self.residual_cache.norm(dim=-1)
+            valid = previous_norm > 0
+            ratios = current_norm[valid] / previous_norm[valid]
+            ratios = ratios[torch.isfinite(ratios)]
+            norm_ratio = ratios.mean().item() if ratios.numel() else 1.0
             self.norm_ratio.append(round(norm_ratio, 5))
             print(f"  step {self.cnt + 1}: norm_ratio={norm_ratio:.5f}")
         self.residual_cache = residual_x

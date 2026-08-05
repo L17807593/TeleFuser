@@ -232,8 +232,13 @@ python examples/wan_video/wan21_1_3b_text_to_video_ada_taylor_cache.py \
 | HunyuanVideo I2V | `examples/hunyuan_video/hunyuan_video_i2v_cache_calibrate.py` | HunyuanVideo-I2V |
 | Qwen-Image T2I | `examples/qwen_image/qwen_image_cache_calibrate.py` | Qwen-Image |
 | Qwen-Image Edit | `examples/qwen_image/qwen_image_edit_plus_cache_calibrate.py` | Qwen-Image-Edit-Plus |
+| MiniMax H3 FL2VA | `examples/minimax_h3/minimax_h3_cache_calibrate.py` | MiniMax-H3-Base |
 
 **Note for Wan2.2 I2V:** Wan2.2 uses a dual-branch architecture (dit_high + dit_low). The calibration script shares a single calibrator between both branches to capture the complete denoising process in one JSON file.
+
+**Note for MiniMax H3:** H3 has one joint audio-video branch. Its calibrator measures audio-token residuals and
+mirrors the resulting curve into both fields of the shared CFG-compatible JSON format. Run calibration on one GPU;
+the generated parameters can then be used by the one-, two-, or four-GPU FL2VA profiles.
 
 ---
 

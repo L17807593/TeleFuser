@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -192,6 +193,88 @@ def test_small_packed_forward_returns_video_and_audio_rows() -> None:
     assert audio.shape == (2, 2)
     assert torch.isfinite(video).all()
     assert torch.isfinite(audio).all()
+
+
+def _small_packed_inputs() -> dict[str, object]:
+    sequence = 8
+    video_positions = torch.arange(4, 8)
+    audio_positions = torch.arange(2, 4)
+    return {
+        "x": torch.randn(1, sequence, 8),
+        "audio_x": torch.randn(1, sequence, 2),
+        "img_position_ids": torch.zeros(1, sequence, 3, dtype=torch.float64),
+        "unique_timesteps": torch.tensor([0.5]),
+        "inverse_indices": torch.zeros(sequence, dtype=torch.long),
+        "update_mask": torch.ones(video_positions.numel(), dtype=torch.bool),
+        "token_tags": torch.tensor([1, 1, 2, 2, 0, 0, 0, 0]),
+        "prompt_embeds": torch.randn(2, 16),
+        "img_pos_info": {"position_ids": video_positions},
+        "audio_pos_info": {"position_ids": audio_positions},
+        "text_pos_info": {"position_ids": torch.arange(0, 2)},
+        "img_pos_for_infer_output_info": {"position_ids": video_positions},
+        "packed_seq_params": {"cu_seqlens_q": torch.tensor([0, sequence], dtype=torch.int32)},
+    }
+
+
+def test_feature_cache_skips_joint_blocks_and_keeps_both_output_modalities() -> None:
+    class _ComputeThenReuseCache:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.residual = None
+            self.input_was_preserved = False
+
+        def should_compute(self, is_cond: bool) -> bool:
+            assert is_cond is True
+            self.calls += 1
+            return self.calls == 1
+
+        def update(self, output: torch.Tensor, ori_input: torch.Tensor, is_cond: bool) -> None:
+            assert is_cond is True
+            self.input_was_preserved = output.data_ptr() != ori_input.data_ptr()
+            self.residual = (output - ori_input).detach()
+
+        def approximate(self, input: torch.Tensor, is_cond: bool) -> torch.Tensor:
+            assert is_cond is True
+            return input + self.residual
+
+    torch.manual_seed(0)
+    model = MiniMaxH3DiT(_small_config()).eval()
+    cache = _ComputeThenReuseCache()
+    model._feature_cache = cache
+    inputs = _small_packed_inputs()
+
+    with patch.object(model.blocks[0], "forward", wraps=model.blocks[0].forward) as first_block:
+        first_video, first_audio = model(**inputs)
+        inputs["x"] = inputs["x"] + 0.1
+        inputs["audio_x"] = inputs["audio_x"] - 0.1
+        second_video, second_audio = model(**inputs)
+
+    assert first_block.call_count == 1
+    assert cache.calls == 2
+    assert cache.input_was_preserved
+    assert first_video.shape == second_video.shape == (4, 8)
+    assert first_audio.shape == second_audio.shape == (2, 2)
+    assert torch.isfinite(second_video).all()
+    assert torch.isfinite(second_audio).all()
+
+
+def test_h3_calibrator_writes_shared_parameter_format_for_single_branch(tmp_path) -> None:
+    torch.manual_seed(0)
+    model = MiniMaxH3DiT(_small_config()).eval()
+    output_path = tmp_path / "MiniMax-H3-Base.json"
+    model.set_ada_taylor_cache_calibrator(
+        num_inference_steps=2,
+        sigma_shift=5.0,
+        model_name="MiniMax-H3-Base",
+        output_path=str(output_path),
+    )
+
+    model(**_small_packed_inputs())
+    model(**_small_packed_inputs())
+
+    params = json.loads(output_path.read_text(encoding="utf-8"))
+    assert len(params["cond_mag_ratios"]) == 2
+    assert params["uncond_mag_ratios"] == params["cond_mag_ratios"]
 
 
 def test_tp_forward_batches_block_adaln_all_gather() -> None:

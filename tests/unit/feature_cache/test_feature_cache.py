@@ -461,6 +461,26 @@ class TestAdaTaylorCacheCalibrator:
         calibrator.update(x, ori_x, is_cond=False)
         assert calibrator.uncond_calibrator.cnt == 1
 
+    def test_padding_with_zero_residual_produces_finite_ratio(self, temp_output_path):
+        calibrator = AdaTaylorCacheCalibrator(
+            num_inference_steps=2,
+            sigma_shift=8.0,
+            model_name="TestModel",
+            output_path=temp_output_path,
+        )
+        ori_x = torch.zeros(1, 4, 2)
+        first = ori_x.clone()
+        first[:, :2] = 1.0
+        second = ori_x.clone()
+        second[:, :2] = 2.0
+
+        for is_cond in (True, False):
+            calibrator.update(first, ori_x, is_cond=is_cond)
+            calibrator.update(second, ori_x, is_cond=is_cond)
+
+        state = calibrator.uncond_calibrator
+        assert state.norm_ratio == [2.0]
+
     def test_save_produces_valid_json(self, temp_output_path):
         """Test that save produces valid JSON."""
         calibrator = AdaTaylorCacheCalibrator(

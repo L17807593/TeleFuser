@@ -26,6 +26,7 @@ from telefuser.distributed.device_mesh import (
 )
 from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequence_parallel_unshard
 from telefuser.distributed.ulysses_comm import ulysses_gather_heads_destination_major, ulysses_scatter_qkv
+from telefuser.feature_cache import AdaTaylorCacheCalibrator
 from telefuser.ops import RMSNorm, apply_qk_norm_rope_neox, indexed_gate, indexed_scale_shift, silu_and_mul_reuse_input
 from telefuser.ops.attention import attention
 from telefuser.ops.rotary import apply_rotary_emb_neox
@@ -731,30 +732,52 @@ class MiniMaxH3DiT(BaseModel):
                 )
         else:
             inverse_indices = local_inverse_indices
-        block_adaln_params = None
-        if self.tp_flag:
-            local_adaln = torch.stack([block.adaln_proj.project_local(adaln_input) for block in self.blocks])
-            first_projection = self.blocks[0].adaln_proj
-            gathered_adaln = all_gather_cat(
-                local_adaln,
-                dim=-1,
-                group=first_projection.tp_group,
-                world_size=first_projection.tp_world_size,
-            )
-            block_adaln_params = tuple(
-                block.adaln_proj.split_output(output) for block, output in zip(self.blocks, gathered_adaln)
-            )
-        for index, block in enumerate(self.blocks):
-            hidden = block(
-                hidden,
-                adaln_input=adaln_input,
-                combined_indices=combined_indices,
-                sequence_lengths=sequence_lengths,
-                rope_cos_sin_cache=rope_cos_sin_cache,
-                attention_config=self.attention_config,
-                cu_seqlens=cu_seqlens,
-                adaln_params=None if block_adaln_params is None else block_adaln_params[index],
-            )
+        feature_cache = self.feature_cache
+        if feature_cache.should_compute(True):
+            # H3's gated residual ops may reuse their input storage. Preserve the
+            # pre-block value so cache residuals always span the complete block stack.
+            input_hidden = hidden.clone()
+            block_adaln_params = None
+            if self.tp_flag:
+                local_adaln = torch.stack([block.adaln_proj.project_local(adaln_input) for block in self.blocks])
+                first_projection = self.blocks[0].adaln_proj
+                gathered_adaln = all_gather_cat(
+                    local_adaln,
+                    dim=-1,
+                    group=first_projection.tp_group,
+                    world_size=first_projection.tp_world_size,
+                )
+                block_adaln_params = tuple(
+                    block.adaln_proj.split_output(output) for block, output in zip(self.blocks, gathered_adaln)
+                )
+            for index, block in enumerate(self.blocks):
+                hidden = block(
+                    hidden,
+                    adaln_input=adaln_input,
+                    combined_indices=combined_indices,
+                    sequence_lengths=sequence_lengths,
+                    rope_cos_sin_cache=rope_cos_sin_cache,
+                    attention_config=self.attention_config,
+                    cu_seqlens=cu_seqlens,
+                    adaln_params=None if block_adaln_params is None else block_adaln_params[index],
+                )
+            if isinstance(feature_cache, AdaTaylorCacheCalibrator):
+                # Video rows greatly outnumber audio rows in H3. Calibrate decisions on
+                # audio residuals so the joint hidden cache does not neglect its weaker modality.
+                local_audio_positions = (
+                    audio_positions[(audio_positions >= row_start) & (audio_positions < row_stop)] - row_start
+                )
+                calibration_output = hidden.index_select(0, local_audio_positions)
+                calibration_input = input_hidden.index_select(0, local_audio_positions)
+                feature_cache.update(calibration_output, calibration_input, True)
+                # H3 has one joint branch. Mirror it into the legacy CFG slot so the
+                # shared parameter format loads unchanged.
+                feature_cache.should_compute(False)
+                feature_cache.update(calibration_output, calibration_input, False)
+            else:
+                feature_cache.update(hidden, input_hidden, True)
+        else:
+            hidden = feature_cache.approximate(hidden, True)
         video_logits, audio_logits = self.final_layer(
             hidden,
             adaln_input=adaln_input,

@@ -13,9 +13,10 @@ from examples.minimax_h3.common import (
     load_minimax_h3_request,
     partition_for_minimax_h3_request,
 )
+from examples.minimax_h3.minimax_h3_cache_calibrate import _apply_cache_profile
 from examples.minimax_h3.minimax_h3_fl2va_h100 import build_fl2va_conditions
 from examples.minimax_h3.minimax_h3_ref2va_h100 import default_ref2va_conditions
-from telefuser.core.config import AttnImplType
+from telefuser.core.config import AttnImplType, FeatureCacheConfig
 from telefuser.service.core.pipeline_contract import PipelineContract
 
 
@@ -81,7 +82,14 @@ def test_standard_get_pipeline_forwards_parallel_runtime_options(monkeypatch: py
         return sentinel
 
     monkeypatch.setattr(fl2va_example, "load_minimax_h3_pipeline", fake_loader)
-    result = fl2va_example.get_pipeline(4, "/models/h3", device="cuda:1", num_inference_steps=20, enable_fsdp=True)
+    result = fl2va_example.get_pipeline(
+        4,
+        "/models/h3",
+        device="cuda:1",
+        num_inference_steps=20,
+        enable_fsdp=True,
+        enable_feature_cache=True,
+    )
 
     assert result is sentinel
     assert calls == [
@@ -96,9 +104,30 @@ def test_standard_get_pipeline_forwards_parallel_runtime_options(monkeypatch: py
                 "text_encoder_tp_degree": 4,
                 "enable_fsdp": True,
                 "attn_impl": AttnImplType.FLASH_ATTN_4,
+                "feature_cache_config": FeatureCacheConfig(
+                    enabled=True,
+                    model_type="MiniMax-H3-Base",
+                    n_derivatives=1,
+                    taylor_threshold=2,
+                ),
             },
         )
     ]
+
+
+def test_cache_calibration_applies_validated_h3_profile(tmp_path: Path) -> None:
+    output_path = tmp_path / "MiniMax-H3-Base.json"
+    output_path.write_text(json.dumps({"K": 4, "retention_ratio": 0.2, "thresh": 0.12}), encoding="utf-8")
+
+    _apply_cache_profile(
+        output_path,
+        max_consecutive_skips=2,
+        retention_ratio=0.2,
+        schedule_threshold=0.03,
+    )
+
+    params = json.loads(output_path.read_text(encoding="utf-8"))
+    assert params == {"K": 2, "retention_ratio": 0.2, "thresh": 0.03}
 
 
 def test_fl2va_run_maps_standard_service_tasks_to_model_conditions() -> None:

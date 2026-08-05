@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from telefuser.core.config import AttnImplType
+from telefuser.core.config import AttnImplType, FeatureCacheConfig
 from telefuser.pipelines.minimax_h3.example_utils import (
     MINIMAX_H3_DEFAULT_FL2VA_IMAGE,
     load_minimax_h3_pipeline,
@@ -33,6 +33,9 @@ PPL_CONFIG: dict[str, Any] = {
     "device": "cuda:0",
     "enable_fsdp": None,
     "attn_impl": AttnImplType.FLASH_ATTN_4,
+    "feature_cache_model_type": "MiniMax-H3-Base",
+    "feature_cache_n_derivatives": 1,
+    "feature_cache_taylor_threshold": 2,
 }
 
 
@@ -78,6 +81,10 @@ def get_pipeline(
     num_inference_steps: int = PPL_CONFIG["num_inference_steps"],
     enable_fsdp: bool | None = PPL_CONFIG["enable_fsdp"],
     attn_impl: AttnImplType | str = PPL_CONFIG["attn_impl"],
+    enable_feature_cache: bool = False,
+    feature_cache_model_type: str = PPL_CONFIG["feature_cache_model_type"],
+    feature_cache_n_derivatives: int = PPL_CONFIG["feature_cache_n_derivatives"],
+    feature_cache_taylor_threshold: int = PPL_CONFIG["feature_cache_taylor_threshold"],
 ) -> MiniMaxH3Pipeline:
     """Load the FL2VA checkpoint partition for one, two, or four GPUs."""
     tp_degree = 2 if parallelism == 4 else 1
@@ -91,6 +98,12 @@ def get_pipeline(
         text_encoder_tp_degree=parallelism,
         enable_fsdp=enable_fsdp,
         attn_impl=attn_impl,
+        feature_cache_config=FeatureCacheConfig(
+            enabled=enable_feature_cache,
+            model_type=feature_cache_model_type,
+            n_derivatives=feature_cache_n_derivatives,
+            taylor_threshold=feature_cache_taylor_threshold,
+        ),
     )
 
 
@@ -249,6 +262,19 @@ def main() -> None:
     parser.add_argument("--audio-flow-shift", type=float, default=PPL_CONFIG["audio_flow_shift"])
     parser.add_argument("--device", default=PPL_CONFIG["device"])
     parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4), default=1)
+    parser.add_argument("--enable-feature-cache", action="store_true")
+    parser.add_argument("--feature-cache-model-type", default=PPL_CONFIG["feature_cache_model_type"])
+    parser.add_argument(
+        "--feature-cache-n-derivatives",
+        type=int,
+        choices=(0, 1, 2),
+        default=PPL_CONFIG["feature_cache_n_derivatives"],
+    )
+    parser.add_argument(
+        "--feature-cache-taylor-threshold",
+        type=int,
+        default=PPL_CONFIG["feature_cache_taylor_threshold"],
+    )
     fsdp_group = parser.add_mutually_exclusive_group()
     fsdp_group.add_argument("--enable-fsdp", dest="enable_fsdp", action="store_true")
     fsdp_group.add_argument("--disable-fsdp", dest="enable_fsdp", action="store_false")
@@ -279,6 +305,10 @@ def main() -> None:
         device=args.device,
         num_inference_steps=args.steps,
         enable_fsdp=args.enable_fsdp,
+        enable_feature_cache=args.enable_feature_cache,
+        feature_cache_model_type=args.feature_cache_model_type,
+        feature_cache_n_derivatives=args.feature_cache_n_derivatives,
+        feature_cache_taylor_threshold=args.feature_cache_taylor_threshold,
     )
     try:
         result = run_with_file(
