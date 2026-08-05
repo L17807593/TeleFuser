@@ -64,6 +64,43 @@ def test_indexed_gate_matches_native() -> None:
     torch.testing.assert_close(output, expected)
 
 
+def test_indexed_modulation_validates_tensor_metadata() -> None:
+    x = torch.randn(4, 8)
+    shift = torch.randn(2, 8)
+    scale = torch.randn(2, 8)
+    indices = torch.tensor([0, 1, 0, 1])
+
+    with pytest.raises(ValueError, match="one entry per input row"):
+        indexed_scale_shift(x, shift, scale, indices[:-1])
+    with pytest.raises(TypeError, match="int32 or int64"):
+        indexed_scale_shift(x, shift, scale, indices.float())
+    with pytest.raises(ValueError, match="same number of rows"):
+        indexed_scale_shift(x, shift, torch.randn(3, 8), indices)
+    with pytest.raises(ValueError, match="hidden dimension"):
+        indexed_scale_shift(x, shift, torch.randn(2, 7), indices)
+    with pytest.raises(ValueError, match="per-row tensors"):
+        indexed_gate(x, shift, torch.randn(3, 8), indices)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton kernel")
+def test_indexed_modulation_masks_out_of_range_indices() -> None:
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    indices = torch.tensor([0, -1, 1, 7], device=device)
+    x = torch.randn(4, 128, device=device, dtype=dtype)
+    shift = torch.randn(2, 128, device=device, dtype=dtype)
+    scale = torch.randn(2, 128, device=device, dtype=dtype)
+    gate = torch.randn(2, 128, device=device, dtype=dtype)
+    other = torch.randn_like(x)
+
+    scale_shift_output = indexed_scale_shift(x.clone(), shift, scale, indices)
+    gate_output = indexed_gate(x.clone(), gate, other, indices)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(scale_shift_output[[1, 3]], x[[1, 3]], atol=0, rtol=0)
+    torch.testing.assert_close(gate_output[[1, 3]], x[[1, 3]], atol=0, rtol=0)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton kernel")
 def test_indexed_modulation_supports_row_strided_parameters() -> None:
     device = torch.device("cuda")

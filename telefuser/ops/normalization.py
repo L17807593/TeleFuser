@@ -307,6 +307,33 @@ def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch
     return fused_scale_shift(x, scale, shift, scale_constant=1.0)
 
 
+def _validate_indexed_modulation_inputs(
+    x: torch.Tensor,
+    indices: torch.Tensor,
+    *,
+    row_parameters: tuple[torch.Tensor, ...],
+    per_row_tensors: tuple[torch.Tensor, ...] = (),
+) -> None:
+    if x.ndim != 2:
+        raise ValueError("indexed modulation input must be a two-dimensional tensor")
+    if indices.ndim != 1 or indices.numel() != x.shape[0]:
+        raise ValueError("indexed modulation indices must contain one entry per input row")
+    if indices.dtype not in {torch.int32, torch.int64}:
+        raise TypeError("indexed modulation indices must use int32 or int64")
+    tensors = (*row_parameters, *per_row_tensors, indices)
+    if any(tensor.device != x.device for tensor in tensors):
+        raise ValueError("indexed modulation tensors must be on the same device")
+    if any(parameter.ndim != 2 or parameter.shape[1] != x.shape[1] for parameter in row_parameters):
+        raise ValueError("indexed modulation parameter tensors must match the input hidden dimension")
+    if any(parameter.shape[0] == 0 for parameter in row_parameters):
+        raise ValueError("indexed modulation parameter tensors must contain at least one row")
+    parameter_rows = row_parameters[0].shape[0]
+    if any(parameter.shape[0] != parameter_rows for parameter in row_parameters[1:]):
+        raise ValueError("indexed modulation parameter tensors must contain the same number of rows")
+    if any(tensor.shape != x.shape for tensor in per_row_tensors):
+        raise ValueError("indexed modulation per-row tensors must match the input shape")
+
+
 def indexed_scale_shift(
     x: torch.Tensor,
     shift: torch.Tensor,
@@ -314,6 +341,7 @@ def indexed_scale_shift(
     indices: torch.Tensor,
 ) -> torch.Tensor:
     """Apply row-indexed scale and shift, reusing disposable CUDA BF16 input."""
+    _validate_indexed_modulation_inputs(x, indices, row_parameters=(shift, scale))
     if (
         not torch.compiler.is_compiling()
         and x.device.type == "cuda"
@@ -336,6 +364,7 @@ def indexed_gate(
     indices: torch.Tensor,
 ) -> torch.Tensor:
     """Apply a row-indexed gated residual, reusing disposable CUDA BF16 input."""
+    _validate_indexed_modulation_inputs(x, indices, row_parameters=(gate,), per_row_tensors=(other,))
     if (
         not torch.compiler.is_compiling()
         and x.device.type == "cuda"
