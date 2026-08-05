@@ -7,15 +7,16 @@ Regenerate-2K services are not implemented or implied.
 ## Requirements
 
 - Linux with ffmpeg and ffprobe.
-- One NVIDIA H100 80GB for the documented sequential-residency path.
+- One NVIDIA H100 80GB for sequential stage offload, or two/four H100 80GB GPUs for resident multi-GPU execution.
 - Enough host memory for the approximately 63 GB encoder and 62 GB DiT partitions.
 - The repository development environment and the unmodified model directory at
   `/hhb-data/aigc/model_zoo/MiniMaxAI_MiniMax-H3`.
 
-Run commands from the repository root. The examples load original checkpoint shards through `ModuleManager`.
-Encoder, DiT, visual VAE, and audio VAE use model-level CPU offload, so only one large component is resident on the
-selected GPU at a time. The encoder and DiT use BF16; both VAEs remain FP32, with reference FP16 autocast applied
-only to CUDA video decode.
+Run commands from the repository root. The examples load original checkpoint shards through `ModuleManager`. A
+one-GPU run uses stage-level model CPU offload. Multi-GPU runs keep the stages resident: two GPUs use Ulysses2 for
+the DiT, TP2 for the text encoder, and TP2 video-VAE tiling; four GPUs use DiT Ulysses2 x TP2, text TP4, and TP4
+video-VAE tiling. The audio VAE remains on GPU 0. The encoder and DiT use BF16; both VAEs remain FP32, with the
+reference FP16 autocast boundary applied only to CUDA video decode.
 
 The source-controlled default inputs live in `examples/data/minimax-h3/`. They are the exact inputs frozen for the
 official SGLang parity runs; `provenance.json` records their original URLs, byte sizes, and SHA-256 hashes.
@@ -134,9 +135,9 @@ total video and total audio duration must each be at most 15 seconds, and audio 
 ## Standard Python And Serve Entrypoints
 
 All three executable modules expose `PPL_CONFIG`, `get_pipeline`, `run`, and `run_with_file`. The two fixed-partition
-generation modules also expose `PIPELINE_MANIFEST` for serving. `get_pipeline(parallelism, model_root)` uses
-`parallelism` as the Ulysses degree, while `run` returns the in-memory `MiniMaxH3Generation` and `run_with_file`
-writes the synchronized MP4 and returns its `output_path`.
+generation modules also expose `PIPELINE_MANIFEST` for serving. `get_pipeline(parallelism, model_root)` interprets
+`parallelism` as the total GPU count and selects the corresponding profile below. `run` returns the in-memory
+`MiniMaxH3Generation`; `run_with_file` writes the synchronized MP4 and returns its `output_path`.
 
 ```python
 from examples.minimax_h3.minimax_h3_fl2va_h100 import get_pipeline, run_with_file
@@ -191,14 +192,30 @@ The simple CLIs expose `--steps`, `--seed`, `--duration`, `--aspect-ratio`, `--f
 `--audio-flow-shift`. Supported explicit aspect ratios are `21:9`, `16:9`, `4:3`, `1:1`, `3:4`, and `9:16`;
 `auto` follows the task policy or first FL2VA keyframe.
 
-Use `--ulysses-degree 2` or `--ulysses-degree 4` to shard packed DiT attention. Four-GPU runs automatically enable
-FSDP2 so each worker keeps its DiT parameter shard resident for the denoising loop; the encoder and VAEs remain
-stage-offloaded on `--device` (normally `cuda:0`). The degree must divide 56 attention heads, and scripts must run
-from their guarded entry points so worker processes can spawn safely. H100 examples use packed FlashAttention 4 when
-available and fall back to packed PyTorch SDPA otherwise. When a compatible `tf-kernel` wheel is installed, H3 also
-uses its fused RMSNorm, SwiGLU, and partial NeoX RoPE kernels with native PyTorch fallbacks.
+`--gpu-num` selects the total worker count. `--ulysses-degree` remains a compatibility alias for the same CLI option;
+it no longer means that every selected GPU is necessarily an Ulysses rank.
 
-FSDP can also be selected explicitly for a two-GPU Ulysses example:
+| `--gpu-num` | DiT | Text encoder | Video VAE | Residency |
+|---:|---|---|---|---|
+| 1 | single GPU | single GPU | single GPU | sequential model CPU offload |
+| 2 | Ulysses2 | TP2 | TP2 tiling | resident |
+| 4 | Ulysses2 x TP2 | TP4 | TP4 tiling | resident |
+
+The Ulysses degree must divide 56 attention heads. Scripts must run from their guarded entry points so worker
+processes can spawn safely. H100 examples request packed FlashAttention 4 and fall back to packed PyTorch SDPA when
+FlashAttention 4 is unavailable.
+
+For multi-GPU resident profiles, `WorkerTensorChannel` transports text conditioning, visual condition rows, and the
+final video latent directly between worker groups. CUDA intermediates therefore do not stage through the parent
+process or CPU. The pipeline reports media, text, condition VAE, denoising, video/audio decode, allocator peak, and
+DiT communication timings in `MiniMaxH3Generation.runtime_metrics`.
+
+H3 also uses eager BF16 Triton paths for Q/K RMSNorm plus partial NeoX RoPE, indexed modulation, SwiGLU, and Ulysses
+relayout when their input contracts match. Compatible `tf-kernel` builds may accelerate public RMSNorm, SwiGLU, and
+RoPE operations. All public ops retain native PyTorch fallbacks for unsupported devices, dtypes, and compile mode.
+
+FSDP2 remains available for an SP-only DiT profile and cannot be combined with DiT TP. The standard CLI can select
+it explicitly for a two-GPU Ulysses run:
 
 ```bash
 python examples/minimax_h3/minimax_h3_request_h100.py \
@@ -207,8 +224,22 @@ python examples/minimax_h3/minimax_h3_request_h100.py \
   --output outputs/minimax_h3_ref2va_fsdp.mp4
 ```
 
-Pass `--disable-fsdp` to a four-GPU command to run an offloaded Ulysses-only baseline.
+The standard four-GPU profile already uses Ulysses2 x TP2 and therefore leaves FSDP disabled. Use
+`load_minimax_h3_pipeline` directly to construct another supported combination; the product of Ulysses and TP degrees
+must be 1, 2, or 4.
 
-H3 tensor parallelism, Ring attention, CFG parallelism, pipeline parallelism, and visual-VAE spatial parallelism are
-not enabled. The dedicated service manifests expose the existing pipeline behavior without adding framework-level
-configuration fields or changing the shared request schema.
+Ring attention, CFG parallelism, pipeline parallelism, sparse attention, quantization, and `torch.compile` are not
+enabled for H3. Video-VAE parallelism is spatial tiling over the existing TP process group, not parameter tensor
+parallelism. The dedicated service manifests expose the pipeline without adding framework-level configuration fields
+or changing the shared request schema.
+
+## Measured Four-GPU Profile
+
+On the frozen 768p, five-second, 50-step T2VA request, after one warmup, the resident four-H100 profile measured
+79.34 seconds wall time. The matched local SGLang SP2+TP2 run measured 79.37 seconds. Sampled peak GPU 0 memory was
+62.7 GiB for TeleFuser and 67.8 GiB for SGLang. The TeleFuser DiT denoising phase took 76.41 seconds, including
+4.12 seconds recorded in SP/TP communication.
+
+These numbers establish parity for this request and environment, not a general performance guarantee. Direct stage
+tensor transport removes CPU/parent staging but does not materially change the 50-step wall time because DiT compute
+and per-layer TP/SP collectives dominate.

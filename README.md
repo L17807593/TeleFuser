@@ -17,6 +17,11 @@ TeleFuser is a high-performance runtime for world model inference and multimodal
 
 ## News 📰
 
+- ✨ **2026-08-05**: Added [**MiniMax H3**](examples/minimax_h3/README.md) T2VA, FL2VA, and Ref2VA joint
+  audio-video generation with standard `telefuser serve` support. On the matched 768p, five-second, 50-step T2VA
+  benchmark after warmup, the resident **4 x H100 80 GB** profile matched pinned local SGLang SP2+TP2 performance
+  while using less GPU memory; see the
+  [reproducible validation and performance notes](examples/minimax_h3/README.md#measured-four-gpu-profile).
 - ✨ **2026-08-03**: Validated LingBot-World v2 target-side real-time generation on **4 x H100 80 GB** at
   832x480 and 16 FPS. The current 77-frame gate reached **17.14 steady compute FPS**; see the
   [reproducible benchmark](docs/en/benchmark_aiperf.md#current-four-h100-real-time-gate).
@@ -254,7 +259,6 @@ See [examples/README.md](examples/README.md) for the example runner and baseline
 - [docs/en/latent_cache.md](docs/en/latent_cache.md): CacheSeek latent cache integration
 - [docs/en/feature_cache.md](docs/en/feature_cache.md): `AdaTaylorCache`
 - [docs/en/model_loading.md](docs/en/model_loading.md): model loading patterns
-- [docs/en/minimax_h3.md](docs/en/minimax_h3.md): MiniMax H3 tasks, checkpoint layout, examples, limitations, and service compatibility gate
 - [docs/en/attention.md](docs/en/attention.md): attention backends and configuration
 - [docs/en/torch_compile_compatibility.md](docs/en/torch_compile_compatibility.md): compile-related constraints
 - [docs/en/adding_new_model.md](docs/en/adding_new_model.md): integrating new models
