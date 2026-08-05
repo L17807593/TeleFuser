@@ -156,7 +156,7 @@ telefuser serve /path/to/pipeline --task i2v [OPTIONS]
 | Parameter | Shortcut | Type | Default | Description |
 |-----------|----------|------|---------|-------------|
 | `pipe_path` | | string | **Required** | Positional path to the pipeline Python file |
-| `--task` | `-t` | choice | `i2v` | Task type: t2v, i2v, fl2v, vc, t2i, i2i, s2v, vsr |
+| `--task` | `-t` | choice | `i2v` | Task type: t2v, i2v, fl2v, vc, t2i, i2i, s2v, vsr, vla_action |
 | `--port` | `-p` | int | `8000` | Server port |
 | `--host` | | string | `127.0.0.1` | Server host address |
 | `--cache-dir` | `-c` | string | `work_dirs/server_cache` | Cache directory |
@@ -262,6 +262,7 @@ telefuser serve --help
 | `i2i` | Image-to-Image: Generate image from input image and prompt |
 | `s2v` | Speech-to-Video: Generate video from speech |
 | `vsr` | Video Super-Resolution: Upscale an input video |
+| `vla_action` | Structured VLA canonical action inference |
 
 ### Environment Variables
 
@@ -1104,6 +1105,17 @@ telefuser serve ./pipeline.py --task t2v
 
 ---
 
+### Structured JSON Tasks
+
+Pipelines that return JSON instead of image or video artifacts can declare a task contract with
+`media_type="structured"`. Submit those tasks to `POST /v1/tasks/structured`; the existing status, cancellation,
+queue, pool, and metrics endpoints remain unchanged. The pipeline entrypoint must return a finite JSON object. On
+completion, `GET /v1/tasks/{task_id}/status` exposes that object under `result` together with
+`inference_time_s` and the optional `peak_memory_mb`.
+
+
+Media tasks continue to use `POST /v1/tasks/create` and artifact paths. The structured endpoint rejects media
+contracts, and the media endpoint retains its existing request and response format.
 ## Client SDK
 
 ### Installation

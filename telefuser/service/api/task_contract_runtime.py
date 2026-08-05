@@ -132,6 +132,8 @@ def _build_default_output_path(message: Any) -> str:
         return ""
 
     media_type = infer_media_type_for_task(task)
+    if media_type == "structured":
+        return ""
     if media_type == "image":
         output_format = getattr(message, "output_format", "png") or "png"
         return f"{task_id}.{output_format}"

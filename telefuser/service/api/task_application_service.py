@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from telefuser.service.core.pipeline_contract import infer_media_type_for_task
 from telefuser.service_types import MediaType, TaskStatus
 
-from .schema import TaskRequest, TaskResponse
+from .schema import StructuredTaskRequest, StructuredTaskResponse, TaskRequest, TaskResponse
 from .task_contract_runtime import apply_task_contract_defaults, validate_required_task_parameters
 
 if TYPE_CHECKING:
@@ -53,6 +53,34 @@ class TaskApplicationService:
                 await self.api.ensure_task_processor_running()
 
             return TaskResponse(task_id=task_id, task_status=TaskStatus.PENDING, output_path=message.output_path)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+
+    async def submit_structured(
+        self,
+        message: StructuredTaskRequest,
+        *,
+        explicit_fields: set[str],
+        ensure_processing: bool = True,
+    ) -> StructuredTaskResponse:
+        """Validate and enqueue a task whose result is returned as JSON."""
+        try:
+            self.api.validate_task_supported(message.task)
+            contract = self.api.get_task_contract(message.task)
+            media_type = str((contract or {}).get("media_type") or infer_media_type_for_task(message.task))
+            if media_type != MediaType.STRUCTURED.value:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Task '{message.task}' does not declare a structured result contract",
+                )
+            apply_task_contract_defaults(message, task_contract=contract, explicit_fields=explicit_fields)
+            validate_required_task_parameters(message, task_contract=contract)
+
+            task_id = self.api.task_manager.create_task(message)
+            message.task_id = task_id
+            if ensure_processing:
+                await self.api.ensure_task_processor_running()
+            return StructuredTaskResponse(task_id=task_id, task_status=TaskStatus.PENDING)
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc))
 

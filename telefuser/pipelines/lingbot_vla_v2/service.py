@@ -126,6 +126,30 @@ def _decode_image(value: str, *, max_image_bytes: int) -> Image.Image:
         raise ValueError("decoded payload must be a supported image") from error
 
 
+def predict_lingbot_vla_v2_action(
+    pipeline: _Pipeline,
+    request: LingBotVlaV2ActionRequest,
+    *,
+    max_image_bytes: int,
+) -> LingBotVlaV2ActionResponse:
+    """Decode one request and return the canonical normalized action chunk."""
+    encoded_images = (request.camera_high, request.camera_left_wrist, request.camera_right_wrist)
+    images = {
+        key: _decode_image(value, max_image_bytes=max_image_bytes)
+        for key, value in zip(ROBOTWIN_CAMERA_KEYS, encoded_images, strict=True)
+    }
+    observation = LingBotVlaV2Observation(task=request.task, state=request.state, images=images)
+    chunk = pipeline(observation, seed=request.seed)
+    return LingBotVlaV2ActionResponse(
+        canonical_normalized_actions=chunk.canonical_normalized_actions.tolist(),
+        horizon=chunk.horizon,
+        action_dim=chunk.action_dim,
+        checkpoint_variant=chunk.checkpoint_variant,
+        policy_verified=chunk.policy_verified,
+        verification_status=chunk.verification_status,
+    )
+
+
 class LingBotVlaV2Service:
     """Serialize requests through one loaded policy replica."""
 
@@ -136,22 +160,8 @@ class LingBotVlaV2Service:
 
     def predict(self, request: LingBotVlaV2ActionRequest) -> LingBotVlaV2ActionResponse:
         """Decode one request and run it on the process-local replica."""
-        encoded_images = (request.camera_high, request.camera_left_wrist, request.camera_right_wrist)
-        images = {
-            key: _decode_image(value, max_image_bytes=self.config.max_image_bytes)
-            for key, value in zip(ROBOTWIN_CAMERA_KEYS, encoded_images, strict=True)
-        }
-        observation = LingBotVlaV2Observation(task=request.task, state=request.state, images=images)
         with self._inference_lock:
-            chunk = self.pipeline(observation, seed=request.seed)
-        return LingBotVlaV2ActionResponse(
-            canonical_normalized_actions=chunk.canonical_normalized_actions.tolist(),
-            horizon=chunk.horizon,
-            action_dim=chunk.action_dim,
-            checkpoint_variant=chunk.checkpoint_variant,
-            policy_verified=chunk.policy_verified,
-            verification_status=chunk.verification_status,
-        )
+            return predict_lingbot_vla_v2_action(self.pipeline, request, max_image_bytes=self.config.max_image_bytes)
 
     def close(self) -> None:
         """Release model resources during application shutdown."""

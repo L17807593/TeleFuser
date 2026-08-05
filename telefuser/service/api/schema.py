@@ -65,6 +65,23 @@ class TaskStatusMessage(BaseModel):
     task_id: str = Field(..., description="Task ID")
 
 
+class StructuredTaskRequest(BaseModel):
+    """Request model for JSON-serializable inference results."""
+
+    model_config = ConfigDict(extra="allow")
+
+    task_id: str = Field(default_factory=generate_task_id, description="Task ID (auto-generated)")
+    task: str = Field(..., description="Structured task type declared by the pipeline contract")
+
+    @field_validator("task")
+    @classmethod
+    def validate_task(cls: type["StructuredTaskRequest"], value: str) -> str:
+        return validate_task_name_format(value)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+
 class TaskResponse(BaseModel):
     """Response model for task creation."""
 
@@ -80,3 +97,10 @@ class StopTaskResponse(BaseModel):
 
     stop_status: StopTaskStatus
     reason: str
+
+
+class StructuredTaskResponse(BaseModel):
+    """Response returned when a structured task is accepted."""
+
+    task_id: str
+    task_status: TaskStatus

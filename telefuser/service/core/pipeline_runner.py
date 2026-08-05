@@ -144,6 +144,8 @@ class PipelineRunner:
             await self._pipeline.astop()
         elif hasattr(self._pipeline, "stop"):
             await asyncio.to_thread(self._pipeline.stop)
+        elif hasattr(self._pipeline, "close"):
+            await asyncio.to_thread(self._pipeline.close)
 
         self._started = False
 

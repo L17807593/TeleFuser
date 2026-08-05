@@ -10,6 +10,7 @@ from typing import Any
 
 VIDEO_TASKS = frozenset({"t2v", "i2v", "fl2v", "vc", "s2v", "vsr"})
 IMAGE_TASKS = frozenset({"t2i", "i2i", "edit"})
+STRUCTURED_TASKS = frozenset({"vla_action"})
 TASK_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 
 
@@ -257,6 +258,8 @@ def _derive_media_types_from_tasks(tasks: tuple[str, ...]) -> list[str]:
         media_types.append("video")
     if any(task in IMAGE_TASKS for task in tasks):
         media_types.append("image")
+    if any(task in STRUCTURED_TASKS for task in tasks):
+        media_types.append("structured")
     if not media_types:
         media_types.append("unknown")
     return media_types
@@ -336,4 +339,6 @@ def infer_media_type_for_task(task: str) -> str:
         return "image"
     if is_video_task(task):
         return "video"
+    if task in STRUCTURED_TASKS:
+        return "structured"
     return "video"

@@ -102,6 +102,65 @@ The response contains `canonical_normalized_actions`, `horizon`, `action_dim`, `
 `policy_verified`, and `verification_status`. A successful HTTP response confirms service and model execution only;
 the normalized base-model output is not a physical robot command.
 
+## Native TeleFuser Service
+
+The native service uses the shared `PIPELINE_CONTRACT`, asynchronous task scheduler, pipeline pool, status API, runtime
+metrics, and `TFClient`. It keeps the standalone endpoint above as a small debugging path.
+
+The example resolves checkpoints under the existing `TF_MODEL_ZOO_PATH` layout:
+
+- `lingbot/lingbot-vla-v2-6b`
+- `Qwen3-VL-4B-Instruct`
+
+Start one replica on one visible GPU:
+
+```bash
+TF_MODEL_ZOO_PATH=/hhb-data/aigc/model_zoo \
+  .venv-vla/bin/telefuser serve \
+  examples/lingbot_vla_v2/lingbot_vla_v2_native_service.py \
+  --task vla_action \
+  --parallelism 1 \
+  --host 127.0.0.1 \
+  --port 18080
+```
+
+Submit `POST /v1/tasks/structured` with `task="vla_action"`, an `instruction`, the 14-dimensional `state`, and
+the three Base64 camera fields. The creation response contains a task ID. Poll
+`GET /v1/tasks/{task_id}/status`; a completed response contains the action payload under `result` and includes
+`inference_time_s` and the optional `peak_memory_mb`.
+
+The unified client handles image encoding, submission, polling, and result extraction:
+
+```python
+from telefuser.client import TFClient
+
+client = TFClient("http://127.0.0.1:18080")
+actions = client.predict_vla_actions(
+    instruction="pick up the red block",
+    state=[0.0] * 14,
+    camera_high_path="/data/cam_high.png",
+    camera_left_wrist_path="/data/cam_left_wrist.png",
+    camera_right_wrist_path="/data/cam_right_wrist.png",
+    seed=7,
+)
+print(actions["horizon"], actions["action_dim"])
+```
+
+For independent replicas, expose one GPU per replica through the existing pipeline pool:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 TF_MODEL_ZOO_PATH=/hhb-data/aigc/model_zoo \
+  .venv-vla/bin/telefuser serve \
+  examples/lingbot_vla_v2/lingbot_vla_v2_native_service.py \
+  --task vla_action \
+  --parallelism 2 \
+  --num-replicas 2 \
+  --port 18080
+```
+
+This is request-level replication, not tensor parallelism inside one policy replica. The response remains a normalized
+base-model canonical action chunk and must not be treated as a physical robot command.
+
 ## TeleFuser Regression Baseline
 
 The validation capture runs through the public loader and pipeline, then records preprocessing tensors, fixed initial
