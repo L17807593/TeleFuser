@@ -163,6 +163,17 @@ python examples/wan_video/wan21_1_3b_text_to_video_radial.py \
 - Reduced memory usage for long videos
 - Requires flashinfer or sageattention backend
 
+Wan2.1 also supports Sol-Attn through the same attention configuration:
+
+```python
+from telefuser.core.config import AttentionConfig
+
+pipe_config.dit_config.attention_config = AttentionConfig.sol_attention()
+```
+
+Sol-Attn is built into TeleFuser. Eligible BF16 self-attention calls use the sparse kernel; unsupported calls
+automatically use the existing dense fallback. The defaults follow the official Wan2.1 profile: Morton3D token ordering, dense layer 0, and 10 dense warm-up steps for the standard 50-step schedule.
+
 #### wan21_1_3b_text_to_video_cache_calibrate.py
 
 Calibration tool for AdaTaylorCache.

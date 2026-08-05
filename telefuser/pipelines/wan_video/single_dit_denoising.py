@@ -193,10 +193,11 @@ class SingleDitDenoisingStage(BaseStage):
             if ref_latent is not None:
                 input_latent = torch.cat([input_latent, ref_latent], dim=1)
 
-            # Create sparse_state if radial attention is enabled
+            # Create sparse state when the configured attention backend needs it.
             sparse_state = None
             if has_sparse_attention:
-                numeral_timestep = num_inference_steps - progress_id - 1
+                sparse_impl = self.dit.sparse_attention_state.config.sparse_impl
+                numeral_timestep = progress_id if sparse_impl == "sol" else num_inference_steps - progress_id - 1
                 sparse_state = self.dit.create_sparse_state(
                     numeral_timestep=numeral_timestep,
                     layer_idx=0,  # Updated per layer in forward_blocks

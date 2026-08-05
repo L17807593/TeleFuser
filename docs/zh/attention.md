@@ -31,6 +31,7 @@ class AttnImplType(Enum):
     # 稀疏注意力
     RADIAL_ATTN = auto()
     LOCAL_SPARSE_ATTN = auto()
+    SOL_ATTN = auto()
 ```
 
 ### AttentionConfig
@@ -51,6 +52,7 @@ class AttentionConfig:
 - `AttentionConfig.dense_attention(attn_impl)` - 创建密集注意力配置
 - `AttentionConfig.radial_attention(**kwargs)` - 创建径向稀疏注意力配置
 - `AttentionConfig.local_sparse_attention(**kwargs)` - 创建局部稀疏注意力配置
+- `AttentionConfig.sol_attention(**kwargs)` - 创建动态 Sol-Attn 配置
 
 ### SparseAttentionConfig
 
@@ -59,13 +61,16 @@ class AttentionConfig:
 ```python
 @dataclass
 class SparseAttentionConfig:
-    sparse_impl: str | None = None           # "radial", "local" 等
+    sparse_impl: str | None = None           # "radial", "local", "sol" 等
     dense_timesteps: int = 40               # 初始时间步使用密集注意力
     dense_layers: int = 0                   # 初始层使用密集注意力
     decay_factor: float = 1.0               # 注意力窗口衰减因子
     local_window_size: int = 6              # 局部稀疏注意力窗口大小
     block_size: int = 128                   # 稀疏计算块大小
     use_sage_attention: bool = False        # 使用 sage attention 后端
+    sol_tau: float = 1.0                    # Sol-Attn 路由阈值
+    sol_threshold_type: str = "diag"        # "diag" 或 "exact"
+    sol_kv_splits: int | str = "auto"       # "auto"、1、2 或 4
 ```
 
 ## 调用流程
@@ -155,12 +160,12 @@ else:
 
 ## Pipeline 支持情况
 
-| Pipeline | 密集注意力 | 稀疏 (径向) | 说明 |
-|----------|-----------|------------|------|
-| `Wan21VideoPipeline` | ✅ | ✅ | 视频生成完整支持 |
-| `Wan22VideoPipeline` | ✅ | ✅ | 视频生成完整支持 |
-| `QwenImagePipeline` | ✅ | ❌ | 图像生成不需要时序稀疏注意力 |
-| `ZImagePipeline` | ✅ | ❌ | 图像生成不需要时序稀疏注意力 |
+| Pipeline | 密集注意力 | Radial | Sol-Attn | 说明 |
+|----------|-----------|--------|----------|------|
+| `Wan21VideoPipeline` | 支持 | 支持 | 实验性 | Sol-Attn 用于满足约束的 self-attention |
+| `Wan22VideoPipeline` | 支持 | 支持 | 不支持 | 尚未接入 Wan2.2 |
+| `QwenImagePipeline` | 支持 | 不支持 | 不支持 | 图像生成不需要时序稀疏注意力 |
+| `ZImagePipeline` | 支持 | 不支持 | 不支持 | 图像生成不需要时序稀疏注意力 |
 
 ### Wan21VideoPipeline / Wan22VideoPipeline
 
@@ -184,6 +189,17 @@ pipe_config.dit_config.attention_config = config
 2. 使用 `MaskMap` 创建 `SparseAttentionState`
 3. 在去噪循环中每时间步/层更新状态
 4. 早期时间步/层自动回退到密集注意力
+
+Wan2.1 可以通过同一配置入口启用 Sol-Attn：
+
+```python
+config = AttentionConfig.sol_attention()
+pipe_config.dit_config.attention_config = config
+```
+
+Sol-Attn 仅用于连续、非因果、BF16、Q/K/V 形状相同且 head dimension 为 128 的
+self-attention。其他调用、dense 预热层/时间步以及内核运行失败都会回退到现有密集路径。
+Ring/USP 需要 LSE 做在线合并，因此仍使用支持 LSE 的密集后端。
 
 ### QwenImagePipeline / ZImagePipeline
 
@@ -218,8 +234,13 @@ pipe_config.dit_config.attention_config = config
 |------|------|------|
 | `RADIAL_ATTN` | 视频径向注意力 | `flashinfer` 或 `sageattention` (优先使用 tf-kernel) |
 | `LOCAL_SPARSE_ATTN` | 局部窗口稀疏注意力 | `block_sparse_attn` |
+| `SOL_ATTN` | 动态块稀疏视频注意力 | 内置；BF16、head dimension 128、SM80+ |
 
 **SageAttention 优先级说明**: 当设置 `use_sage_attention=True` 时，如果 tf-kernel 和独立的 `sageattention` 包都可用，系统将优先使用 tf-kernel 的 sageattention 实现。这提供了更好的性能和与 TeleFuser 内核库的集成。
+
+**Sol-Attn 打包方式**：Sol-Attn 随 TeleFuser 发布，位于 `telefuser.kernel.sol_attn`，不依赖
+`tf-kernel`。上游运行时要求 PyTorch 2.10+、CUDA 12.8+ 和 Triton 3.6+。可选 CuTe DSL runtime
+可用时选择专用内核，否则 SM80+ 使用 Triton 实现。
 
 ### 安装 Sparge Attention
 
@@ -426,6 +447,7 @@ print(f"FlashInfer: {FLASHINFER_AVAILABLE}")
 | Flash Attention 4 | 从源码编译（cute 接口） | SM90+ (H100, B100/B200) |
 | SageAttention | tf-kernel 或 [官方源码](https://github.com/thu-ml/SageAttention) | SM80+ |
 | Radial Attention | tf-kernel 或 [FlashInfer 源码](https://github.com/flashinfer-ai/flashinfer) | SM80+ |
+| Sol-Attn | TeleFuser 内置 | SM80+；支持的 SM90/100 使用 CuTe，否则回退 Triton |
 | Block Sparse | tf-kernel 或 [官方源码](https://github.com/mit-han-lab/Block-Sparse-Attention) | SM80+ |
 | Sparge Attention | 从源码安装（见上文） | SM80, SM86, SM89, SM90 |
 

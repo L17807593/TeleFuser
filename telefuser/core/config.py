@@ -130,23 +130,35 @@ class AttnImplType(Enum):
     # Sparse attention implementations
     RADIAL_ATTN = auto()  # Radial attention for video generation
     LOCAL_SPARSE_ATTN = auto()  # Local window sparse attention
+    SOL_ATTN = auto()  # Dynamic on-the-fly sparse attention for video generation
 
 
 @dataclass
 class SparseAttentionConfig:
     """Configuration for sparse attention implementations.
 
-    Used with radial or local sparse attention to reduce memory usage
+    Used with radial, local, or Sol sparse attention to reduce memory usage
     for long sequences like videos.
     """
 
-    sparse_impl: str | None = None  # "radial", "local", or None
+    sparse_impl: str | None = None  # "radial", "local", "sol", or None
     dense_timesteps: int = 40  # Initial timesteps to use dense attention
     dense_layers: int = 0  # Initial layers to use dense attention
     decay_factor: float = 1.0  # Decay for radial attention window
     local_window_size: int = 6  # Window size for local attention
     block_size: int = 128  # Block size for sparse computation
     use_sage_attention: bool = False  # Use sage attention backend
+    sol_tau: float = 1.0  # Sol-Attn routing threshold multiplier
+    sol_threshold_type: str = "diag"  # Sol-Attn threshold estimator: "diag" or "exact"
+    sol_kv_splits: int | str = "auto"  # Auto selects split 4 for long SM90 sequences
+
+    def __post_init__(self) -> None:
+        if self.sparse_impl != "sol":
+            return
+        if self.sol_threshold_type not in ("diag", "exact"):
+            raise ValueError("Sol-Attn threshold type must be 'diag' or 'exact'")
+        if self.sol_kv_splits not in ("auto", 1, 2, 4):
+            raise ValueError("Sol-Attn KV splits must be 'auto', 1, 2, or 4")
 
     def should_use_dense(self, numeral_timestep: int, layer_idx: int) -> bool:
         """Check if dense attention should be used for current step/layer.
@@ -210,13 +222,41 @@ class AttentionConfig:
         )
 
     @classmethod
+    def sol_attention(
+        cls,
+        dense_timesteps: int = 10,
+        dense_layers: int = 1,
+        tau: float = 1.0,
+        threshold_type: str = "diag",
+        kv_splits: int | str = "auto",
+        **kwargs: any,
+    ) -> AttentionConfig:
+        """Create a Sol-Attn config for dynamic sparse video self-attention."""
+        return cls(
+            attn_impl=AttnImplType.SOL_ATTN,
+            sparse_config=SparseAttentionConfig(
+                sparse_impl="sol",
+                dense_timesteps=dense_timesteps,
+                dense_layers=dense_layers,
+                sol_tau=tau,
+                sol_threshold_type=threshold_type,
+                sol_kv_splits=kv_splits,
+            ),
+            **kwargs,
+        )
+
+    @classmethod
     def dense_attention(cls, attn_impl: AttnImplType = AttnImplType.FLASH_ATTN_2, **kwargs: any) -> AttentionConfig:
         """Create config for dense attention."""
         return cls(attn_impl=attn_impl, sparse_config=None, **kwargs)
 
     def is_sparse(self) -> bool:
-        """Check if using sparse attention (radial or local)."""
-        return self.attn_impl in (AttnImplType.RADIAL_ATTN, AttnImplType.LOCAL_SPARSE_ATTN)
+        """Check if using a sparse attention implementation."""
+        return self.attn_impl in (
+            AttnImplType.RADIAL_ATTN,
+            AttnImplType.LOCAL_SPARSE_ATTN,
+            AttnImplType.SOL_ATTN,
+        )
 
     def should_use_dense(self, numeral_timestep: int, layer_idx: int) -> bool:
         """Check if dense attention should be used for current step/layer."""
