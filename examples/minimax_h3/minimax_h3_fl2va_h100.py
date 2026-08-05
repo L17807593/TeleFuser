@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from telefuser.core.config import AttnImplType
 from telefuser.pipelines.minimax_h3.example_utils import (
     MINIMAX_H3_DEFAULT_FL2VA_IMAGE,
     load_minimax_h3_pipeline,
@@ -31,6 +32,7 @@ PPL_CONFIG: dict[str, Any] = {
     "audio_flow_shift": None,
     "device": "cuda:0",
     "enable_fsdp": None,
+    "attn_impl": AttnImplType.FLASH_ATTN_4,
 }
 
 
@@ -75,6 +77,7 @@ def get_pipeline(
     device: str = PPL_CONFIG["device"],
     num_inference_steps: int = PPL_CONFIG["num_inference_steps"],
     enable_fsdp: bool | None = PPL_CONFIG["enable_fsdp"],
+    attn_impl: AttnImplType | str = PPL_CONFIG["attn_impl"],
 ) -> MiniMaxH3Pipeline:
     """Load the FL2VA checkpoint partition for one, two, or four GPUs."""
     tp_degree = 2 if parallelism == 4 else 1
@@ -87,6 +90,7 @@ def get_pipeline(
         tp_degree=tp_degree,
         text_encoder_tp_degree=parallelism,
         enable_fsdp=enable_fsdp,
+        attn_impl=attn_impl,
     )
 
 

@@ -115,6 +115,31 @@ def test_save_output_writes_tensor_video(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert saved_frames[0].dtype == np.uint8
 
 
+def test_save_output_accepts_file_entrypoint_artifact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    artifact = tmp_path / "joint-audio-video.mp4"
+    artifact.write_bytes(b"artifact")
+
+    class FakeVideoData:
+        width = 1360
+        height = 768
+
+        def __init__(self, video_file: str) -> None:
+            assert video_file == str(artifact)
+
+        def __len__(self) -> int:
+            return 121
+
+    from telefuser.utils import video as video_utils
+
+    monkeypatch.setattr(video_utils, "VideoData", FakeVideoData)
+
+    path, frames, resolution = run_examples._save_output({"output_path": str(artifact)}, str(tmp_path), "video")
+
+    assert path == str(artifact)
+    assert frames == 121
+    assert resolution == "1360x768"
+
+
 def test_call_get_pipeline_forwards_matching_config_overrides() -> None:
     module = ModuleType("pipeline_config_example")
 
@@ -152,6 +177,24 @@ def test_call_run_preserves_missing_negative_prompt_default() -> None:
     module.run = run
 
     assert run_examples._call_run(module, object(), {"target_video_length": 2}) == (None, 2)
+
+
+def test_call_run_supports_standard_file_entrypoint() -> None:
+    module = ModuleType("file_example")
+
+    def run_with_file(pipeline: object, output_path: str, target_video_length: float) -> dict[str, str]:
+        del pipeline
+        assert target_video_length == 5
+        return {"output_path": output_path}
+
+    module.run_with_file = run_with_file
+
+    assert run_examples._call_run(
+        module,
+        object(),
+        {"output_path": "/tmp/result.mp4", "target_video_length": 5},
+        entrypoint="run_with_file",
+    ) == {"output_path": "/tmp/result.mp4"}
 
 
 def test_video_metrics_rejects_mismatched_frame_counts(monkeypatch: pytest.MonkeyPatch) -> None:

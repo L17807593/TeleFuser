@@ -233,6 +233,32 @@ enabled for H3. Video-VAE parallelism is spatial tiling over the existing TP pro
 parallelism. The dedicated service manifests expose the pipeline without adding framework-level configuration fields
 or changing the shared request schema.
 
+## Four-GPU Regression
+
+The example regression registry includes `minimax_h3_t2va_4gpu`, a 768p, five-second, 50-step T2VA request with seed
+0. It reserves four GPUs and uses the resident Ulysses2 x TP2 profile. Regression runs force packed PyTorch SDPA,
+matching the repository-wide deterministic regression policy; ordinary example and service execution still defaults
+to packed FlashAttention 4. The standard file entrypoint preserves synchronized video and audio in the baseline MP4.
+
+Initialize or intentionally replace the local ignored baseline:
+
+```bash
+TF_MODEL_ZOO_PATH=/path/to/model_zoo \
+python examples/run_examples.py \
+  --pipeline minimax_h3_t2va_4gpu \
+  --gpus 0,1,2,3 \
+  --update-baseline
+```
+
+Run the regression against that baseline:
+
+```bash
+TF_MODEL_ZOO_PATH=/path/to/model_zoo \
+python examples/run_examples.py \
+  --pipeline minimax_h3_t2va_4gpu \
+  --gpus 0,1,2,3
+```
+
 ## Measured Four-GPU Profile
 
 On the frozen 768p, five-second, 50-step T2VA request, after one warmup, the resident four-H100 profile measured
