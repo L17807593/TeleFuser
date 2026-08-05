@@ -116,7 +116,7 @@ class MiniMaxH3TextEncodingStage(BaseStage):
         videos: list[torch.Tensor],
         condition_labels: list[tuple[str, int]],
     ) -> dict[str, torch.Tensor]:
-        """Keep text conditioning on the producer device for direct worker handoff."""
+        """Keep hidden states on the producer device while transporting control metadata on CPU."""
         condition = self._encode_impl(
             task=task,
             prompt=prompt,
@@ -126,7 +126,7 @@ class MiniMaxH3TextEncodingStage(BaseStage):
         )
         return {
             "hidden_states": condition.hidden_states,
-            "token_tags": condition.token_tags.to(condition.hidden_states.device),
+            "token_tags": condition.token_tags.cpu(),
         }
 
     def _encode_impl(

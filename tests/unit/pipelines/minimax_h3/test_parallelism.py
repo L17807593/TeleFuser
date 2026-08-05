@@ -116,6 +116,35 @@ def test_parallel_models_rejects_tp_with_fsdp() -> None:
         stage.parallel_models()
 
 
+def test_text_encoder_direct_handoff_keeps_token_tags_on_cpu() -> None:
+    manager = MagicMock()
+    manager.fetch_module.return_value = MagicMock()
+    stage = MiniMaxH3TextEncodingStage(
+        manager,
+        ModelRuntimeConfig(device_type="cpu"),
+        processor=MagicMock(),
+    )
+    stage.onload_models_flag = True
+    condition = MagicMock()
+    hidden_states = torch.zeros(2, 4)
+    cpu_tags = torch.tensor([1, 1])
+    condition.hidden_states = hidden_states
+    condition.token_tags.cpu.return_value = cpu_tags
+
+    with patch.object(stage, "_encode_impl", return_value=condition):
+        result = stage.encode_for_denoising(
+            task="t2va",
+            prompt="move",
+            images=[],
+            videos=[],
+            condition_labels=[],
+        )
+
+    assert result["hidden_states"] is hidden_states
+    assert result["token_tags"] is cpu_tags
+    condition.token_tags.cpu.assert_called_once_with()
+
+
 def test_text_encoder_parallel_models_enables_fsdp_residency() -> None:
     encoder = MagicMock()
     encoder.get_fsdp_module_names.return_value = ["fsdp_language_layers"]

@@ -274,6 +274,10 @@ class MiniMaxH3DenoisingStage(BaseStage):
 
         token_tags = packed["token_tags"].clone()
         token_tags[: text.text_len] = text.token_tags
+        if bool(((token_tags < -1) | (token_tags >= 3)).any().item()):
+            raise ValueError(
+                "MiniMax H3 token_tags must contain only padding (-1), video (0), text (1), or audio (2) values"
+            )
         condition_shapes = [
             (condition.latent_t, condition.latent_h, condition.latent_w)
             for condition in conditions
