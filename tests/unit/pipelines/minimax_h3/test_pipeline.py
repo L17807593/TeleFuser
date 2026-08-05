@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from telefuser.core.config import ModelRuntimeConfig, ParallelConfig, WeightOffloadType
+from telefuser.core.config import AttnImplType, ModelRuntimeConfig, ParallelConfig, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
 from telefuser.pipelines.minimax_h3.data import minimax_h3_validate_canonical_request
 from telefuser.pipelines.minimax_h3.denoising import MiniMaxH3DenoisingStage
@@ -187,6 +187,34 @@ def test_t2va_denoising_stage_runs_complete_packed_contract_on_cpu() -> None:
     assert result.runtime_metrics["peak_allocated_bytes"] == 0
     assert result.runtime_metrics["peak_reserved_bytes"] == 0
     assert result.runtime_metrics["communication_seconds"] == 0.0
+
+
+def test_denoising_rejects_corrupt_transported_token_tags() -> None:
+    manager = ModuleManager(device="cpu")
+    manager.add_module(_ZeroVelocityDiT(), "minimax_h3_transformer")
+    stage = MiniMaxH3DenoisingStage(
+        manager,
+        ModelRuntimeConfig(device_type="cpu", torch_dtype=torch.float32),
+    )
+    canonical = minimax_h3_validate_canonical_request(
+        task="t2va",
+        prompt="move",
+        conditions=[],
+        target={"short_edge": 768, "aspect_ratio": "1:1", "duration_seconds": 4.0},
+        seed=0,
+    )
+    text = MiniMaxH3TextCondition(
+        hidden_states=torch.zeros(3, 5120, dtype=torch.bfloat16),
+        token_tags=torch.tensor([1, 2**62, 1], dtype=torch.long),
+    )
+
+    with pytest.raises(ValueError, match="token_tags must contain only"):
+        stage.denoise(
+            plan=minimax_h3_resolve_plan(canonical),
+            text=text,
+            conditions=[],
+            num_inference_steps=2,
+        )
 
 
 def test_trajectory_stage_captures_selected_boundaries_without_changing_result(tmp_path: Path) -> None:
@@ -423,6 +451,7 @@ def test_example_loader_allows_release_length_parallel_denoising(
         ulysses_degree=2,
         tp_degree=2,
         text_encoder_tp_degree=4,
+        attn_impl="TORCH_SDPA",
     )
 
     config = captured["config"]
@@ -430,6 +459,7 @@ def test_example_loader_allows_release_length_parallel_denoising(
     assert config.dit_config.parallel_config.sp_ulysses_degree == 2
     assert config.dit_config.parallel_config.tp_degree == 2
     assert config.dit_config.parallel_config.enable_fsdp is False
+    assert config.dit_config.attention_config.attn_impl is AttnImplType.TORCH_SDPA
     assert config.dit_config.offload_config.offload_type is WeightOffloadType.NO_CPU_OFFLOAD
     assert config.text_encoder_config.parallel_config.sp_ulysses_degree == 1
     assert config.text_encoder_config.parallel_config.tp_degree == 4

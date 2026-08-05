@@ -365,6 +365,8 @@ python examples/run_examples.py --all
 | prompt | str\|null | null | 覆盖生成提示词 |
 | input_image_path | str\|null | null | I2V/编辑 pipeline 的输入图像 |
 | input_video_path | str\|null | null | VSR/续写 pipeline 的输入视频 |
+| target_video_length | float\|null | null | 示例支持时覆盖生成时长 |
+| use_run_with_file | bool | false | 使用标准文件入口，保留音轨等容器级输出 |
 | ppl_config_overrides | dict | {} | 覆盖 PPL_CONFIG 配置 |
 | psnr_min | float | 25.0 | 视频：最低 PSNR 阈值 |
 | ssim_min | float | 0.85 | 视频：最低 SSIM 阈值 |

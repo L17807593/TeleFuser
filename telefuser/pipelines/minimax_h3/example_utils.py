@@ -107,6 +107,7 @@ def load_minimax_h3_pipeline(
     tp_degree: int = 1,
     text_encoder_tp_degree: int | None = None,
     enable_fsdp: bool | None = None,
+    attn_impl: AttnImplType | str = AttnImplType.FLASH_ATTN_4,
 ) -> MiniMaxH3Pipeline:
     if partition not in {"FL2VA", "Ref2VA"}:
         raise ValueError("partition must be 'FL2VA' or 'Ref2VA'")
@@ -123,6 +124,11 @@ def load_minimax_h3_pipeline(
     resolved_enable_fsdp = world_size == 4 and tp_degree == 1 if enable_fsdp is None else enable_fsdp
     if resolved_enable_fsdp and (world_size == 1 or tp_degree > 1):
         raise ValueError("enable_fsdp requires multi-GPU sequence parallelism without tensor parallelism")
+    if isinstance(attn_impl, str):
+        try:
+            attn_impl = AttnImplType[attn_impl]
+        except KeyError as exc:
+            raise ValueError(f"unsupported attention implementation: {attn_impl}") from exc
     component_root = Path(model_root) / partition
     if not component_root.is_dir():
         raise FileNotFoundError(f"MiniMax H3 partition not found: {component_root}")
@@ -160,7 +166,7 @@ def load_minimax_h3_pipeline(
         device_id=runtime_device.index or 0,
         torch_dtype=torch.bfloat16,
         offload_config=resident_offload,
-        attention_config=AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_4),
+        attention_config=AttentionConfig.dense_attention(attn_impl),
         parallel_config=ParallelConfig(
             device_ids=list(range(world_size)),
             sp_ulysses_degree=ulysses_degree,

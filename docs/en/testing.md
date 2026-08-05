@@ -365,6 +365,8 @@ If not set, defaults to `"model_zoo"` (relative to working directory).
 | prompt | str\|null | null | Override generation prompt |
 | input_image_path | str\|null | null | Input image for I2V/edit pipelines |
 | input_video_path | str\|null | null | Input video for VSR/continue pipelines |
+| target_video_length | float\|null | null | Override generated duration when the example accepts it |
+| use_run_with_file | bool | false | Use the standard file entrypoint to preserve container-level output such as audio tracks |
 | ppl_config_overrides | dict | {} | Override PPL_CONFIG keys |
 | psnr_min | float | 25.0 | Video: minimum PSNR vs baseline |
 | ssim_min | float | 0.85 | Video: minimum SSIM vs baseline |

@@ -15,6 +15,7 @@ from examples.minimax_h3.common import (
 )
 from examples.minimax_h3.minimax_h3_fl2va_h100 import build_fl2va_conditions
 from examples.minimax_h3.minimax_h3_ref2va_h100 import default_ref2va_conditions
+from telefuser.core.config import AttnImplType
 from telefuser.service.core.pipeline_contract import PipelineContract
 
 
@@ -94,6 +95,7 @@ def test_standard_get_pipeline_forwards_parallel_runtime_options(monkeypatch: py
                 "tp_degree": 2,
                 "text_encoder_tp_degree": 4,
                 "enable_fsdp": True,
+                "attn_impl": AttnImplType.FLASH_ATTN_4,
             },
         )
     ]

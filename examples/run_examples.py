@@ -698,6 +698,8 @@ class PipelineConfig:
     first_image_path: str | None = None
     last_image_path: str | None = None
     input_video_path: str | None = None
+    target_video_length: float | None = None
+    use_run_with_file: bool = False
     ppl_config_overrides: dict = field(default_factory=dict)
     # Regression thresholds
     psnr_min: float = 25.0
@@ -863,9 +865,15 @@ def _call_get_pipeline(module: ModuleType, config: dict) -> object:
     return func(**kwargs)
 
 
-def _call_run(module: ModuleType, pipeline: object, config: dict) -> object:
-    """Call run() with arguments matched by signature inspection."""
-    func = module.run
+def _call_run(
+    module: ModuleType,
+    pipeline: object,
+    config: dict,
+    *,
+    entrypoint: str = "run",
+) -> object:
+    """Call an example run entrypoint with arguments matched by signature inspection."""
+    func = getattr(module, entrypoint)
     params = list(inspect.signature(func).parameters.keys())
     kwargs: dict = {"pipeline": pipeline}
 
@@ -1007,6 +1015,19 @@ def _save_output(
     if output is None:
         return None, None, None
 
+    if isinstance(output, dict) and isinstance(output.get("output_path"), (str, os.PathLike)):
+        output_path = os.fspath(output["output_path"])
+        if not os.path.isfile(output_path):
+            raise FileNotFoundError(f"Example file entrypoint did not produce {output_path}")
+        if output_type == "video":
+            from telefuser.utils.video import VideoData
+
+            video = VideoData(video_file=output_path)
+            return output_path, len(video), f"{video.width}x{video.height}"
+        if output_type == "image":
+            with Image.open(output_path) as image:
+                return output_path, 1, f"{image.width}x{image.height}"
+
     # Use custom filename or default
     default_name = f"output.{('mp4' if output_type == 'video' else 'png')}"
     output_filename = filename or default_name
@@ -1133,6 +1154,7 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
         "first_image_path": ppl_cfg.first_image_path,
         "last_image_path": ppl_cfg.last_image_path,
         "input_video_path": ppl_cfg.input_video_path,
+        "target_video_length": ppl_cfg.target_video_length,
         "ppl_config_overrides": ppl_config_overrides,
         "script": ppl_cfg.script,  # Pass script for filename generation
     }
@@ -1142,6 +1164,7 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
     pipeline = None
     gpu_mem_peak = 0.0
     start = time.time()
+    temp_dir = os.path.join(output_root, "temp", timestamp)
 
     # Phase 1: Model Loading
     try:
@@ -1169,7 +1192,15 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
                 torch.cuda.synchronize()
                 torch.cuda.reset_peak_memory_stats()
 
-            output = _call_run(module, pipeline, runner_config)
+            if ppl_cfg.use_run_with_file:
+                if not callable(getattr(module, "run_with_file", None)):
+                    raise AttributeError(f"{ppl_cfg.script} does not expose run_with_file()")
+                extension = "mp4" if ppl_cfg.output_type == "video" else "png"
+                os.makedirs(temp_dir, exist_ok=True)
+                runner_config["output_path"] = os.path.join(temp_dir, f"output.{extension}")
+                output = _call_run(module, pipeline, runner_config, entrypoint="run_with_file")
+            else:
+                output = _call_run(module, pipeline, runner_config)
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -1200,7 +1231,6 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
         output_fps = ppl_config.get("target_fps", ppl_config.get("fps", 15))
 
         # First save to temp location to get resolution
-        temp_dir = os.path.join(output_root, "temp", timestamp)
         try:
             temp_path, num_frames, resolution = _save_output(output, temp_dir, ppl_cfg.output_type, fps=output_fps)
         except Exception as e:
