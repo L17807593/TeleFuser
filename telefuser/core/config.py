@@ -353,7 +353,6 @@ class QuantKernelBackend(Enum):
 
     AUTO = auto()  # Auto-select best available
     TF_KERNEL = auto()  # TeleFuser custom kernel
-    VLLM = auto()  # vLLM kernel
     CUTLASS = auto()  # NVIDIA CUTLASS
     TORCHAO = auto()  # TorchAO quantization backends
     BITSANDBYTES = auto()  # bitsandbytes quantization backends

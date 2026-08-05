@@ -95,7 +95,7 @@ The full example is `examples/qwen_image/qwen_image_t2i_telefuser_nf4_h100.py`. 
 
 ## Scaled FP8 checkpoints: W8A8
 
-This path is different from TorchAO. A compatible checkpoint already contains E4M3FN weights and a scale for each output channel. `LinearFP8` dynamically quantizes every input row to FP8, then calls a scaled GEMM through `tf_kernel` or vLLM/CUTLASS. The output returns to BF16 or FP16.
+This path is different from TorchAO. A compatible checkpoint already contains E4M3FN weights and a scale for each output channel. `LinearFP8` dynamically quantizes every input row to FP8, then calls a scaled GEMM through `tf_kernel`. The output returns to BF16 or FP16.
 
 For each row, scaled FP8 follows the same absmax idea:
 
@@ -145,7 +145,7 @@ must implement the same layout and GEMM.
 
 ## Other quantized data paths
 
-- **LiveAct FP8:** wraps Linear layers with vLLM-style dynamic W8A8 GEMM. Weights are cached in FP8 and activations are quantized per token.
+- **LiveAct FP8:** wraps Linear layers with `tf_kernel` dynamic W8A8 GEMM. Weights are cached in FP8 and activations are quantized per token.
 - **LingBot-Video MoE FP8:** quantizes expert weights per output channel and routed activations per row, then uses `torch._scaled_mm`.
 - **SageAttention:** all three TeleFuser variants quantize Q/K to INT8. `2_8_16` uses FP16 P/V, while `2_8_8` and its SM90 variant use FP8 P/V. These kernels do not change model weights.
 - **LiveAct FP8 KV cache:** stores K/V as E4M3FN with one FP32 scale per last-dimension vector, then dequantizes to the requested attention dtype on load.

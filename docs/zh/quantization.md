@@ -94,7 +94,7 @@ quant_config = QuantConfig(
 
 ## Scaled FP8 checkpoint：W8A8
 
-这条路径与 TorchAO 不同。兼容的 checkpoint 已经包含 E4M3FN 权重和逐输出通道 scale。`LinearFP8` 在每次 forward 时把输入逐行量化为 FP8，再通过 `tf_kernel` 或 vLLM/CUTLASS 执行 scaled GEMM，输出恢复为 BF16 或 FP16。
+这条路径与 TorchAO 不同。兼容的 checkpoint 已经包含 E4M3FN 权重和逐输出通道 scale。`LinearFP8` 在每次 forward 时把输入逐行量化为 FP8，再通过 `tf_kernel` 执行 scaled GEMM，输出恢复为 BF16 或 FP16。
 
 每一行的 scaled FP8 同样使用 absmax：
 
@@ -143,7 +143,7 @@ python tools/convert/converter.py \
 
 ## 其他量化数据路径
 
-- **LiveAct FP8：** 使用 vLLM 风格的动态 W8A8 GEMM；权重缓存为 FP8，激活逐 token 量化。
+- **LiveAct FP8：** 使用 `tf_kernel` 动态 W8A8 GEMM；权重缓存为 FP8，激活逐 token 量化。
 - **LingBot-Video MoE FP8：** expert 权重逐输出通道量化，路由后的激活逐行量化，再调用 `torch._scaled_mm`。
 - **SageAttention：** TeleFuser 的三个变体都把 Q/K 量化为 INT8；`2_8_16` 使用 FP16 P/V，`2_8_8` 及其 SM90 变体使用 FP8 P/V。这些 kernel 不修改模型权重。
 - **LiveAct FP8 KV cache：** K/V 保存为 E4M3FN，每个末维向量使用一个 FP32 scale；加载时反量化为注意力请求的 dtype。
