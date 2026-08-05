@@ -238,7 +238,8 @@ or changing the shared request schema.
 The example regression registry includes `minimax_h3_t2va_4gpu`, a 768p, five-second, 50-step T2VA request with seed
 0. It reserves four GPUs and uses the resident Ulysses2 x TP2 profile. Regression runs force packed PyTorch SDPA,
 matching the repository-wide deterministic regression policy; ordinary example and service execution still defaults
-to packed FlashAttention 4. The standard file entrypoint preserves synchronized video and audio in the baseline MP4.
+to packed FlashAttention 4. The standard file entrypoint preserves synchronized video and audio in the baseline MP4;
+regression additionally validates the audio stream contract, duration, and decoded waveform similarity.
 
 Initialize or intentionally replace the local ignored baseline:
 

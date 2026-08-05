@@ -367,6 +367,8 @@ python examples/run_examples.py --all
 | input_video_path | str\|null | null | VSR/续写 pipeline 的输入视频 |
 | target_video_length | float\|null | null | 示例支持时覆盖生成时长 |
 | use_run_with_file | bool | false | 使用标准文件入口，保留音轨等容器级输出 |
+| require_audio | bool | false | 要求输出包含音轨，并比较音频契约和解码波形 |
+| audio_cosine_min | float | 0.95 | 视频音频：解码波形余弦相似度下限 |
 | ppl_config_overrides | dict | {} | 覆盖 PPL_CONFIG 配置 |
 | psnr_min | float | 25.0 | 视频：最低 PSNR 阈值 |
 | ssim_min | float | 0.85 | 视频：最低 SSIM 阈值 |
@@ -409,7 +411,8 @@ work_dirs/example_outputs/
 
 Runner 使用以下指标对比 baseline：
 
-- **视频**：PSNR（峰值信噪比）和 SSIM（结构相似度）
+- **视频**：PSNR（峰值信噪比）和 SSIM（结构相似度）；启用 `require_audio` 时还会校验音轨存在性、采样率、声道数、
+  时长和解码波形余弦相似度
 - **图像**：平均像素差异
 
 #### 指标阈值
@@ -419,6 +422,8 @@ Runner 使用以下指标对比 baseline：
 ```yaml
 psnr_min: 25.0      # 越高越严格
 ssim_min: 0.85      # 范围 [0, 1]，越高越严格
+require_audio: true      # 要求并比较输出音轨
+audio_cosine_min: 0.95  # 越高越严格
 pixel_diff_max: 0.02 # 范围 [0, 1]，越低越严格
 ```
 

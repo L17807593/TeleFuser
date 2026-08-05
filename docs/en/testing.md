@@ -367,6 +367,8 @@ If not set, defaults to `"model_zoo"` (relative to working directory).
 | input_video_path | str\|null | null | Input video for VSR/continue pipelines |
 | target_video_length | float\|null | null | Override generated duration when the example accepts it |
 | use_run_with_file | bool | false | Use the standard file entrypoint to preserve container-level output such as audio tracks |
+| require_audio | bool | false | Require an audio stream and compare its contract and decoded waveform |
+| audio_cosine_min | float | 0.95 | Video audio: minimum decoded-waveform cosine similarity |
 | ppl_config_overrides | dict | {} | Override PPL_CONFIG keys |
 | psnr_min | float | 25.0 | Video: minimum PSNR vs baseline |
 | ssim_min | float | 0.85 | Video: minimum SSIM vs baseline |
@@ -409,7 +411,8 @@ Example: `20260402_120000_wan_video__wan21_1_3b_text_to_video_h100_1gpu.log`
 
 The runner compares outputs against baselines using:
 
-- **Video**: PSNR (Peak Signal-to-Noise Ratio) and SSIM (Structural Similarity)
+- **Video**: PSNR (Peak Signal-to-Noise Ratio) and SSIM (Structural Similarity); when `require_audio` is enabled, audio
+  stream presence, sample rate, channels, duration, and decoded-waveform cosine similarity
 - **Image**: Mean pixel difference
 
 #### Metrics Thresholds
@@ -419,6 +422,8 @@ Configure in YAML or per-pipeline:
 ```yaml
 psnr_min: 25.0      # Higher = stricter
 ssim_min: 0.85      # Range [0, 1], higher = stricter
+require_audio: true      # Require and compare the output audio stream
+audio_cosine_min: 0.95  # Higher = stricter
 pixel_diff_max: 0.02 # Range [0, 1], lower = stricter
 ```
 
