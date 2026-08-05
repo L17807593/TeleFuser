@@ -6,18 +6,13 @@ import json
 
 import click
 import numpy as np
-import torch
-from transformers import AutoProcessor
 
-from telefuser.core.config import ModelRuntimeConfig
-from telefuser.core.module_manager import ModuleManager
-from telefuser.models.lingbot_vla_v2_loader import load_lingbot_vla_v2
 from telefuser.pipelines.lingbot_vla_v2 import (
     ROBOTWIN_CAMERA_KEYS,
     LingBotVlaV2Observation,
     LingBotVlaV2Pipeline,
-    LingBotVlaV2PipelineConfig,
 )
+from telefuser.pipelines.lingbot_vla_v2.runtime import get_lingbot_vla_v2_pipeline
 
 
 def get_pipeline(
@@ -26,24 +21,7 @@ def get_pipeline(
     device: str = "cuda",
 ) -> LingBotVlaV2Pipeline:
     """Load the official 6B checkpoint and Qwen3-VL processor."""
-    target_device = torch.device(device)
-    dtype = torch.bfloat16 if target_device.type == "cuda" else torch.float32
-    processor = AutoProcessor.from_pretrained(qwen3vl_root, local_files_only=True, padding_side="right")
-    manager = ModuleManager(torch_dtype=dtype, device="cpu")
-    manager.add_module(processor, "lingbot_vla_v2_processor", path=qwen3vl_root)
-    load_lingbot_vla_v2(manager, model_root, qwen3vl_root, torch_dtype=dtype)
-    pipeline = LingBotVlaV2Pipeline(device=device, torch_dtype=dtype)
-    pipeline.init(
-        manager,
-        LingBotVlaV2PipelineConfig(
-            policy_config=ModelRuntimeConfig(
-                device_type=target_device.type,
-                device_id=target_device.index or 0,
-                torch_dtype=dtype,
-            ),
-        ),
-    )
-    return pipeline
+    return get_lingbot_vla_v2_pipeline(model_root, qwen3vl_root, device=device)
 
 
 @click.command()

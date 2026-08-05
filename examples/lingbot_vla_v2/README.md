@@ -45,6 +45,63 @@ python examples/lingbot_vla_v2/lingbot_vla_v2_inference.py \
 The example saves canonical actions and checkpoint metadata in an `.npz` file. The base output must not be sent to
 a robot without an embodiment-specific post-training checkpoint, action mapping, and policy validation.
 
+## Minimal Single-GPU HTTP Service
+
+The VLA-specific server loads one policy replica and serializes all inference calls on the selected GPU. It does not
+use the shared media service, Ray, multi-GPU execution, dynamic batching, or robot control. Start it from the repository
+with the isolated VLA environment:
+
+```bash
+.venv-vla/bin/python examples/lingbot_vla_v2/lingbot_vla_v2_server.py \
+  --model-root /hhb-data/aigc/model_zoo/lingbot/lingbot-vla-v2-6b \
+  --qwen3vl-root /hhb-data/aigc/model_zoo/Qwen3-VL-4B-Instruct \
+  --device cuda:0 \
+  --host 127.0.0.1 \
+  --port 8000
+```
+
+The process reports ready only after both the processor and policy have loaded:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+`POST /v1/vla/actions` accepts raw Base64 or a Base64 data URL for each camera. The state must contain exactly 14
+finite values. For example:
+
+```bash
+.venv-vla/bin/python - <<'PY'
+import base64
+from pathlib import Path
+
+import httpx
+
+
+def encode(path: str) -> str:
+    return base64.b64encode(Path(path).read_bytes()).decode("ascii")
+
+
+response = httpx.post(
+    "http://127.0.0.1:8000/v1/vla/actions",
+    json={
+        "task": "pick up the red block",
+        "state": [0.0] * 14,
+        "camera_high": encode("/data/cam_high.png"),
+        "camera_left_wrist": encode("/data/cam_left_wrist.png"),
+        "camera_right_wrist": encode("/data/cam_right_wrist.png"),
+        "seed": 7,
+    },
+    timeout=300.0,
+)
+response.raise_for_status()
+print(response.json())
+PY
+```
+
+The response contains `canonical_normalized_actions`, `horizon`, `action_dim`, `checkpoint_variant`,
+`policy_verified`, and `verification_status`. A successful HTTP response confirms service and model execution only;
+the normalized base-model output is not a physical robot command.
+
 ## TeleFuser Regression Baseline
 
 The validation capture runs through the public loader and pipeline, then records preprocessing tensors, fixed initial
