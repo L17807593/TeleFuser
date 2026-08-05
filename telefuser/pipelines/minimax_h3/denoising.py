@@ -547,6 +547,9 @@ class MiniMaxH3DenoisingStage(BaseStage):
         computed_steps = len(get_compute_steps()) if callable(get_compute_steps) else denoising_steps
         runtime_metrics["feature_cache_computed_steps"] = computed_steps
         runtime_metrics["feature_cache_skipped_steps"] = denoising_steps - computed_steps
+        finalize_online_adaln_cache = getattr(self.transformer, "finalize_online_adaln_cache", None)
+        if callable(finalize_online_adaln_cache):
+            finalize_online_adaln_cache()
         return MiniMaxH3DenoiseResult(video_latent, audio_latent, packed, runtime_metrics)
 
     def denoise_for_video_vae(

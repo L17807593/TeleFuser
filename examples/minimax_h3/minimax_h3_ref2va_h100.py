@@ -6,13 +6,14 @@ import os
 from pathlib import Path
 from typing import Any
 
-from telefuser.pipelines.minimax_h3.example_utils import (
+from examples.minimax_h3.common import (
     MINIMAX_H3_DEFAULT_REF2VA_AUDIO,
     MINIMAX_H3_DEFAULT_REF2VA_VIDEO,
     load_minimax_h3_pipeline,
     save_generation,
 )
 from telefuser.pipelines.minimax_h3.pipeline import MiniMaxH3Generation, MiniMaxH3Pipeline
+from telefuser.pipelines.minimax_h3.task_profiles import MINIMAX_H3_FINITE_ASPECT_RATIOS
 from telefuser.service.core.contract_templates import build_pipeline_manifest, build_task_contract_template
 
 TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "/hhb-data/aigc/model_zoo")
@@ -32,6 +33,7 @@ PPL_CONFIG: dict[str, Any] = {
     "audio_flow_shift": None,
     "device": "cuda:0",
     "enable_fsdp": None,
+    "online_adaln_cache": True,
 }
 
 PIPELINE_MANIFEST = build_pipeline_manifest(
@@ -63,7 +65,7 @@ PIPELINE_MANIFEST = build_pipeline_manifest(
                 "aspect_ratio": {
                     "type": "string",
                     "default": PPL_CONFIG["aspect_ratio"],
-                    "enum": ["16:9", "4:3", "1:1", "3:4", "9:16"],
+                    "enum": list(MINIMAX_H3_FINITE_ASPECT_RATIOS),
                 },
                 "target_video_length": {
                     "type": "integer",
@@ -86,6 +88,7 @@ def get_pipeline(
     device: str = PPL_CONFIG["device"],
     num_inference_steps: int = PPL_CONFIG["num_inference_steps"],
     enable_fsdp: bool | None = PPL_CONFIG["enable_fsdp"],
+    online_adaln_cache: bool = PPL_CONFIG["online_adaln_cache"],
 ) -> MiniMaxH3Pipeline:
     """Load the Ref2VA checkpoint partition for one, two, or four GPUs."""
     tp_degree = 2 if parallelism == 4 else 1
@@ -98,6 +101,7 @@ def get_pipeline(
         tp_degree=tp_degree,
         text_encoder_tp_degree=parallelism,
         enable_fsdp=enable_fsdp,
+        online_adaln_cache=online_adaln_cache,
     )
 
 
@@ -109,8 +113,35 @@ def default_ref2va_conditions() -> list[dict[str, str]]:
     ]
 
 
-def build_ref2va_conditions(*, images: list[str], videos: list[str], audios: list[str]) -> list[dict[str, str]]:
-    """Build the convenience CLI order: images, videos, then audio."""
+_REF2VA_REFERENCE_TYPES = frozenset({"image", "video", "video_audio", "audio"})
+
+
+def parse_ref2va_ordered_materials(materials: list[str]) -> list[dict[str, str]]:
+    """Parse repeated TYPE=URI CLI values without changing their order."""
+    conditions: list[dict[str, str]] = []
+    for index, material in enumerate(materials):
+        condition_type, separator, uri = material.partition("=")
+        if not separator or not condition_type or not uri:
+            raise ValueError(f"material[{index}] must use TYPE=URI syntax.")
+        if condition_type not in _REF2VA_REFERENCE_TYPES:
+            allowed = ", ".join(sorted(_REF2VA_REFERENCE_TYPES))
+            raise ValueError(f"material[{index}] has unsupported type {condition_type!r}; expected one of {allowed}.")
+        conditions.append({"type": condition_type, "role": "reference", "uri": uri})
+    return conditions
+
+
+def build_ref2va_conditions(
+    *,
+    images: list[str],
+    videos: list[str],
+    audios: list[str],
+    materials: list[str] | None = None,
+) -> list[dict[str, str]]:
+    """Build conditions, preserving explicit ordered material inputs exactly."""
+    if materials is not None:
+        if images or videos or audios:
+            raise ValueError("--material cannot be combined with --image, --video, or --audio.")
+        return parse_ref2va_ordered_materials(materials)
     return [
         *({"type": "image", "role": "reference", "uri": path} for path in images),
         *({"type": "video", "role": "reference", "uri": path} for path in videos),
@@ -190,6 +221,7 @@ def main() -> None:
     parser.add_argument("--image", action="append", default=[])
     parser.add_argument("--video", action="append", default=[])
     parser.add_argument("--audio", action="append", default=[])
+    parser.add_argument("--material", action="append", default=None, metavar="TYPE=URI")
     parser.add_argument("--prompt", default=PPL_CONFIG["prompt"])
     parser.add_argument(
         "--target-video-length",
@@ -216,7 +248,9 @@ def main() -> None:
     parser.add_argument("--output-path", "--output", dest="output_path", default="minimax_h3_ref2va.mp4")
     args = parser.parse_args()
 
-    conditions = build_ref2va_conditions(images=args.image, videos=args.video, audios=args.audio)
+    conditions = build_ref2va_conditions(
+        images=args.image, videos=args.video, audios=args.audio, materials=args.material
+    )
     pipeline = get_pipeline(
         args.gpu_num,
         args.model_root,

@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from telefuser.pipelines.minimax_h3.example_utils import (
+from examples.minimax_h3.common import (
     MINIMAX_H3_DEFAULT_REQUEST,
     load_minimax_h3_pipeline,
     load_minimax_h3_request,
@@ -23,6 +23,8 @@ PPL_CONFIG: dict[str, Any] = {
     "num_inference_steps": None,
     "device": "cuda:0",
     "enable_fsdp": None,
+    "adaln_cache_path": None,
+    "online_adaln_cache": False,
 }
 
 
@@ -41,6 +43,8 @@ def get_pipeline(
     device: str = PPL_CONFIG["device"],
     num_inference_steps: int | None = PPL_CONFIG["num_inference_steps"],
     enable_fsdp: bool | None = PPL_CONFIG["enable_fsdp"],
+    adaln_cache_path: str | None = PPL_CONFIG["adaln_cache_path"],
+    online_adaln_cache: bool = PPL_CONFIG["online_adaln_cache"],
 ) -> MiniMaxH3Pipeline:
     """Load the checkpoint partition required by a local JSON request."""
     request = _load_request(request_path, num_inference_steps)
@@ -55,6 +59,8 @@ def get_pipeline(
         tp_degree=tp_degree,
         text_encoder_tp_degree=parallelism,
         enable_fsdp=enable_fsdp,
+        adaln_cache_path=adaln_cache_path,
+        online_adaln_cache=online_adaln_cache,
     )
 
 
@@ -86,6 +92,8 @@ def main() -> None:
     parser.add_argument("--model-root", default=PPL_CONFIG["model_root"])
     parser.add_argument("--steps", type=int, default=PPL_CONFIG["num_inference_steps"])
     parser.add_argument("--device", default=PPL_CONFIG["device"])
+    parser.add_argument("--adaln-cache", dest="adaln_cache_path", default=PPL_CONFIG["adaln_cache_path"])
+    parser.add_argument("--online-adaln-cache", action="store_true", default=PPL_CONFIG["online_adaln_cache"])
     parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4), default=1)
     fsdp_group = parser.add_mutually_exclusive_group()
     fsdp_group.add_argument("--enable-fsdp", dest="enable_fsdp", action="store_true")
@@ -101,6 +109,8 @@ def main() -> None:
         device=args.device,
         num_inference_steps=args.steps,
         enable_fsdp=args.enable_fsdp,
+        adaln_cache_path=args.adaln_cache_path,
+        online_adaln_cache=args.online_adaln_cache,
     )
     try:
         result = run_with_file(

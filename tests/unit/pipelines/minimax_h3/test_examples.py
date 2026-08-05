@@ -11,12 +11,18 @@ from examples.minimax_h3.common import (
     MINIMAX_H3_DEFAULT_REF2VA_AUDIO,
     MINIMAX_H3_DEFAULT_REF2VA_VIDEO,
     load_minimax_h3_request,
+    minimax_h3_adaln_cache_timesteps,
     partition_for_minimax_h3_request,
 )
 from examples.minimax_h3.minimax_h3_cache_calibrate import _apply_cache_profile
 from examples.minimax_h3.minimax_h3_fl2va_h100 import build_fl2va_conditions
-from examples.minimax_h3.minimax_h3_ref2va_h100 import default_ref2va_conditions
+from examples.minimax_h3.minimax_h3_ref2va_h100 import (
+    build_ref2va_conditions,
+    default_ref2va_conditions,
+    parse_ref2va_ordered_materials,
+)
 from telefuser.core.config import AttnImplType, FeatureCacheConfig
+from telefuser.pipelines.minimax_h3.task_profiles import MINIMAX_H3_FINITE_ASPECT_RATIOS
 from telefuser.service.core.pipeline_contract import PipelineContract
 
 
@@ -48,6 +54,24 @@ def test_default_materials_are_source_controlled_example_inputs() -> None:
     assert [item["type"] for item in default_ref2va_conditions()] == ["video", "audio"]
 
 
+def test_ref2va_ordered_cli_materials_preserve_mixed_reference_order() -> None:
+    materials = ["video=https://example.com/motion.mp4", "image=subject.png", "audio=voice.mp3"]
+    conditions = build_ref2va_conditions(images=[], videos=[], audios=[], materials=materials)
+
+    assert [condition["type"] for condition in conditions] == ["video", "image", "audio"]
+    assert [condition["uri"] for condition in conditions] == [
+        "https://example.com/motion.mp4",
+        "subject.png",
+        "voice.mp3",
+    ]
+    with pytest.raises(ValueError, match="cannot be combined"):
+        build_ref2va_conditions(images=["subject.png"], videos=[], audios=[], materials=materials)
+    with pytest.raises(ValueError, match="TYPE=URI"):
+        parse_ref2va_ordered_materials(["video"])
+    with pytest.raises(ValueError, match="unsupported type"):
+        parse_ref2va_ordered_materials(["text=not-supported"])
+
+
 def test_examples_expose_standard_pipeline_service_entrypoints() -> None:
     for example in (fl2va_example, ref2va_example, request_example):
         assert example.PPL_CONFIG["model_root"]
@@ -68,6 +92,9 @@ def test_examples_expose_standard_pipeline_service_entrypoints() -> None:
 
     assert fl2va_example.PIPELINE_MANIFEST["supported_tasks"] == ["t2v", "i2v", "fl2v"]
     assert ref2va_example.PIPELINE_MANIFEST["supported_tasks"] == ["s2v"]
+    for example, task in ((fl2va_example, "t2v"), (ref2va_example, "s2v")):
+        aspect_ratio = example.PIPELINE_MANIFEST["task_contracts"][task]["parameters"]["aspect_ratio"]
+        assert aspect_ratio["enum"] == list(MINIMAX_H3_FINITE_ASPECT_RATIOS)
     conditions = ref2va_example.PIPELINE_MANIFEST["task_contracts"]["s2v"]["parameters"]["conditions"]
     assert conditions["type"] == "array"
     assert conditions["required"] is True
@@ -223,3 +250,41 @@ def test_request_loader_rejects_unknown_top_level_fields(tmp_path: Path) -> None
     )
     with pytest.raises(ValueError, match="unknown fields"):
         load_minimax_h3_request(request_path)
+
+
+def test_adaln_cache_schedule_covers_both_modalities_and_condition_timesteps() -> None:
+    timesteps = minimax_h3_adaln_cache_timesteps(
+        {"task": "t2va", "flow_shift": 12.0, "audio_flow_shift": 3.0, "num_inference_steps": 4}
+    )
+
+    assert timesteps == sorted(timesteps)
+    assert 0.0 in timesteps
+    assert 0.999 in timesteps
+    assert 1.0 in timesteps
+    assert len(timesteps) > 4
+
+
+def test_adaln_cache_loader_rejects_fsdp_execution() -> None:
+    from telefuser.pipelines.minimax_h3.example_utils import load_minimax_h3_pipeline
+
+    with pytest.raises(ValueError, match="FSDP"):
+        load_minimax_h3_pipeline(
+            "/missing",
+            partition="FL2VA",
+            ulysses_degree=2,
+            enable_fsdp=True,
+            adaln_cache_path="/cache",
+        )
+
+
+def test_online_adaln_cache_loader_rejects_fsdp_execution() -> None:
+    from telefuser.pipelines.minimax_h3.example_utils import load_minimax_h3_pipeline
+
+    with pytest.raises(ValueError, match="FSDP"):
+        load_minimax_h3_pipeline(
+            "/missing",
+            partition="FL2VA",
+            ulysses_degree=2,
+            enable_fsdp=True,
+            online_adaln_cache=True,
+        )

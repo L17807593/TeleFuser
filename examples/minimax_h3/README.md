@@ -126,7 +126,20 @@ python examples/minimax_h3/minimax_h3_ref2va_h100.py \
   --output outputs/minimax_h3_ref2va_custom.mp4
 ```
 
-The convenience CLI groups repeated arguments as images, videos, then audio. Use the JSON request runner whenever
+For an explicit mixed-media order, repeat `--material TYPE=URI`. Its order is passed through unchanged; it cannot be
+combined with the grouped flags:
+
+```bash
+python examples/minimax_h3/minimax_h3_ref2va_h100.py \
+  --material video=https://example.com/motion.mp4 \
+  --material image=/path/to/subject.png \
+  --material audio=/path/to/voice.wav \
+  --prompt "Use <Video 1>, preserve <Image 2>, and speak with <Audio 3>." \
+  --duration 5 \
+  --output outputs/minimax_h3_ref2va_ordered.mp4
+```
+
+The legacy convenience flags still group repeated arguments as images, videos, then audio. Use `--material TYPE=URI` or the JSON request runner whenever
 heterogeneous ordering is semantic. It defaults to `examples/data/minimax-h3/ref2va.json`; relative material URIs
 are resolved from the request file's directory.
 
@@ -166,6 +179,42 @@ Ref2VA may omit `target.duration_seconds` when exactly one audio-bearing conditi
 multiple audio-bearing conditions, duration must be explicit. Published limits are enforced before model execution:
 at most 9 images, 3 videos, 3 audio-bearing inputs, and 12 files total; each audio/video clip must be 2-15 seconds,
 total video and total audio duration must each be at most 15 seconds, and audio requires an image or video reference.
+
+## Inference-Only AdaLN Cache
+
+The FL2VA and Ref2VA H100 examples enable online AdaLN caching by default. The first complete request computes AdaLN
+normally; after successful denoising, the model releases the AdaLN and timestep-projection weights and later requests
+reuse the in-memory cache. A later request with a different schedule requires a fresh pipeline or the full-weight path.
+
+```bash
+python examples/minimax_h3/minimax_h3_ref2va_h100.py \
+  --material video=/path/to/motion.mp4 \
+  --material audio=/path/to/voice.wav \
+  --output outputs/minimax_h3_ref2va_online_adaln.mp4
+```
+
+The generic JSON request runner retains an explicit online-adaln-cache switch for callers that use that entrypoint.
+FSDP remains unsupported for cache mode; single-GPU, Ulysses, and DiT TP are supported. Online TP collection gathers
+each step modulation output across TP ranks before releasing the projection weights.
+
+### Memory Accounting
+
+Cache mode reduces persistent DiT weight allocation after the first successful online request. The following values are
+calculated from the released H3 configuration, not sampled end-to-end peak-memory measurements. They use the standard
+50-step video and audio schedules: the two schedules contain 99 unique timesteps, and each cached timestep stores all
+50 block projections plus the final projection in BF16.
+
+| Topology | Released AdaLN and timestep weights per rank | Device-resident cache per rank | Net persistent-weight reduction per rank |
+|---|---:|---:|---:|
+| Single GPU or Ulysses | 24.35 GiB | 0.89 GiB | 23.45 GiB |
+| DiT TP2 | 12.20 GiB | 0.89 GiB | 11.31 GiB |
+| DiT TP4 | 6.13 GiB | 0.89 GiB | 5.24 GiB |
+
+The calculation excludes activations, the text encoder, both VAEs, communication buffers, and PyTorch allocator
+reservation. Therefore, it describes the steady-state capacity returned by AdaLN removal rather than a universal
+end-to-end peak reduction. During online collection, the first request keeps the full weights; the reduction applies
+only after that request finalizes successfully. NVIDIA SMI can retain cached allocator pages until PyTorch releases
+them, so use allocated memory and a steady cached request when validating this accounting on a deployment.
 
 ## Standard Python And Serve Entrypoints
 

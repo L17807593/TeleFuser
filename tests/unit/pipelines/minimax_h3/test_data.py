@@ -7,7 +7,7 @@ from telefuser.pipelines.minimax_h3.data import (
     minimax_h3_validate_reference_media_facts,
 )
 from telefuser.pipelines.minimax_h3.resolved_plan import minimax_h3_resolve_plan
-from telefuser.pipelines.minimax_h3.task_profiles import partition_for_task
+from telefuser.pipelines.minimax_h3.task_profiles import MINIMAX_H3_FINITE_ASPECT_RATIOS, partition_for_task
 
 TARGET = {"short_edge": 768, "aspect_ratio": "16:9", "duration_seconds": 5.0}
 
@@ -170,4 +170,48 @@ def test_ref2va_probed_clip_and_total_duration_limits() -> None:
             conditions,
             video_duration_seconds_by_condition={1: 7.5, 2: 7.5},
             audio_duration_seconds_by_condition={3: 1.9},
+        )
+
+
+@pytest.mark.parametrize("aspect_ratio", MINIMAX_H3_FINITE_ASPECT_RATIOS)
+def test_t2va_and_ref2va_accept_every_release_aspect_ratio(aspect_ratio: str) -> None:
+    for task, conditions in (
+        ("t2va", []),
+        ("ref2va", [{"type": "image", "uri": "file:///subject.png", "role": "reference"}]),
+    ):
+        canonical = minimax_h3_validate_canonical_request(
+            task=task,
+            prompt="contract",
+            conditions=conditions,
+            target={**TARGET, "aspect_ratio": aspect_ratio},
+            seed=0,
+        )
+        assert canonical["target"]["aspect_ratio"] == aspect_ratio
+
+
+@pytest.mark.parametrize("aspect_ratio", ("7:4", "4:1", "1:4", "16x9"))
+def test_t2va_and_ref2va_reject_aspect_ratios_outside_release_contract(aspect_ratio: str) -> None:
+    for task, conditions in (
+        ("t2va", []),
+        ("ref2va", [{"type": "image", "uri": "file:///subject.png", "role": "reference"}]),
+    ):
+        with pytest.raises(ValueError, match="aspect_ratio"):
+            minimax_h3_validate_canonical_request(
+                task=task,
+                prompt="contract",
+                conditions=conditions,
+                target={**TARGET, "aspect_ratio": aspect_ratio},
+                seed=0,
+            )
+
+
+@pytest.mark.parametrize("short_edge", (512, 1024))
+def test_release_base_short_edge_is_exactly_768(short_edge: int) -> None:
+    with pytest.raises(ValueError, match="short_edge must be 768"):
+        minimax_h3_validate_canonical_request(
+            task="t2va",
+            prompt="contract",
+            conditions=[],
+            target={**TARGET, "short_edge": short_edge},
+            seed=0,
         )

@@ -31,7 +31,8 @@ from telefuser.pipelines.minimax_h3.pipeline import (
     MiniMaxH3Pipeline,
     MiniMaxH3PipelineConfig,
 )
-from telefuser.pipelines.minimax_h3.task_profiles import partition_for_task
+from telefuser.pipelines.minimax_h3.task_profiles import minimax_h3_task_profile, partition_for_task
+from telefuser.pipelines.minimax_h3.time_request import minimax_h3_time_shift_sigmas
 from telefuser.utils.audio import save_wav
 from telefuser.utils.video import save_video
 
@@ -91,6 +92,17 @@ def partition_for_minimax_h3_request(request: dict[str, Any]) -> str:
     return partition_for_task(request.get("task")).upper()
 
 
+def minimax_h3_adaln_cache_timesteps(request: dict[str, Any], *, num_inference_steps: int | None = None) -> list[float]:
+    """Return every unique AdaLN timestep needed by a canonical H3 request."""
+    profile = minimax_h3_task_profile(str(request["task"]).lower())
+    steps = int(request.get("num_inference_steps", 50) if num_inference_steps is None else num_inference_steps)
+    video_shift = float(request.get("flow_shift") or profile.default_flow_shift)
+    audio_shift = float(request.get("audio_flow_shift") or profile.default_audio_flow_shift)
+    video_timesteps = [1.0 - sigma for sigma in minimax_h3_time_shift_sigmas(num_steps=steps, shift_scale=video_shift)]
+    audio_timesteps = [1.0 - sigma for sigma in minimax_h3_time_shift_sigmas(num_steps=steps, shift_scale=audio_shift)]
+    return sorted({*video_timesteps, *audio_timesteps, 0.999, 1.0})
+
+
 def _checkpoint_shards(component: Path) -> list[str]:
     shards = sorted(str(path) for path in component.glob("model-*.safetensors"))
     if not shards:
@@ -110,7 +122,12 @@ def load_minimax_h3_pipeline(
     enable_fsdp: bool | None = None,
     attn_impl: AttnImplType | str = AttnImplType.FLASH_ATTN_4,
     feature_cache_config: FeatureCacheConfig | None = None,
+    adaln_cache_path: str | Path | None = None,
+    online_adaln_cache: bool = False,
 ) -> MiniMaxH3Pipeline:
+    if adaln_cache_path is not None and online_adaln_cache:
+        raise ValueError("Choose either adaln_cache_path or online_adaln_cache, not both.")
+
     if partition not in {"FL2VA", "Ref2VA"}:
         raise ValueError("partition must be 'FL2VA' or 'Ref2VA'")
     if ulysses_degree not in {1, 2, 4}:
@@ -126,6 +143,8 @@ def load_minimax_h3_pipeline(
     resolved_enable_fsdp = world_size == 4 and tp_degree == 1 if enable_fsdp is None else enable_fsdp
     if resolved_enable_fsdp and (world_size == 1 or tp_degree > 1):
         raise ValueError("enable_fsdp requires multi-GPU sequence parallelism without tensor parallelism")
+    if (adaln_cache_path is not None or online_adaln_cache) and resolved_enable_fsdp:
+        raise ValueError("AdaLN cache modes do not yet support FSDP deployment.")
     if isinstance(attn_impl, str):
         try:
             attn_impl = AttnImplType[attn_impl]
@@ -207,6 +226,15 @@ def load_minimax_h3_pipeline(
         model_class=MiniMaxH3DiT,
         converter_kwargs={"config_path": transformer_dir / "config.json"},
     )
+    if adaln_cache_path is not None or online_adaln_cache:
+        transformer = manager.fetch_module("minimax_h3_transformer")
+        if transformer is None:
+            raise RuntimeError("MiniMax H3 transformer was not loaded for AdaLN cache activation.")
+        if online_adaln_cache:
+            transformer.enable_online_adaln_cache(partition=partition)
+        else:
+            transformer.load_inference_only_adaln(adaln_cache_path, expected_partition=partition)
+
     encoder_dir = component_root / "text_encoder"
     manager.load_model(
         _checkpoint_shards(encoder_dir),
@@ -298,6 +326,7 @@ __all__ = [
     "MINIMAX_H3_DEFAULT_REQUEST",
     "load_minimax_h3_pipeline",
     "load_minimax_h3_request",
+    "minimax_h3_adaln_cache_timesteps",
     "partition_for_minimax_h3_request",
     "save_generation",
 ]

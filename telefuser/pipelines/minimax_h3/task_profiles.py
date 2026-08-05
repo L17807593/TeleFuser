@@ -184,9 +184,8 @@ MINIMAX_H3_TASK_PROFILES: dict[str, MiniMaxH3TaskProfile] = {
         ),
         default_flow_shift=12.0,
         default_audio_flow_shift=3.0,
-        # ref2va video may use an explicit aspect ratio such as "7:4":
-        # ref2va allows explicit aspect ratios; "auto" falls back to the
-        # policy default (references never bind target geometry).
+        # Ref2VA accepts the release's finite explicit aspect-ratio set; "auto"
+        # falls back to the policy default (references never bind target geometry).
         aspect_ratio_forced_auto=False,
         geometry_source="explicit_target",
         duration_from_audio_reference=True,

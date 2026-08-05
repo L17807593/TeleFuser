@@ -7,8 +7,8 @@ import argparse
 import json
 from pathlib import Path
 
+from examples.minimax_h3.common import load_minimax_h3_pipeline, save_generation
 from telefuser.feature_cache import AdaTaylorCacheCalibrator
-from telefuser.pipelines.minimax_h3.example_utils import load_minimax_h3_pipeline, save_generation
 
 try:
     from .minimax_h3_fl2va_h100 import PPL_CONFIG, run
