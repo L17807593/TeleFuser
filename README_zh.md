@@ -17,6 +17,11 @@ TeleFuser 是一个面向世界模型推理与多模态生成的高性能运行�
 
 ## News 📰
 
+- ✨ **2026-08-05**：新增 [**MiniMax H3**](examples/minimax_h3/README.md) T2VA、FL2VA 和 Ref2VA 联合
+  音视频生成，并支持标准 `telefuser serve` 服务模式。在相同的 768p、5 秒、50 步 T2VA 请求和一次预热
+  条件下，常驻 **4 张 H100 80 GB** 配置的性能与固定版本的本地 SGLang SP2+TP2 对齐，同时使用更少
+  GPU 显存。复现条件和性能分析见
+  [MiniMax H3 示例文档](examples/minimax_h3/README.md#measured-four-gpu-profile)。
 - ✨ **2026-08-03**：LingBot-World v2 已在 **4 张 H100 80 GB** 上通过 832x480、16 FPS 的目标侧实时生成
   验证。当前 77 帧门禁达到 **17.14 steady compute FPS**，复现方法见
   [基准文档](docs/zh/benchmark_aiperf.md#当前-77-帧实时计算门禁)。
@@ -220,6 +225,7 @@ telefuser/
 | `WanVideo` (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | 主力视频生成家族，含异步和服务示例，见 [examples/wan_video/README.md](examples/wan_video/README.md) |
 | `HunyuanVideo` | T2V, I2V | 见 [examples/hunyuan_video/README.md](examples/hunyuan_video/README.md) |
 | `LTX Video` | I2V + Audio | 统一音视频生成，见 [examples/ltx_video/README.md](examples/ltx_video/README.md) |
+| `MiniMax H3` | T2VA, FL2VA, Ref2VA + Audio | 本地 768p 联合音视频生成，见 [examples/minimax_h3/README.md](examples/minimax_h3/README.md) |
 | `LongCat-Video` | T2V, I2V, VC | 长视频生成与续写，见 [examples/longcat_video/README.md](examples/longcat_video/README.md) |
 | **NEW** `LingBot-Video` | T2I, T2V, TI2V, MoE refiner | 支持原生 CFG/SP 的 Dense/MoE 生成与内存直传 base-to-refiner，见 [examples/lingbot_video/README.md](examples/lingbot_video/README.md) |
 
