@@ -80,6 +80,7 @@ def test_examples_expose_standard_pipeline_service_entrypoints() -> None:
         assert callable(example.run_with_file)
 
     for example in (fl2va_example, ref2va_example):
+        assert example.PPL_CONFIG["online_adaln_cache"] is True
         assert example.PIPELINE_MANIFEST["entrypoints"] == {
             "get_pipeline": "get_pipeline",
             "run_with_file": "run_with_file",
@@ -130,6 +131,7 @@ def test_standard_get_pipeline_forwards_parallel_runtime_options(monkeypatch: py
                 "tp_degree": 2,
                 "text_encoder_tp_degree": 4,
                 "enable_fsdp": True,
+                "online_adaln_cache": True,
                 "attn_impl": AttnImplType.FLASH_ATTN_4,
                 "feature_cache_config": FeatureCacheConfig(
                     enabled=True,
@@ -265,7 +267,7 @@ def test_adaln_cache_schedule_covers_both_modalities_and_condition_timesteps() -
 
 
 def test_adaln_cache_loader_rejects_fsdp_execution() -> None:
-    from telefuser.pipelines.minimax_h3.example_utils import load_minimax_h3_pipeline
+    from examples.minimax_h3.common import load_minimax_h3_pipeline
 
     with pytest.raises(ValueError, match="FSDP"):
         load_minimax_h3_pipeline(
@@ -278,7 +280,7 @@ def test_adaln_cache_loader_rejects_fsdp_execution() -> None:
 
 
 def test_online_adaln_cache_loader_rejects_fsdp_execution() -> None:
-    from telefuser.pipelines.minimax_h3.example_utils import load_minimax_h3_pipeline
+    from examples.minimax_h3.common import load_minimax_h3_pipeline
 
     with pytest.raises(ValueError, match="FSDP"):
         load_minimax_h3_pipeline(
