@@ -9,8 +9,12 @@ from typing import Any
 import torch
 
 from telefuser.core.base_stage import BaseStage, with_model_offload
-from telefuser.core.config import ModelRuntimeConfig
+from telefuser.core.config import ModelRuntimeConfig, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
+from telefuser.distributed.device_mesh import create_device_mesh_from_config
+from telefuser.distributed.fsdp import shard_model_fsdp2_inference
+from telefuser.platforms import current_platform
+from telefuser.utils.logging import logger
 
 from .presentation import (
     minimax_h3_multi_image_presentation,
@@ -45,6 +49,41 @@ class MiniMaxH3TextEncodingStage(BaseStage):
         self.processor = processor
         self.tokenizer = processor.tokenizer
         self.model_names = ["text_encoder"]
+
+    def parallel_models(self) -> None:
+        parallel_config = self.model_runtime_config.parallel_config
+        unsupported = {
+            "cfg_degree": parallel_config.cfg_degree,
+            "sp_ring_degree": parallel_config.sp_ring_degree,
+            "pp_degree": parallel_config.pp_degree,
+        }
+        invalid = {name: degree for name, degree in unsupported.items() if degree != 1}
+        if invalid:
+            raise NotImplementedError(f"MiniMax H3 text encoder does not support these parallel degrees: {invalid}")
+        if parallel_config.tp_degree <= 1 and not parallel_config.enable_fsdp:
+            raise NotImplementedError("MiniMax H3 multi-GPU text encoding requires TP or FSDP inference")
+        device_mesh = create_device_mesh_from_config(parallel_config)
+        if parallel_config.tp_degree > 1:
+            if parallel_config.sp_ulysses_degree > 1:
+                raise ValueError("MiniMax H3 text encoder TP requires a dedicated one-dimensional TP mesh")
+            if parallel_config.enable_fsdp:
+                raise ValueError("MiniMax H3 text encoder TP cannot be combined with FSDP")
+            if self.model_runtime_config.offload_config.offload_type != WeightOffloadType.NO_CPU_OFFLOAD:
+                raise ValueError("MiniMax H3 text encoder TP cannot be combined with model CPU offload")
+            logger.info(f"Enabling tensor parallelism for {self.name}")
+            self.text_encoder.enable_tp(device_mesh)
+            self.text_encoder.to(self.device)
+        else:
+            if self.model_runtime_config.offload_config.offload_type != WeightOffloadType.NO_CPU_OFFLOAD:
+                raise ValueError("MiniMax H3 text encoder FSDP inference cannot be combined with model CPU offload")
+            logger.info(f"Enabling block FSDP2 for {self.name}")
+            self.text_encoder = shard_model_fsdp2_inference(
+                module=self.text_encoder,
+                device_mesh=device_mesh,
+                wrap_module_names=self.text_encoder.get_fsdp_module_names(),
+            )
+        self.onload_models_flag = True
+        current_platform.empty_cache()
 
     @with_model_offload(["text_encoder"])
     @torch.inference_mode()

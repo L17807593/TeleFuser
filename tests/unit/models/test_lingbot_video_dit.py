@@ -142,7 +142,7 @@ def test_transformer_packed_batch_matches_independent_samples_with_different_tex
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
 
-def test_transformer_rejects_packed_batch_with_non_sdpa_attention() -> None:
+def test_transformer_rejects_packed_batch_with_unsupported_attention() -> None:
     model = LingBotVideoTransformer3DModel(
         in_channels=2,
         out_channels=2,
@@ -156,7 +156,7 @@ def test_transformer_rejects_packed_batch_with_non_sdpa_attention() -> None:
     ).eval()
     model.set_attention_config(AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_2))
 
-    with pytest.raises(ValueError, match="packed sequence attention currently requires TORCH_SDPA"):
+    with pytest.raises(ValueError, match="packed sequence attention requires TORCH_SDPA or FLASH_ATTN_4"):
         model(
             torch.randn(2, 2, 1, 2, 2),
             torch.tensor([700.0, 300.0]),

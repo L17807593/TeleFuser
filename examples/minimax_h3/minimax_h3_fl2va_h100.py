@@ -30,7 +30,7 @@ PPL_CONFIG: dict[str, Any] = {
     "flow_shift": None,
     "audio_flow_shift": None,
     "device": "cuda:0",
-    "enable_fsdp": False,
+    "enable_fsdp": None,
 }
 
 
@@ -74,15 +74,18 @@ def get_pipeline(
     *,
     device: str = PPL_CONFIG["device"],
     num_inference_steps: int = PPL_CONFIG["num_inference_steps"],
-    enable_fsdp: bool = PPL_CONFIG["enable_fsdp"],
+    enable_fsdp: bool | None = PPL_CONFIG["enable_fsdp"],
 ) -> MiniMaxH3Pipeline:
     """Load the FL2VA checkpoint partition for one, two, or four GPUs."""
+    tp_degree = 2 if parallelism == 4 else 1
     return load_minimax_h3_pipeline(
         model_root,
         partition=PPL_CONFIG["partition"],
         device=device,
         num_inference_steps=num_inference_steps,
-        ulysses_degree=parallelism,
+        ulysses_degree=parallelism // tp_degree,
+        tp_degree=tp_degree,
+        text_encoder_tp_degree=parallelism,
         enable_fsdp=enable_fsdp,
     )
 
@@ -242,7 +245,10 @@ def main() -> None:
     parser.add_argument("--audio-flow-shift", type=float, default=PPL_CONFIG["audio_flow_shift"])
     parser.add_argument("--device", default=PPL_CONFIG["device"])
     parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4), default=1)
-    parser.add_argument("--enable-fsdp", action="store_true", default=PPL_CONFIG["enable_fsdp"])
+    fsdp_group = parser.add_mutually_exclusive_group()
+    fsdp_group.add_argument("--enable-fsdp", dest="enable_fsdp", action="store_true")
+    fsdp_group.add_argument("--disable-fsdp", dest="enable_fsdp", action="store_false")
+    parser.set_defaults(enable_fsdp=PPL_CONFIG["enable_fsdp"])
     parser.add_argument("--output-path", "--output", dest="output_path", default="minimax_h3_fl2va.mp4")
     args = parser.parse_args()
 

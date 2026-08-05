@@ -15,8 +15,10 @@ import torch
 from PIL import Image, ImageOps
 
 from telefuser.core.base_stage import BaseStage, with_model_offload
-from telefuser.core.config import ModelRuntimeConfig
+from telefuser.core.config import ModelRuntimeConfig, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
+from telefuser.distributed.device_mesh import create_device_mesh_from_config, get_tp_group
+from telefuser.platforms import current_platform
 
 from .canvas import (
     minimax_h3_prepare_keyframe_canvas,
@@ -145,6 +147,31 @@ class MiniMaxH3VideoVAEStage(BaseStage):
             raise ValueError("ModuleManager must contain MiniMax H3 video VAE")
         self.model_names = ["video_vae"]
 
+    def parallel_models(self) -> None:
+        parallel_config = self.model_runtime_config.parallel_config
+        unsupported = {
+            "cfg_degree": parallel_config.cfg_degree,
+            "sp_ring_degree": parallel_config.sp_ring_degree,
+            "sp_ulysses_degree": parallel_config.sp_ulysses_degree,
+            "pp_degree": parallel_config.pp_degree,
+            "dp_degree": parallel_config.dp_degree,
+        }
+        invalid = {name: degree for name, degree in unsupported.items() if degree != 1}
+        if invalid:
+            raise NotImplementedError(f"MiniMax H3 video VAE does not support these parallel degrees: {invalid}")
+        if parallel_config.tp_degree <= 1:
+            raise NotImplementedError("MiniMax H3 video VAE parallel tiling requires a multi-rank TP group")
+        if self.model_runtime_config.offload_config.offload_type != WeightOffloadType.NO_CPU_OFFLOAD:
+            raise ValueError("MiniMax H3 video VAE parallel tiling cannot be combined with model CPU offload")
+        device_mesh = create_device_mesh_from_config(parallel_config)
+        group = get_tp_group(device_mesh)
+        if group is None:
+            raise RuntimeError("MiniMax H3 video VAE parallel tiling requires a TP process group")
+        self.video_vae.enable_parallel_tiling(group)
+        self.video_vae.to(self.device)
+        self.onload_models_flag = True
+        current_platform.empty_cache()
+
     @staticmethod
     def prepare_media(
         plan: MiniMaxH3ResolvedPlan,
@@ -250,7 +277,10 @@ class MiniMaxH3VideoVAEStage(BaseStage):
             self.video_vae.prepare_decoder_autocast_weights(torch.float16)
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_fp16_autocast):
             frames = self.video_vae.decode_normalized(latent.to(device))
-        return frames.permute(0, 2, 3, 4, 1).float().cpu().contiguous()
+        # Keep the large decoded tensor on the producing device. ParallelWorker
+        # can then return a CUDA IPC handle instead of copying FP32 frames into
+        # shared CPU storage inside the worker process.
+        return frames.permute(0, 2, 3, 4, 1).float().contiguous()
 
 
 class MiniMaxH3AudioVAEStage(BaseStage):

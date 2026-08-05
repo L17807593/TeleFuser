@@ -90,7 +90,9 @@ def test_standard_get_pipeline_forwards_parallel_runtime_options(monkeypatch: py
                 "partition": "FL2VA",
                 "device": "cuda:1",
                 "num_inference_steps": 20,
-                "ulysses_degree": 4,
+                "ulysses_degree": 2,
+                "tp_degree": 2,
+                "text_encoder_tp_degree": 4,
                 "enable_fsdp": True,
             },
         )

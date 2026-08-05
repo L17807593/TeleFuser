@@ -9,10 +9,11 @@ from dataclasses import dataclass
 import torch
 
 from telefuser.core.base_stage import BaseStage, with_model_offload
-from telefuser.core.config import ModelRuntimeConfig
+from telefuser.core.config import ModelRuntimeConfig, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
-from telefuser.distributed.device_mesh import create_device_mesh_from_config
-from telefuser.distributed.fsdp import shard_model
+from telefuser.distributed.device_mesh import create_device_mesh_from_config, get_ulysses_rank, get_ulysses_world_size
+from telefuser.distributed.fsdp import shard_model_fsdp2_inference
+from telefuser.platforms import current_platform
 from telefuser.utils.logging import logger
 
 from .condition_noise import (
@@ -38,6 +39,64 @@ MINIMAX_H3_IMGVID_COND_TIMESTEP = 0.999
 MINIMAX_H3_AUDIO_REF_COND_TIMESTEP = 1.0
 
 
+@torch.inference_mode()
+def _minimax_h3_update_target_rows_(
+    state: torch.Tensor,
+    velocity: torch.Tensor,
+    *,
+    sigma_t: torch.Tensor,
+    sigma_curr: float,
+    sigma_ratio: torch.Tensor,
+    one_minus_sigma_ratio: torch.Tensor,
+    denoised_scratch: torch.Tensor,
+) -> None:
+    """Apply the Euler eta=0 update while reusing output and scratch storage."""
+    torch.mul(sigma_t, velocity, out=denoised_scratch)
+    torch.add(state, denoised_scratch, out=denoised_scratch)
+    if sigma_curr == 0.0:
+        return
+    torch.mul(one_minus_sigma_ratio, denoised_scratch, out=velocity)
+    torch.mul(sigma_ratio, state, out=state)
+    torch.add(state, velocity, out=state)
+
+
+def _build_local_embedding_layout(
+    *,
+    seq_len: int,
+    text_pos: torch.Tensor,
+    img_pos: torch.Tensor,
+    audio_pos: torch.Tensor,
+    world_size: int,
+    rank: int,
+    device: torch.device,
+) -> dict[str, int | torch.Tensor]:
+    """Resolve request-static packed rows owned by one Ulysses rank."""
+    if seq_len % world_size:
+        raise ValueError(f"packed seq_len {seq_len} must divide Ulysses degree {world_size}")
+    local_seq_len = seq_len // world_size
+    row_start = rank * local_seq_len
+    row_stop = row_start + local_seq_len
+
+    def local_ids(positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        source_ids = torch.nonzero((positions >= row_start) & (positions < row_stop), as_tuple=False).view(-1)
+        global_ids = positions.index_select(0, source_ids)
+        return source_ids.to(device), global_ids.to(device)
+
+    text_source_ids, text_global_ids = local_ids(text_pos)
+    _, img_global_ids = local_ids(img_pos)
+    _, audio_global_ids = local_ids(audio_pos)
+    return {
+        "row_start": row_start,
+        "row_stop": row_stop,
+        "text_source_ids": text_source_ids,
+        "text_row_ids": text_global_ids - row_start,
+        "img_global_ids": img_global_ids,
+        "img_row_ids": img_global_ids - row_start,
+        "audio_global_ids": audio_global_ids,
+        "audio_row_ids": audio_global_ids - row_start,
+    }
+
+
 @dataclass(frozen=True)
 class MiniMaxH3DenoiseResult:
     video_latent: torch.Tensor
@@ -54,6 +113,7 @@ class MiniMaxH3DenoisingStage(BaseStage):
             raise ValueError("ModuleManager must contain 'minimax_h3_transformer'")
         self.scheduler = MiniMaxH3EulerAncestralEta0SchedulerAdapter()
         self.model_names = ["transformer"]
+        self._request_serial = 0
 
     def parallel_models(self) -> None:
         parallel_config = self.model_runtime_config.parallel_config
@@ -61,7 +121,6 @@ class MiniMaxH3DenoisingStage(BaseStage):
             "cfg_degree": parallel_config.cfg_degree,
             "sp_ring_degree": parallel_config.sp_ring_degree,
             "pp_degree": parallel_config.pp_degree,
-            "tp_degree": parallel_config.tp_degree,
         }
         invalid = {name: degree for name, degree in unsupported.items() if degree != 1}
         if invalid:
@@ -69,23 +128,33 @@ class MiniMaxH3DenoisingStage(BaseStage):
         device_mesh = create_device_mesh_from_config(parallel_config)
         self.transformer.device_mesh = device_mesh
         self.transformer.set_attention_config(self.model_runtime_config.attention_config)
+        if parallel_config.tp_degree > 1:
+            if parallel_config.enable_fsdp:
+                raise ValueError("MiniMax H3 DiT tensor parallelism cannot be combined with FSDP")
+            if self.model_runtime_config.offload_config.offload_type != WeightOffloadType.NO_CPU_OFFLOAD:
+                raise ValueError("MiniMax H3 DiT tensor parallelism cannot be combined with model CPU offload")
+            logger.info(f"Enabling tensor parallelism for {self.name}")
+            self.transformer.enable_tp(device_mesh)
+            self.transformer.to(self.device)
+            self.onload_models_flag = True
+            current_platform.empty_cache()
         if parallel_config.sp_ulysses_degree > 1:
             self.transformer.enable_usp(device_mesh)
         if parallel_config.enable_fsdp:
-            logger.info(f"Enabling FSDP for {self.name}")
+            if self.model_runtime_config.offload_config.offload_type != WeightOffloadType.NO_CPU_OFFLOAD:
+                raise ValueError("MiniMax H3 FSDP inference cannot be combined with model CPU offload")
+            logger.info(f"Enabling block FSDP2 for {self.name}")
             fp32_parameters = [
                 parameter for parameter in self.transformer.parameters() if parameter.dtype == torch.float32
             ]
-            self.transformer = shard_model(
+            self.transformer = shard_model_fsdp2_inference(
                 module=self.transformer,
-                device_id=self.device,
+                device_mesh=device_mesh,
                 wrap_module_names=self.transformer.get_fsdp_module_names(),
-                param_dtype=self.torch_dtype,
-                reduce_dtype=self.torch_dtype,
-                buffer_dtype=torch.float32,
                 ignored_states=fp32_parameters,
             )
             self.onload_models_flag = True
+            current_platform.empty_cache()
 
     @staticmethod
     def _reference_blocks(
@@ -253,22 +322,44 @@ class MiniMaxH3DenoisingStage(BaseStage):
         audio_pos_cpu = packed["audio_pos"]
         img_pos = img_pos_cpu.to(device)
         audio_pos = audio_pos_cpu.to(device)
-        text_pos = packed["text_pos"].to(device)
+        text_pos_cpu = packed["text_pos"]
+        text_pos = text_pos_cpu.to(device)
         target_img_pos = img_pos[video_update]
+        target_video_row_start = int((~video_update_cpu).sum())
         target_audio_row_start = int((~audio_update_cpu).sum())
         condition_img_pos = img_pos_cpu[~video_update_cpu]
         target_audio_pos = audio_pos_cpu[audio_update_cpu]
         condition_audio_pos = audio_pos_cpu[~audio_update_cpu]
 
         seq_len = int(packed["seq_len"])
-        row_timesteps = torch.empty(seq_len, dtype=torch.float32)
         x = torch.zeros(1, seq_len, 96, dtype=torch.float32, device=device)
         audio_x = torch.zeros(1, seq_len, 32, dtype=torch.float32, device=device)
         img_position_ids = packed["img_position_ids"].unsqueeze(0).float().to(device)
         prompt_embeds = text.hidden_states.to(device)
         cu_seqlens = packed["cu_seqlens"].to(device)
-        block_token_tags = token_tags.to(device)
+        block_token_tags_full = token_tags.to(device).clamp_min(0)
+        use_ulysses = bool(getattr(self.transformer, "usp_flag", False))
+        device_mesh = getattr(self.transformer, "device_mesh", None)
+        ulysses_world_size = get_ulysses_world_size(device_mesh) if use_ulysses else 1
+        ulysses_rank = get_ulysses_rank(device_mesh) if use_ulysses else 0
+        local_seq_len = seq_len // ulysses_world_size
+        local_row_start = ulysses_rank * local_seq_len
+        local_row_stop = local_row_start + local_seq_len
+        block_token_tags = block_token_tags_full[local_row_start:local_row_stop]
+        local_embedding_layout = None
+        if ulysses_world_size > 1:
+            local_embedding_layout = _build_local_embedding_layout(
+                seq_len=seq_len,
+                text_pos=text_pos_cpu,
+                img_pos=img_pos_cpu,
+                audio_pos=audio_pos_cpu,
+                world_size=ulysses_world_size,
+                rank=ulysses_rank,
+                device=device,
+            )
 
+        timestep_plan: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        row_timesteps = torch.empty(seq_len, dtype=torch.float32)
         for step in range(len(video_sigmas) - 1):
             t_video = float(1.0 - video_sigmas[step])
             t_audio = float(1.0 - audio_sigmas[step])
@@ -276,21 +367,71 @@ class MiniMaxH3DenoisingStage(BaseStage):
             row_timesteps[condition_img_pos] = max(t_video, MINIMAX_H3_IMGVID_COND_TIMESTEP)
             row_timesteps[target_audio_pos] = t_audio
             row_timesteps[condition_audio_pos] = max(t_audio, MINIMAX_H3_AUDIO_REF_COND_TIMESTEP)
-            unique_timesteps, inverse_indices = torch.unique(
+            unique_timesteps_cpu, inverse_indices_cpu = torch.unique(
                 row_timesteps,
                 sorted=True,
                 return_inverse=True,
             )
-            x[0].index_copy_(0, img_pos, video_rows)
-            audio_x[0].index_copy_(0, audio_pos, audio_rows)
-            video_timestep = torch.tensor(t_video, device=device)
-            audio_timestep = torch.tensor(t_audio, device=device)
+            inverse_indices = inverse_indices_cpu.to(device)
+            block_combined_indices = block_token_tags + (inverse_indices[local_row_start:local_row_stop] * 3)
+            timestep_plan.append(
+                (
+                    unique_timesteps_cpu.to(device),
+                    inverse_indices,
+                    block_combined_indices,
+                )
+            )
+
+        video_step_t = torch.tensor(
+            [float(1.0 - sigma) for sigma in video_sigmas[:-1]],
+            dtype=torch.float32,
+            device=device,
+        )
+        audio_step_t = torch.tensor(
+            [float(1.0 - sigma) for sigma in audio_sigmas[:-1]],
+            dtype=torch.float32,
+            device=device,
+        )
+        video_sigmas_device = torch.tensor(video_sigmas, dtype=torch.float32, device=device)
+        audio_sigmas_device = torch.tensor(audio_sigmas, dtype=torch.float32, device=device)
+        video_sigma_ratios = video_sigmas_device[1:] / video_sigmas_device[:-1]
+        audio_sigma_ratios = audio_sigmas_device[1:] / audio_sigmas_device[:-1]
+        video_one_minus_sigma_ratios = 1.0 - video_sigma_ratios
+        audio_one_minus_sigma_ratios = 1.0 - audio_sigma_ratios
+        video_target_slice = slice(target_video_row_start, None)
+        audio_target_slice = slice(target_audio_row_start, None)
+        video_mask_is_suffix = torch.equal(
+            video_update_cpu,
+            torch.arange(video_update_cpu.numel()) >= target_video_row_start,
+        )
+        audio_mask_is_suffix = torch.equal(
+            audio_update_cpu,
+            torch.arange(audio_update_cpu.numel()) >= target_audio_row_start,
+        )
+        optimized_update = (
+            video_mask_is_suffix and audio_mask_is_suffix and "step_denoising" not in self.scheduler.__dict__
+        )
+        video_denoised_scratch = torch.empty_like(video_rows[video_target_slice])
+        audio_denoised_scratch = torch.empty_like(audio_rows[audio_target_slice])
+        self._request_serial += 1
+        static_cache_key = self._request_serial
+
+        for step in range(len(video_sigmas) - 1):
+            t_video = float(1.0 - video_sigmas[step])
+            t_audio = float(1.0 - audio_sigmas[step])
+            unique_timesteps, inverse_indices, block_combined_indices = timestep_plan[step]
+            if step == 0 or not (video_mask_is_suffix and audio_mask_is_suffix):
+                x[0].index_copy_(0, img_pos, video_rows)
+                audio_x[0].index_copy_(0, audio_pos, audio_rows)
+            else:
+                x[0].index_copy_(0, target_img_pos, video_rows[video_target_slice])
+                audio_x[0].index_copy_(0, audio_pos[audio_update], audio_rows[audio_target_slice])
             video_velocity, audio_velocity = self.transformer(
                 x=x,
                 audio_x=audio_x,
                 img_position_ids=img_position_ids,
-                unique_timesteps=unique_timesteps.to(device),
-                inverse_indices=inverse_indices.to(device),
+                unique_timesteps=unique_timesteps,
+                inverse_indices=inverse_indices,
                 update_mask=video_update,
                 update_audio_mask=audio_update,
                 prompt_embeds=prompt_embeds,
@@ -300,25 +441,49 @@ class MiniMaxH3DenoisingStage(BaseStage):
                 img_pos_for_infer_output_info={"position_ids": target_img_pos},
                 packed_seq_params={"cu_seqlens_q": cu_seqlens},
                 block_token_tags=block_token_tags,
+                block_combined_indices=block_combined_indices,
+                local_embedding_layout=local_embedding_layout,
+                static_cache_key=static_cache_key,
                 skip_mask_out_condition=True,
             )
-            stepped = self.scheduler.step_denoising(
-                input_visual_latent=video_rows[video_update],
-                input_audio_latent=audio_rows[audio_update],
-                timestep=video_timestep,
-                video_timestep=video_timestep,
-                audio_timestep=audio_timestep,
-                noise_pred_visual=video_velocity,
-                noise_pred_audio=audio_velocity[target_audio_row_start:],
-                sigma_curr=video_sigmas[step],
-                sigma_next=video_sigmas[step + 1],
-                video_sigma_curr=video_sigmas[step],
-                video_sigma_next=video_sigmas[step + 1],
-                audio_sigma_curr=audio_sigmas[step],
-                audio_sigma_next=audio_sigmas[step + 1],
-            )
-            video_rows[video_update] = stepped["output_visual_latent"]
-            audio_rows[audio_update] = stepped["output_audio_latent"]
+            audio_target_velocity = audio_velocity[audio_target_slice]
+            if optimized_update:
+                _minimax_h3_update_target_rows_(
+                    video_rows[video_target_slice],
+                    video_velocity.float(),
+                    sigma_t=video_sigmas_device[step],
+                    sigma_curr=video_sigmas[step],
+                    sigma_ratio=video_sigma_ratios[step],
+                    one_minus_sigma_ratio=video_one_minus_sigma_ratios[step],
+                    denoised_scratch=video_denoised_scratch,
+                )
+                _minimax_h3_update_target_rows_(
+                    audio_rows[audio_target_slice],
+                    audio_target_velocity.float(),
+                    sigma_t=audio_sigmas_device[step],
+                    sigma_curr=audio_sigmas[step],
+                    sigma_ratio=audio_sigma_ratios[step],
+                    one_minus_sigma_ratio=audio_one_minus_sigma_ratios[step],
+                    denoised_scratch=audio_denoised_scratch,
+                )
+            else:
+                stepped = self.scheduler.step_denoising(
+                    input_visual_latent=video_rows[video_update],
+                    input_audio_latent=audio_rows[audio_update],
+                    timestep=video_step_t[step],
+                    video_timestep=video_step_t[step],
+                    audio_timestep=audio_step_t[step],
+                    noise_pred_visual=video_velocity,
+                    noise_pred_audio=audio_target_velocity,
+                    sigma_curr=video_sigmas[step],
+                    sigma_next=video_sigmas[step + 1],
+                    video_sigma_curr=video_sigmas[step],
+                    video_sigma_next=video_sigmas[step + 1],
+                    audio_sigma_curr=audio_sigmas[step],
+                    audio_sigma_next=audio_sigmas[step + 1],
+                )
+                video_rows[video_update] = stepped["output_visual_latent"]
+                audio_rows[audio_update] = stepped["output_audio_latent"]
 
         video_latent = minimax_h3_unpatchify_video_tokens(
             video_rows[video_update].cpu(),

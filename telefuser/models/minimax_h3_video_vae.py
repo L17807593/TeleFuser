@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
 
 from telefuser.core.base_model import BaseModel
 
@@ -118,6 +119,9 @@ class MiniMaxH3VideoVAE(BaseModel):
 
     def prepare_decoder_autocast_weights(self, dtype: torch.dtype) -> int:
         return self.model.decoder.prepare_autocast_linear_weights(dtype)
+
+    def enable_parallel_tiling(self, group: dist.ProcessGroup) -> None:
+        self.model.enable_parallel_tiling(group)
 
     @torch.no_grad()
     def decode_normalized(self, latent: torch.Tensor) -> torch.Tensor:

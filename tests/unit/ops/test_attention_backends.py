@@ -60,6 +60,73 @@ def test_flash_attn4_dispatch_unwraps_output_when_lse_is_disabled() -> None:
     )
 
 
+def test_flash_attn4_varlen_dispatch_reuses_cumulative_lengths() -> None:
+    q = torch.randn(1, 5, 2, 4)
+    cu_seqlens = torch.tensor([0, 2, 5], dtype=torch.int32)
+    flash_attn4_varlen = MagicMock(return_value=q[0])
+
+    with (
+        patch.object(attention_impl, "FLASH_ATTN_4_AVAILABLE", True),
+        patch.object(attention_impl, "flash_attn4", MagicMock()),
+        patch.object(attention_impl, "flash_attn4_varlen", flash_attn4_varlen),
+    ):
+        output = attention_impl.attention(
+            q,
+            q,
+            q,
+            attn_impl=attention_impl.AttnImplType.FLASH_ATTN_4,
+            sequence_lengths=[2, 3],
+            cu_seqlens=cu_seqlens,
+            scale=0.5,
+        )
+
+    torch.testing.assert_close(output, q)
+    flash_attn4_varlen.assert_called_once()
+    args = flash_attn4_varlen.call_args.args
+    kwargs = flash_attn4_varlen.call_args.kwargs
+    for actual in args:
+        torch.testing.assert_close(actual, q[0])
+    torch.testing.assert_close(kwargs.pop("cu_seqlens_q"), cu_seqlens)
+    torch.testing.assert_close(kwargs.pop("cu_seqlens_k"), cu_seqlens)
+    assert kwargs == {
+        "max_seqlen_q": 3,
+        "max_seqlen_k": 3,
+        "softmax_scale": 0.5,
+        "causal": False,
+        "return_lse": False,
+    }
+
+
+def test_flash_attn4_packed_falls_back_to_sdpa_without_varlen_backend() -> None:
+    q = torch.randn(1, 5, 2, 4)
+
+    with (
+        patch.object(attention_impl, "FLASH_ATTN_4_AVAILABLE", True),
+        patch.object(attention_impl, "flash_attn4", MagicMock()),
+        patch.object(attention_impl, "flash_attn4_varlen", None),
+    ):
+        output = attention_impl.attention(
+            q,
+            q,
+            q,
+            attn_impl=attention_impl.AttnImplType.FLASH_ATTN_4,
+            sequence_lengths=[2, 3],
+        )
+
+    expected = torch.cat(
+        [
+            torch.nn.functional.scaled_dot_product_attention(
+                part.transpose(0, 1).unsqueeze(0),
+                part.transpose(0, 1).unsqueeze(0),
+                part.transpose(0, 1).unsqueeze(0),
+            )
+            for part in (q[0, :2], q[0, 2:])
+        ],
+        dim=2,
+    ).transpose(1, 2)
+    torch.testing.assert_close(output, expected)
+
+
 def test_sage_attention_prefers_tf_kernel() -> None:
     imported_modules: list[str] = []
     tf_kernel_module = ModuleType("tf_kernel")

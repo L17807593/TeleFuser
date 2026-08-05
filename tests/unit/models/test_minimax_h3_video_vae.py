@@ -1,8 +1,10 @@
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
+from telefuser.models.minimax_h3_video.klvae import AutoencoderKL
 from telefuser.models.minimax_h3_video_vae import (
     MiniMaxH3VideoVAEConfig,
     MiniMaxH3VideoVAEStateDictConverter,
@@ -59,3 +61,20 @@ def test_video_vae_converter_prefixes_composed_model() -> None:
     converted, kwargs = converter.from_official(state)
     assert set(converted) == {"model.encoder.conv_in.conv.weight"}
     assert kwargs == {"config": converter.config}
+
+
+def test_parallel_tile_gather_restores_round_robin_order() -> None:
+    model = AutoencoderKL.__new__(AutoencoderKL)
+    torch.nn.Module.__init__(model)
+    model.parallel_tiling = True
+    model.tile_parallel_group = MagicMock()
+    gathered = torch.tensor([[[0.0], [2.0]], [[1.0], [0.0]]])
+
+    with (
+        patch.object(model, "_tile_parallel_state", return_value=(1, 2)),
+        patch("telefuser.models.minimax_h3_video.klvae.all_gather_stacked", return_value=gathered) as gather,
+    ):
+        results = model._all_gather_tiled_results([torch.tensor([1.0])], num_tiles=3)
+
+    gather.assert_called_once()
+    assert [float(value.item()) for value in results] == [0.0, 1.0, 2.0]

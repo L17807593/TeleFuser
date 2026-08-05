@@ -12,7 +12,14 @@ from typing import Any
 
 import torch
 
-from telefuser.core.config import ModelRuntimeConfig, OffloadConfig, ParallelConfig, WeightOffloadType
+from telefuser.core.config import (
+    AttentionConfig,
+    AttnImplType,
+    ModelRuntimeConfig,
+    OffloadConfig,
+    ParallelConfig,
+    WeightOffloadType,
+)
 from telefuser.core.module_manager import ModuleManager
 from telefuser.models.minimax_h3_audio_vae import MiniMaxH3AudioVAE
 from telefuser.models.minimax_h3_dit import MiniMaxH3DiT
@@ -97,45 +104,87 @@ def load_minimax_h3_pipeline(
     device: str = "cuda:0",
     num_inference_steps: int = 50,
     ulysses_degree: int = 1,
-    enable_fsdp: bool = False,
+    tp_degree: int = 1,
+    text_encoder_tp_degree: int | None = None,
+    enable_fsdp: bool | None = None,
 ) -> MiniMaxH3Pipeline:
     if partition not in {"FL2VA", "Ref2VA"}:
         raise ValueError("partition must be 'FL2VA' or 'Ref2VA'")
     if ulysses_degree not in {1, 2, 4}:
         raise ValueError("ulysses_degree must be 1, 2, or 4")
-    if enable_fsdp and ulysses_degree == 1:
-        raise ValueError("enable_fsdp requires --ulysses-degree 2 or 4 in the example runtime")
+    if tp_degree not in {1, 2, 4}:
+        raise ValueError("tp_degree must be 1, 2, or 4")
+    world_size = ulysses_degree * tp_degree
+    if world_size not in {1, 2, 4}:
+        raise ValueError("ulysses_degree * tp_degree must be 1, 2, or 4")
+    resolved_encoder_tp = world_size if text_encoder_tp_degree is None else text_encoder_tp_degree
+    if resolved_encoder_tp not in {1, 2, 4}:
+        raise ValueError("text_encoder_tp_degree must be 1, 2, or 4")
+    resolved_enable_fsdp = world_size == 4 and tp_degree == 1 if enable_fsdp is None else enable_fsdp
+    if resolved_enable_fsdp and (world_size == 1 or tp_degree > 1):
+        raise ValueError("enable_fsdp requires multi-GPU sequence parallelism without tensor parallelism")
     component_root = Path(model_root) / partition
     if not component_root.is_dir():
         raise FileNotFoundError(f"MiniMax H3 partition not found: {component_root}")
     runtime_device = torch.device(device)
-    offload = OffloadConfig(
-        offload_type=WeightOffloadType.MODEL_CPU_OFFLOAD,
+    use_resident_modules = world_size > 1 or resolved_enable_fsdp
+    resident_offload = OffloadConfig(
+        offload_type=(
+            WeightOffloadType.NO_CPU_OFFLOAD if use_resident_modules else WeightOffloadType.MODEL_CPU_OFFLOAD
+        ),
         pin_cpu_memory=False,
     )
-    bf16_runtime = ModelRuntimeConfig(
+    text_parallel = (
+        ParallelConfig(
+            device_ids=list(range(resolved_encoder_tp)),
+            tp_degree=resolved_encoder_tp,
+            timeout=1800,
+        )
+        if resolved_encoder_tp > 1
+        else ParallelConfig(
+            device_ids=list(range(world_size)),
+            sp_ulysses_degree=world_size,
+            enable_fsdp=resolved_enable_fsdp,
+            timeout=1800,
+        )
+    )
+    text_runtime = ModelRuntimeConfig(
         device_type=runtime_device.type,
         device_id=runtime_device.index or 0,
         torch_dtype=torch.bfloat16,
-        offload_config=offload,
+        offload_config=resident_offload,
+        parallel_config=text_parallel,
     )
     dit_runtime = ModelRuntimeConfig(
         device_type=runtime_device.type,
         device_id=runtime_device.index or 0,
         torch_dtype=torch.bfloat16,
-        offload_config=offload,
+        offload_config=resident_offload,
+        attention_config=AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_4),
         parallel_config=ParallelConfig(
-            device_ids=list(range(ulysses_degree)),
+            device_ids=list(range(world_size)),
             sp_ulysses_degree=ulysses_degree,
-            enable_fsdp=enable_fsdp,
+            tp_degree=tp_degree,
+            enable_fsdp=resolved_enable_fsdp,
             timeout=1800,
         ),
     )
-    fp32_runtime = ModelRuntimeConfig(
+    video_vae_runtime = ModelRuntimeConfig(
         device_type=runtime_device.type,
         device_id=runtime_device.index or 0,
         torch_dtype=torch.float32,
-        offload_config=offload,
+        offload_config=resident_offload,
+        parallel_config=ParallelConfig(
+            device_ids=list(range(world_size)),
+            tp_degree=world_size,
+            timeout=1800,
+        ),
+    )
+    audio_vae_runtime = ModelRuntimeConfig(
+        device_type=runtime_device.type,
+        device_id=runtime_device.index or 0,
+        torch_dtype=torch.float32,
+        offload_config=resident_offload,
     )
 
     manager = ModuleManager(device="cpu", torch_dtype=torch.bfloat16)
@@ -185,10 +234,10 @@ def load_minimax_h3_pipeline(
         manager,
         MiniMaxH3PipelineConfig(
             processor_path=str(component_root / "processor"),
-            text_encoder_config=bf16_runtime,
+            text_encoder_config=text_runtime,
             dit_config=dit_runtime,
-            video_vae_config=fp32_runtime,
-            audio_vae_config=fp32_runtime,
+            video_vae_config=video_vae_runtime,
+            audio_vae_config=audio_vae_runtime,
             num_inference_steps=num_inference_steps,
         ),
     )

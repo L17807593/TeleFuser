@@ -107,3 +107,80 @@ def ulysses_gather_heads(
             return result.flatten(0, 1).permute(1, 2, 0, 3)
 
     return wait
+
+
+def _can_use_destination_major_kernel(*tensors: torch.Tensor) -> bool:
+    return (
+        bool(tensors)
+        and all(tensor.is_cuda for tensor in tensors)
+        and all(tensor.dtype in (torch.float16, torch.bfloat16) for tensor in tensors)
+        and all(tensor.dtype == tensors[0].dtype for tensor in tensors)
+        and all(tensor.stride(-1) == 1 for tensor in tensors)
+        and not torch.compiler.is_compiling()
+    )
+
+
+def ulysses_scatter_qkv(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    process_group: dist.ProcessGroup,
+) -> Callable[[], tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Scatter Q/K/V with one destination-major collective and no intermediate concat."""
+    if query.shape != key.shape or query.shape != value.shape or query.ndim != 4:
+        raise ValueError("Ulysses Q/K/V scatter requires matching 4D tensors")
+    _, world_size = _get_distributed_info(process_group)
+    batch, local_seq_len, num_heads, head_dim = query.shape
+    local_heads = _local_head_count(num_heads, world_size)
+    if batch != 1 or not _can_use_destination_major_kernel(query, key, value):
+        combined_wait = ulysses_scatter_heads(torch.cat((query, key, value), dim=-1), process_group)
+
+        def fallback_wait() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            return combined_wait().chunk(3, dim=-1)
+
+        return fallback_wait
+
+    from telefuser.kernel.triton.ulysses_relayout import pack_qkv_destination_major
+
+    packed = pack_qkv_destination_major(query[0], key[0], value[0], world_size)
+    output = torch.empty_like(packed.flatten())
+    dist.all_to_all_single(output, packed.flatten(), group=process_group)
+
+    def wait() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        result = output.reshape(world_size * local_seq_len, local_heads, 3 * head_dim).unsqueeze(0)
+        return result.chunk(3, dim=-1)
+
+    return wait
+
+
+def ulysses_gather_heads_destination_major(
+    tensor: torch.Tensor,
+    process_group: dist.ProcessGroup,
+    *,
+    num_heads: int,
+) -> Callable[[], torch.Tensor]:
+    """Gather heads using sequence-major NCCL input and one fused output relayout."""
+    if tensor.ndim != 4:
+        raise ValueError("Ulysses head gather requires a 4D tensor")
+    _, world_size = _get_distributed_info(process_group)
+    batch, global_seq_len, local_heads, head_dim = tensor.shape
+    if global_seq_len % world_size:
+        raise ValueError(f"Ulysses sequence length ({global_seq_len}) must be divisible by world_size ({world_size})")
+    expected_local_heads = _local_head_count(num_heads, world_size)
+    if local_heads != expected_local_heads:
+        raise ValueError(f"Ulysses local head count must be {expected_local_heads}, got {local_heads}")
+    if not _can_use_destination_major_kernel(tensor):
+        return ulysses_gather_heads(tensor, process_group, num_heads=num_heads)
+
+    from telefuser.kernel.triton.ulysses_relayout import merge_ulysses_heads
+
+    local_seq_len = global_seq_len // world_size
+    packed = tensor.permute(1, 0, 2, 3).contiguous()
+    output = torch.empty_like(packed.flatten())
+    dist.all_to_all_single(output, packed.flatten(), group=process_group)
+
+    def wait() -> torch.Tensor:
+        received = output.reshape(world_size, local_seq_len, batch, local_heads, head_dim)
+        return merge_ulysses_heads(received).flatten(2, 3)
+
+    return wait

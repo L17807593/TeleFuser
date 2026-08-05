@@ -22,7 +22,7 @@ PPL_CONFIG: dict[str, Any] = {
     "request_path": str(MINIMAX_H3_DEFAULT_REQUEST),
     "num_inference_steps": None,
     "device": "cuda:0",
-    "enable_fsdp": False,
+    "enable_fsdp": None,
 }
 
 
@@ -40,17 +40,20 @@ def get_pipeline(
     request_path: str = PPL_CONFIG["request_path"],
     device: str = PPL_CONFIG["device"],
     num_inference_steps: int | None = PPL_CONFIG["num_inference_steps"],
-    enable_fsdp: bool = PPL_CONFIG["enable_fsdp"],
+    enable_fsdp: bool | None = PPL_CONFIG["enable_fsdp"],
 ) -> MiniMaxH3Pipeline:
     """Load the checkpoint partition required by a local JSON request."""
     request = _load_request(request_path, num_inference_steps)
     configured_steps = int(request.get("num_inference_steps", 50))
+    tp_degree = 2 if parallelism == 4 else 1
     return load_minimax_h3_pipeline(
         model_root,
         partition=partition_for_minimax_h3_request(request),
         device=device,
         num_inference_steps=configured_steps,
-        ulysses_degree=parallelism,
+        ulysses_degree=parallelism // tp_degree,
+        tp_degree=tp_degree,
+        text_encoder_tp_degree=parallelism,
         enable_fsdp=enable_fsdp,
     )
 
@@ -84,7 +87,10 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=PPL_CONFIG["num_inference_steps"])
     parser.add_argument("--device", default=PPL_CONFIG["device"])
     parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4), default=1)
-    parser.add_argument("--enable-fsdp", action="store_true", default=PPL_CONFIG["enable_fsdp"])
+    fsdp_group = parser.add_mutually_exclusive_group()
+    fsdp_group.add_argument("--enable-fsdp", dest="enable_fsdp", action="store_true")
+    fsdp_group.add_argument("--disable-fsdp", dest="enable_fsdp", action="store_false")
+    parser.set_defaults(enable_fsdp=PPL_CONFIG["enable_fsdp"])
     parser.add_argument("--output-path", "--output", dest="output_path", default="minimax_h3_request.mp4")
     args = parser.parse_args()
 
