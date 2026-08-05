@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -100,6 +101,15 @@ def _build_local_embedding_layout(
 @dataclass(frozen=True)
 class MiniMaxH3DenoiseResult:
     video_latent: torch.Tensor
+    audio_latent: torch.Tensor
+    packed: dict[str, torch.Tensor]
+    runtime_metrics: dict[str, float | int]
+
+
+@dataclass(frozen=True)
+class MiniMaxH3DenoiseRemainder:
+    """Parent-consumed denoising outputs that do not enter video decoding."""
+
     audio_latent: torch.Tensor
     packed: dict[str, torch.Tensor]
     runtime_metrics: dict[str, float | int]
@@ -207,10 +217,17 @@ class MiniMaxH3DenoisingStage(BaseStage):
         self,
         *,
         plan: MiniMaxH3ResolvedPlan,
-        text: MiniMaxH3TextCondition,
-        conditions: list[MiniMaxH3PreparedCondition],
+        text: MiniMaxH3TextCondition | dict[str, torch.Tensor],
+        conditions: list[MiniMaxH3PreparedCondition] | list[dict[str, Any]],
         num_inference_steps: int,
+        _transport_video: bool = False,
     ) -> MiniMaxH3DenoiseResult:
+        if isinstance(text, dict):
+            text = MiniMaxH3TextCondition(**text)
+        conditions = [
+            MiniMaxH3PreparedCondition(**condition) if isinstance(condition, dict) else condition
+            for condition in conditions
+        ]
         shape = plan.shape
         latent_t = int(shape["video_latent_t"])
         latent_h = int(shape["height"]) // 16
@@ -485,8 +502,11 @@ class MiniMaxH3DenoisingStage(BaseStage):
                 video_rows[video_update] = stepped["output_visual_latent"]
                 audio_rows[audio_update] = stepped["output_audio_latent"]
 
+        video_tokens = video_rows[video_update]
+        if not _transport_video:
+            video_tokens = video_tokens.cpu()
         video_latent = minimax_h3_unpatchify_video_tokens(
-            video_rows[video_update].cpu(),
+            video_tokens,
             latent_shape=(latent_t, latent_h // 2, latent_w // 2, 24),
             patch_size=(1, 2, 2),
         )
@@ -512,5 +532,30 @@ class MiniMaxH3DenoisingStage(BaseStage):
         }
         return MiniMaxH3DenoiseResult(video_latent, audio_latent, packed, runtime_metrics)
 
+    def denoise_for_video_vae(
+        self,
+        *,
+        plan: MiniMaxH3ResolvedPlan,
+        text: MiniMaxH3TextCondition | dict[str, torch.Tensor],
+        conditions: list[MiniMaxH3PreparedCondition] | list[dict[str, Any]],
+        num_inference_steps: int,
+    ) -> dict[str, Any]:
+        """Keep the video latent on device while returning parent-consumed outputs separately."""
+        result = self.denoise(
+            plan=plan,
+            text=text,
+            conditions=conditions,
+            num_inference_steps=num_inference_steps,
+            _transport_video=True,
+        )
+        return {
+            "video_latent": result.video_latent,
+            "remainder": MiniMaxH3DenoiseRemainder(
+                audio_latent=result.audio_latent,
+                packed=result.packed,
+                runtime_metrics=result.runtime_metrics,
+            ),
+        }
 
-__all__ = ["MiniMaxH3DenoiseResult", "MiniMaxH3DenoisingStage"]
+
+__all__ = ["MiniMaxH3DenoiseRemainder", "MiniMaxH3DenoiseResult", "MiniMaxH3DenoisingStage"]

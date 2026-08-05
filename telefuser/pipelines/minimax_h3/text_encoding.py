@@ -96,11 +96,53 @@ class MiniMaxH3TextEncodingStage(BaseStage):
         videos: list[torch.Tensor],
         condition_labels: list[tuple[str, int]],
     ) -> MiniMaxH3TextCondition:
+        condition = self._encode_impl(
+            task=task,
+            prompt=prompt,
+            images=images,
+            videos=videos,
+            condition_labels=condition_labels,
+        )
+        return MiniMaxH3TextCondition(condition.hidden_states.cpu(), condition.token_tags.cpu())
+
+    @with_model_offload(["text_encoder"])
+    @torch.inference_mode()
+    def encode_for_denoising(
+        self,
+        *,
+        task: str,
+        prompt: str,
+        images: list[Any],
+        videos: list[torch.Tensor],
+        condition_labels: list[tuple[str, int]],
+    ) -> dict[str, torch.Tensor]:
+        """Keep text conditioning on the producer device for direct worker handoff."""
+        condition = self._encode_impl(
+            task=task,
+            prompt=prompt,
+            images=images,
+            videos=videos,
+            condition_labels=condition_labels,
+        )
+        return {
+            "hidden_states": condition.hidden_states,
+            "token_tags": condition.token_tags.to(condition.hidden_states.device),
+        }
+
+    def _encode_impl(
+        self,
+        *,
+        task: str,
+        prompt: str,
+        images: list[Any],
+        videos: list[torch.Tensor],
+        condition_labels: list[tuple[str, int]],
+    ) -> MiniMaxH3TextCondition:
         if task == "t2va":
             ids = minimax_h3_text_only_ids(self.tokenizer, prompt)
             tags = torch.ones(ids.shape[0], dtype=torch.long)
             hidden = self.text_encoder.encode_ids(ids)
-            return MiniMaxH3TextCondition(hidden.cpu(), tags)
+            return MiniMaxH3TextCondition(hidden, tags)
         if task == "fl2va":
             return self._encode_images(prompt, images)
         if task != "ref2va":
@@ -124,7 +166,7 @@ class MiniMaxH3TextEncodingStage(BaseStage):
             pixel_values=vision["pixel_values"],
             image_grid_thw=grids,
         )
-        return MiniMaxH3TextCondition(hidden.cpu(), tags)
+        return MiniMaxH3TextCondition(hidden, tags)
 
     @staticmethod
     def _sample_video(frames: torch.Tensor) -> tuple[torch.Tensor, list[float]]:
@@ -198,7 +240,7 @@ class MiniMaxH3TextEncodingStage(BaseStage):
             pixel_values_videos=pixel_values_videos,
             video_grid_thw=video_grids,
         )
-        return MiniMaxH3TextCondition(hidden.cpu(), tags)
+        return MiniMaxH3TextCondition(hidden, tags)
 
 
 __all__ = ["MiniMaxH3TextCondition", "MiniMaxH3TextEncodingStage"]

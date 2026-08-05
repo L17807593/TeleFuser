@@ -174,13 +174,14 @@ def test_t2va_denoising_stage_runs_complete_packed_contract_on_cpu() -> None:
         hidden_states=torch.zeros(3, 5120, dtype=torch.bfloat16),
         token_tags=torch.ones(3, dtype=torch.long),
     )
-    result = stage.denoise(
+    transported = stage.denoise_for_video_vae(
         plan=plan,
-        text=text,
+        text={"hidden_states": text.hidden_states, "token_tags": text.token_tags},
         conditions=[],
         num_inference_steps=2,
     )
-    assert result.video_latent.shape == (1, 24, plan.shape["video_latent_t"], 48, 48)
+    result = transported["remainder"]
+    assert transported["video_latent"].shape == (1, 24, plan.shape["video_latent_t"], 48, 48)
     assert result.audio_latent.shape == (2, 32, plan.shape["audio_latent_t"])
     assert result.packed["seq_len"] % 64 == 0
     assert result.runtime_metrics["peak_allocated_bytes"] == 0
@@ -292,9 +293,22 @@ def test_pipeline_wraps_multi_gpu_stages_and_closes_workers(monkeypatch: pytest.
             pass
 
     class _Worker:
-        def __init__(self, stage: object) -> None:
+        def __init__(self, stage: object, **kwargs: object) -> None:
             self.stage = stage
+            self.kwargs = kwargs
             self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _Channel:
+        instances = []
+
+        def __init__(self, consumer_world_size: int, **kwargs: object) -> None:
+            self.consumer_world_size = consumer_world_size
+            self.kwargs = kwargs
+            self.closed = False
+            self.instances.append(self)
 
         def close(self) -> None:
             self.closed = True
@@ -305,6 +319,7 @@ def test_pipeline_wraps_multi_gpu_stages_and_closes_workers(monkeypatch: pytest.
     monkeypatch.setattr(pipeline_module, "MiniMaxH3AudioVAEStage", _Stage)
     monkeypatch.setattr(pipeline_module, "MiniMaxH3DenoisingStage", _Stage)
     monkeypatch.setattr(pipeline_module, "ParallelWorker", _Worker)
+    monkeypatch.setattr(pipeline_module, "WorkerTensorChannel", _Channel)
     monkeypatch.setattr(pipeline_module.dist, "is_initialized", lambda: False)
 
     pipeline = MiniMaxH3Pipeline(device="cpu")
@@ -329,10 +344,39 @@ def test_pipeline_wraps_multi_gpu_stages_and_closes_workers(monkeypatch: pytest.
     assert isinstance(pipeline.text_stage, _Worker)
     assert isinstance(pipeline.video_vae_stage, _Worker)
     assert isinstance(pipeline.denoising_stage, _Worker)
+    assert len(_Channel.instances) == 3
+    assert pipeline._uses_direct_text_handoff
+    assert pipeline._uses_direct_visual_handoff
+    assert pipeline._uses_direct_video_latent_handoff
+    assert pipeline.text_stage.kwargs["tensor_output_methods"] == ("encode_for_denoising",)
+    assert pipeline.video_vae_stage.kwargs["tensor_output_methods"] == ("encode_visual_for_denoising",)
+    assert pipeline.denoising_stage.kwargs["tensor_output_methods"] == ("denoise_for_video_vae",)
     pipeline.stop()
     assert pipeline.text_stage.closed
     assert pipeline.video_vae_stage.closed
     assert pipeline.denoising_stage.closed
+    assert all(channel.closed for channel in _Channel.instances)
+
+
+def test_condition_transport_payload_drops_source_media() -> None:
+    material = MiniMaxH3MaterialPlanItem(0, "reference", "image", "a", "image.reference_preserve")
+    visual_rows = torch.zeros(2, 96)
+    condition = MiniMaxH3PreparedCondition(
+        material,
+        "image",
+        image=object(),
+        visual_rows=visual_rows,
+        latent_t=1,
+        latent_h=2,
+        latent_w=3,
+    )
+
+    payload = MiniMaxH3Pipeline._condition_transport_payload(condition)
+
+    assert "image" not in payload
+    assert "video_frames" not in payload
+    assert payload["visual_rows"] is visual_rows
+    assert MiniMaxH3PreparedCondition(**payload).latent_w == 3
 
 
 def test_pipeline_resolves_deferred_worker_result() -> None:
