@@ -88,6 +88,14 @@ Input: (B, S_LOCAL, H_GLOBAL, D)
 - Suitable for medium-length sequences
 - Requires number of heads to be divisible by GPU count
 
+When the installed `tf-kernel` wheel contains the Ulysses CUDA IPC operators and every rank in the Ulysses process
+group is on the same host, TeleFuser uses the source-built Copy Engine backend for grouped Q/K/V scatter. It writes
+directly into each peer final-layout target buffer, caches target allocations by tag/shape/dtype, and fans out over
+one high-priority copy stream. Q, K, and V stay as separate submissions so projection compute can overlap
+with communication, while the three transfers share one CUDA stream-memory handshake that does not occupy an SM.
+Single collectives and output gather stay on the faster PyTorch/NCCL path. Multi-host groups, missing kernels,
+and unsupported CUDA IPC configurations also use the PyTorch/NCCL fallback.
+
 ### Ring Attention
 
 Sequence parallelism based on P2P communication:
@@ -145,9 +153,9 @@ Asynchronous All-to-All implementation, overlapping computation and communicatio
 
 ```python
 # Initiate async All-to-All
-q_wait = ulysses_scatter_heads(q, group)
-k_wait = ulysses_scatter_heads(k, group)
-v_wait = ulysses_scatter_heads(v, group)
+q_wait = ulysses_scatter_heads(q, group, tag="q", barrier=False)
+k_wait = ulysses_scatter_heads(k, group, tag="k", barrier=False)
+v_wait = ulysses_scatter_heads(v, group, tag="v")
 
 # Wait for completion
 q = q_wait()

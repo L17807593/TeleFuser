@@ -63,12 +63,14 @@ def test_ulysses_submits_all_qkv_collectives_before_waiting() -> None:
     events: list[str] = []
     submit_index = 0
 
-    def submit(tensor: torch.Tensor, group: object):
+    def submit(tensor: torch.Tensor, group: object, *, tag: str, barrier: bool = True):
         nonlocal submit_index
         del group
-        name = ("q", "k", "v")[submit_index]
+        name = ("v", "q", "k")[submit_index]
         submit_index += 1
         events.append(f"submit-{name}")
+        assert tag == name
+        assert barrier is (name == "k")
 
         def wait() -> torch.Tensor:
             events.append(f"wait-{name}")
@@ -94,7 +96,7 @@ def test_ulysses_submits_all_qkv_collectives_before_waiting() -> None:
     ):
         module(hidden_states, rotary)
 
-    assert events == ["submit-q", "submit-k", "submit-v", "wait-q", "wait-k", "wait-v", "submit-output", "wait-output"]
+    assert events == ["submit-v", "submit-q", "submit-k", "wait-q", "wait-k", "wait-v", "submit-output", "wait-output"]
 
 
 def test_transformer_rejects_non_patch_aligned_latent_geometry() -> None:

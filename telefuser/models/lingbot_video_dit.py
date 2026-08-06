@@ -145,19 +145,24 @@ class LingBotVideoAttention(nn.Module):
         packed_sequence_lengths: list[int] | None = None,
     ) -> torch.Tensor:
         batch, sequence, _ = hidden_states.shape
-        query = self.to_q(hidden_states).view(batch, sequence, self.num_heads, self.head_dim)
-        key = self.to_k(hidden_states).view(batch, sequence, self.num_heads, self.head_dim)
-        value = self.to_v(hidden_states).view(batch, sequence, self.num_heads, self.head_dim)
-        query = apply_lingbot_video_complex_rope(self.norm_q(query), rotary_emb)
-        key = apply_lingbot_video_complex_rope(self.norm_k(key), rotary_emb)
         group = self.ulysses_group
         use_ulysses = (
             group is not None and dist.is_available() and dist.is_initialized() and dist.get_world_size(group) > 1
         )
+
+        value = self.to_v(hidden_states).view(batch, sequence, self.num_heads, self.head_dim)
         if use_ulysses:
-            query_wait = ulysses_scatter_heads(query, group)
-            key_wait = ulysses_scatter_heads(key, group)
-            value_wait = ulysses_scatter_heads(value, group)
+            value_wait = ulysses_scatter_heads(value, group, tag="v", barrier=False)
+
+        query = self.to_q(hidden_states).view(batch, sequence, self.num_heads, self.head_dim)
+        query = apply_lingbot_video_complex_rope(self.norm_q(query), rotary_emb)
+        if use_ulysses:
+            query_wait = ulysses_scatter_heads(query, group, tag="q", barrier=False)
+
+        key = self.to_k(hidden_states).view(batch, sequence, self.num_heads, self.head_dim)
+        key = apply_lingbot_video_complex_rope(self.norm_k(key), rotary_emb)
+        if use_ulysses:
+            key_wait = ulysses_scatter_heads(key, group, tag="k")
             query = query_wait()
             key = key_wait()
             value = value_wait()

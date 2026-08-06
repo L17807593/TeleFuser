@@ -87,6 +87,14 @@ telefuser/distributed/
 - 适合中等长度序列
 - 需要头数能被 GPU 数整除
 
+当已安装的 `tf-kernel` wheel 包含 Ulysses CUDA IPC 算子，且 Ulysses 进程组内所有 rank 位于同一主机时，
+TeleFuser 会对成组的 Q/K/V scatter 使用源码编译的 Copy Engine 后端。该后端直接写入对端最终布局的
+target buffer，按 tag/shape/dtype 缓存 target allocation，并使用一条高优先级 copy stream。
+Q、K、V 保持独立提交，因此 projection 计算仍可与通信重叠；三次传输只共享一次不占用 SM 的 CUDA
+stream-memory 握手。
+单次 collective 和输出 gather 继续使用实测更快的 PyTorch/NCCL 路径。跨主机进程组、缺少算子或 CUDA IPC
+不受支持时也会回退到 PyTorch/NCCL。
+
 ### Ring Attention
 
 基于 P2P 通信的序列并行：
@@ -144,9 +152,9 @@ config = ParallelConfig(
 
 ```python
 # 发起异步 All-to-All
-q_wait = ulysses_scatter_heads(q, group)
-k_wait = ulysses_scatter_heads(k, group)
-v_wait = ulysses_scatter_heads(v, group)
+q_wait = ulysses_scatter_heads(q, group, tag="q", barrier=False)
+k_wait = ulysses_scatter_heads(k, group, tag="k", barrier=False)
+v_wait = ulysses_scatter_heads(v, group, tag="v")
 
 # 等待完成
 q = q_wait()

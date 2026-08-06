@@ -6,11 +6,16 @@ the process-group world size.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch.distributed as dist
 import torch.distributed._functional_collectives as fc
+
+logger = logging.getLogger(__name__)
+_cuda_ipc_groups: dict[int, Any | None] = {}
 
 
 def _get_distributed_info(process_group: dist.ProcessGroup) -> tuple[int, int]:
@@ -35,16 +40,66 @@ def _wait_async_tensor(tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
+def _get_cuda_ipc_group(tensor: torch.Tensor, process_group: dist.ProcessGroup) -> Any | None:
+    """Lazily create the optional same-host tf-kernel communication backend."""
+    if not tensor.is_cuda or torch.compiler.is_compiling():
+        return None
+    key = id(process_group)
+    if key in _cuda_ipc_groups:
+        return _cuda_ipc_groups[key]
+    try:
+        from tf_kernel.ulysses import CudaIpcUlyssesGroup
+
+        if not CudaIpcUlyssesGroup.is_available():
+            _cuda_ipc_groups[key] = None
+        else:
+            _cuda_ipc_groups[key] = CudaIpcUlyssesGroup(process_group, tensor.device)
+    except (ImportError, NotImplementedError, RuntimeError) as error:
+        logger.debug("CUDA IPC Ulysses is unavailable; using NCCL: %s", error)
+        _cuda_ipc_groups[key] = None
+    return _cuda_ipc_groups[key]
+
+
+def _disable_cuda_ipc_group(process_group: dist.ProcessGroup, error: Exception) -> None:
+    key = id(process_group)
+    group = _cuda_ipc_groups.get(key)
+    if group is not None:
+        group.close()
+    _cuda_ipc_groups[key] = None
+    logger.warning("CUDA IPC Ulysses failed; falling back to NCCL: %s", error)
+
+
 def ulysses_scatter_heads(
     tensor: torch.Tensor,
     process_group: dist.ProcessGroup,
     *,
     async_comm: bool = True,
+    tag: str | None = None,
+    barrier: bool = True,
 ) -> Callable[[], torch.Tensor]:
-    """Scatter global heads and gather sequence across Ulysses ranks."""
+    """Scatter global heads and gather sequence across Ulysses ranks.
+
+    A tagged call with ``barrier=False`` starts a same-host Copy Engine group.
+    Tagged calls share completion until the final ``barrier=True`` call; standalone
+    calls remain on NCCL.
+    """
     _, world_size = _get_distributed_info(process_group)
     batch, local_seq_len, num_heads, head_dim = tensor.shape
     local_heads = _local_head_count(num_heads, world_size)
+
+    existing_group = _cuda_ipc_groups.get(id(process_group))
+    use_cuda_ipc = (
+        async_comm
+        and tag is not None
+        and (not barrier or (existing_group is not None and existing_group.has_pending_group))
+    )
+    cuda_ipc_group = _get_cuda_ipc_group(tensor, process_group) if use_cuda_ipc else None
+    if cuda_ipc_group is not None:
+        try:
+            handle = cuda_ipc_group.all_to_all_single_4d_async(tensor, mode=0, tag=tag, barrier=barrier)
+            return handle.wait
+        except RuntimeError as error:
+            _disable_cuda_ipc_group(process_group, error)
 
     tensor = tensor.reshape(batch, local_seq_len, world_size, local_heads, head_dim)
     tensor = tensor.permute(2, 1, 0, 3, 4).contiguous()
@@ -84,6 +139,16 @@ def ulysses_gather_heads(
     expected_local_heads = _local_head_count(num_heads, world_size)
     if local_heads != expected_local_heads:
         raise ValueError(f"Ulysses local head count must be {expected_local_heads}, got {local_heads}")
+
+    if _can_use_destination_major_kernel(tensor):
+        return _gather_heads_destination_major(
+            tensor,
+            process_group,
+            world_size=world_size,
+            num_heads=num_heads,
+            async_comm=async_comm,
+        )
+
     local_seq_len = global_seq_len // world_size
 
     tensor = tensor.reshape(batch, world_size, local_seq_len, local_heads, head_dim)
@@ -133,7 +198,7 @@ def ulysses_scatter_qkv(
     batch, local_seq_len, num_heads, head_dim = query.shape
     local_heads = _local_head_count(num_heads, world_size)
     if batch != 1 or not _can_use_destination_major_kernel(query, key, value):
-        combined_wait = ulysses_scatter_heads(torch.cat((query, key, value), dim=-1), process_group)
+        combined_wait = ulysses_scatter_heads(torch.cat((query, key, value), dim=-1), process_group, tag="qkv")
 
         def fallback_wait() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             return combined_wait().chunk(3, dim=-1)
@@ -172,15 +237,42 @@ def ulysses_gather_heads_destination_major(
     if not _can_use_destination_major_kernel(tensor):
         return ulysses_gather_heads(tensor, process_group, num_heads=num_heads)
 
+    return _gather_heads_destination_major(
+        tensor,
+        process_group,
+        world_size=world_size,
+        num_heads=num_heads,
+        async_comm=True,
+    )
+
+
+def _gather_heads_destination_major(
+    tensor: torch.Tensor,
+    process_group: dist.ProcessGroup,
+    *,
+    world_size: int,
+    num_heads: int,
+    async_comm: bool,
+) -> Callable[[], torch.Tensor]:
+    """Submit sequence-major All-to-All and fuse the received head relayout."""
+
     from telefuser.kernel.triton.ulysses_relayout import merge_ulysses_heads
 
+    batch, global_seq_len, local_heads, head_dim = tensor.shape
     local_seq_len = global_seq_len // world_size
     packed = tensor.permute(1, 0, 2, 3).contiguous()
     output = torch.empty_like(packed.flatten())
-    dist.all_to_all_single(output, packed.flatten(), group=process_group)
+    work = dist.all_to_all_single(
+        output,
+        packed.flatten(),
+        group=process_group,
+        async_op=async_comm,
+    )
 
     def wait() -> torch.Tensor:
+        if work is not None:
+            work.wait()
         received = output.reshape(world_size, local_seq_len, batch, local_heads, head_dim)
-        return merge_ulysses_heads(received).flatten(2, 3)
+        return merge_ulysses_heads(received).flatten(2, 3).reshape(batch, local_seq_len, num_heads, head_dim)
 
     return wait
