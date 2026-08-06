@@ -29,7 +29,13 @@ PPL_CONFIG = dict(
 )
 
 
-def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"]):
+def get_pipeline(
+    parallelism: int = 1,
+    model_root: str = PPL_CONFIG["model_root"],
+    offload_type: WeightOffloadType = WeightOffloadType.NO_CPU_OFFLOAD,
+    offload_ratio: float = 1.0,
+    prefetch_size: int = 1,
+):
     vae_path = [f"{model_root}/{PPL_CONFIG['vae_filename']}"]
     text_encoder_path = [
         f"{model_root}/text_encoder/model-00001-of-00004.safetensors",
@@ -44,7 +50,9 @@ def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"
     pipeline = QwenImagePipeline(device="cuda", torch_dtype=torch.bfloat16)
     pipe_config = QwenImagePipelineConfig()
     pipe_config.dit_config.attention_config = AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"])
-    pipe_config.dit_config.offload_config.offload_type = WeightOffloadType.NO_CPU_OFFLOAD
+    pipe_config.dit_config.offload_config.offload_type = offload_type
+    pipe_config.dit_config.offload_config.offload_ratio = offload_ratio
+    pipe_config.dit_config.offload_config.prefetch_size = prefetch_size
     pipe_config.sample_solver = PPL_CONFIG["sample_solver"]
     if parallelism > 1:
         pipe_config.dit_config.parallel_config.device_ids = list(range(parallelism))
@@ -89,16 +97,47 @@ def run(
 @click.option("--negative_prompt", default=PPL_CONFIG["negative_prompt"], help="Negative prompt")
 @click.option("--output", default="image.jpg", help="Output image filename")
 @click.option("--model_root", default=PPL_CONFIG["model_root"], help="Model root directory")
-def main(aspect_ratio, gpu_num, prompt, negative_prompt, output, model_root):
-    pipeline = get_pipeline(gpu_num, model_root)
+@click.option(
+    "--offload_type",
+    type=click.Choice(["none", "async"]),
+    default="none",
+    show_default=True,
+    help="DiT weight offload strategy",
+)
+@click.option(
+    "--offload_ratio",
+    type=click.FloatRange(min=0.0, max=1.0),
+    default=1.0,
+    show_default=True,
+    help="Fraction of DiT blocks offloaded for async mode",
+)
+@click.option(
+    "--prefetch_size",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help="Number of upcoming DiT blocks prefetched for async mode",
+)
+def main(
+    aspect_ratio, gpu_num, prompt, negative_prompt, output, model_root, offload_type, offload_ratio, prefetch_size
+):
+    weight_offload_type = (
+        WeightOffloadType.ASYNC_CPU_OFFLOAD if offload_type == "async" else WeightOffloadType.NO_CPU_OFFLOAD
+    )
+    pipeline = get_pipeline(gpu_num, model_root, weight_offload_type, offload_ratio, prefetch_size)
+
+    torch.cuda.reset_peak_memory_stats()
 
     # Warm up
     images = run(pipeline, prompt, aspect_ratio, negative_prompt=negative_prompt)
 
     # Timing run
+    torch.cuda.synchronize()
     s = time.time()
     images = run(pipeline, prompt, aspect_ratio, negative_prompt=negative_prompt)
+    torch.cuda.synchronize()
     print(f"pipe cost {time.time() - s} s")
+    print(f"peak allocated {torch.cuda.max_memory_allocated() / 2**30:.2f} GiB")
     for i, image in enumerate(images):
         image.save(output.replace(".jpg", f"_{i}.jpg"))
     del pipeline

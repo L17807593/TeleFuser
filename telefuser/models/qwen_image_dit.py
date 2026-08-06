@@ -572,7 +572,7 @@ class QwenImageTransformerBlock(nn.Module):
 class QwenImageDiT(BaseModel):
     """Diffusion Transformer for Qwen-Image generation."""
 
-    def __init__(self, num_layers: int = 60):
+    def __init__(self, num_layers: int = 60, prequantized_fp8: bool = False):
         super().__init__()
 
         self.pos_embed = QwenEmbedRope(theta=10000, axes_dim=[16, 56, 56], scale_rope=True)
@@ -597,6 +597,15 @@ class QwenImageDiT(BaseModel):
         self.proj_out = nn.Linear(3072, 64)
         self.layer_name_list = ["transformer_blocks"]
         self.async_offload_manager = None
+
+        # Pre-quantized Lightning checkpoints contain FP8 block weights and
+        # per-output-channel ``weight_scale`` tensors. Construct matching
+        # modules before loading so those scale tensors are not rejected as
+        # unexpected state-dict entries.
+        if prequantized_fp8:
+            from telefuser.ops.quantized_linear import replace_linear_layers
+
+            replace_linear_layers(self.transformer_blocks, torch.float8_e4m3fn)
 
     def enable_quant(self, quant_type: str | torch.dtype):
         """Enable quantization for transformer blocks."""
@@ -800,10 +809,14 @@ class QwenImageDitStateDictConverter:
     def __init__(self):
         pass
 
-    def from_diffusers(self, state_dict: dict) -> dict:
+    def from_diffusers(self, state_dict: dict) -> dict | tuple[dict, dict]:
+        if any(key.endswith("weight_scale") for key in state_dict):
+            return state_dict, {"prequantized_fp8": True}
         return state_dict
 
-    def from_official(self, state_dict: dict) -> dict:
+    def from_official(self, state_dict: dict) -> dict | tuple[dict, dict]:
+        if any(key.endswith("weight_scale") for key in state_dict):
+            return state_dict, {"prequantized_fp8": True}
         return state_dict
 
 

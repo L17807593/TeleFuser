@@ -266,22 +266,45 @@ pre-quantized checkpoint loading. The model-zoo checkpoint
 contains per-output-channel `weight_scale` tensors for the transformer-block linears.
 The loader now constructs scale-aware `LinearFP8` modules before assigning the state dict.
 The example uses 1328x1328 output, 16 steps, CFG=1, one warmup, and one timing run.
-For the async run, `offload_ratio=1.0`, `prefetch_size=2`, and the default
-`pin_cpu_memory=True` were used:
+The async runs used `prefetch_size=2` and the default `pin_cpu_memory=True`:
 
 | Configuration | Pipeline time | Peak allocated VRAM |
 |---|---:|---:|
 | Pre-quantized FP8 Lightning, `NO_CPU_OFFLOAD` | 5.106 s | 40.55 GiB |
+| Pre-quantized FP8 Lightning, `ASYNC_CPU_OFFLOAD`, `offload_ratio=0.5`, `prefetch_size=2` | 5.236 s | 32.24 GiB |
 | Pre-quantized FP8 Lightning, `ASYNC_CPU_OFFLOAD`, `offload_ratio=1.0`, `prefetch_size=2` | 6.481 s | 22.73 GiB |
 
-The async configuration used 17.82 GiB less VRAM (43.9%) at a 26.9% longer pipeline time.
-Both outputs were pixel-identical across all 5,290,752 RGB channel values
+At `offload_ratio=0.5`, async offload used 8.31 GiB less VRAM (20.5%) while increasing pipeline
+time by only 2.5%, making it the balanced configuration for this workload. At
+`offload_ratio=1.0`, it used 17.82 GiB less VRAM (43.9%) at a 26.9% longer pipeline time.
+All outputs were pixel-identical across all 5,290,752 RGB channel values
 (`max_abs_diff=0`). These are single-run H100 measurements, not general performance guarantees.
 
-The previous Cache-DiT comparison has been removed. Cache-DiT is not installed in the
-current environment, and its earlier result used an unpinned external setup. A new
-comparison should only be added after both implementations run from current sources
-with identical checkpoint, input, warmup, and measurement protocols.
+#### Cache-DiT Comparison
+
+The comparison was rerun from the pinned Cache-DiT commit
+[`ad9335f`](https://github.com/vipshop/cache-dit/commit/ad9335fdcc7d648b50a7d4ff46b1f25e2abdaf45)
+using the same checkpoint, prompt, 1328x1328 input, 16 steps, CFG=1, one warmup, and one timing
+run. Cache-DiT used its default leaf-module selection (1,087 targets), 543 persistent targets
+(about 50%), `persistent_bins=4`, `async_transfer=True`, `transfer_buckets=4`, and
+`prefetch_limit=False`. Its `max_inflight_prefetch_bytes=1,360,433,152` limit equals the
+checkpoint-state size of four Qwen transformer blocks (4 x 340,108,288 bytes), matching the
+future non-resident weight volume represented by TeleFuser `prefetch_size=4`. TeleFuser used
+block-level async offload with `offload_ratio=0.5`:
+
+| Implementation | Pipeline time | Peak allocated VRAM |
+|---|---:|---:|
+| TeleFuser block-level `ASYNC_CPU_OFFLOAD`, `offload_ratio=0.5`, `prefetch_size=4` | 5.153 s | 33.50 GiB |
+| Cache-DiT leafwise, 543/1,087 persistent, four-block byte budget | 8.040 s | 31.39 GiB |
+
+Cache-DiT used 2.11 GiB less peak VRAM (6.3%), while TeleFuser was 1.56x faster (35.9% less
+pipeline time). For context, enabling Cache-DiT `prefetch_limit=True` capped the same
+`transfer_buckets=4` run at eight leaf targets, producing 10.280 s and 31.23 GiB. Replacing
+that smaller target-count window with the four-block byte-equivalent window improved Cache-DiT
+pipeline time by 21.8% for 0.16 GiB additional peak VRAM. Both Cache-DiT and TeleFuser outputs
+were pixel-identical to the no-offload output across all 5,290,752 RGB channel values
+(`max_abs_diff=0`). This is a single-run H100 comparison; the target granularity and
+configuration details are part of the result.
 
 ### Pinned Memory
 

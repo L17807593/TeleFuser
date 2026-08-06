@@ -260,21 +260,43 @@ Qwen-Image-2512 BF16 权重、1664x928 输出、50 steps、CFG=4、`offload_rati
 `Qwen-Image-2512-Lightning/qwen_image_2512_fp8_e4m3fn_scaled_8steps_v1.0.safetensors`
 包含 transformer block 线性层的按输出通道 `weight_scale`；loader 会在加载 state dict
 之前构造带 scale 的 `LinearFP8` 模块。example 使用 1328x1328 输出、16 steps、CFG=1，先
-执行一次 warmup，再执行一次 timing run。异步配置使用 `offload_ratio=1.0`、
-`prefetch_size=2`，并保持默认的 `pin_cpu_memory=True`：
+执行一次 warmup，再执行一次 timing run。异步配置使用 `prefetch_size=2`，并保持默认的
+`pin_cpu_memory=True`：
 
 | 配置 | Pipeline 时间 | 峰值已分配显存 |
 |---|---:|---:|
 | 预量化 FP8 Lightning，`NO_CPU_OFFLOAD` | 5.106 s | 40.55 GiB |
+| 预量化 FP8 Lightning，`ASYNC_CPU_OFFLOAD`，`offload_ratio=0.5`，`prefetch_size=2` | 5.236 s | 32.24 GiB |
 | 预量化 FP8 Lightning，`ASYNC_CPU_OFFLOAD`，`offload_ratio=1.0`，`prefetch_size=2` | 6.481 s | 22.73 GiB |
 
-异步配置少用 17.82 GiB 显存（43.9%），Pipeline 时间增加 26.9%。两次输出在全部
-5,290,752 个 RGB 通道值上逐像素一致（`max_abs_diff=0`）。这是单次 H100 测量，不代表
-其他系统或配置的通用性能。
+`offload_ratio=0.5` 时少用 8.31 GiB 显存（20.5%），Pipeline 时间仅增加 2.5%，是该负载
+下的均衡配置。`offload_ratio=1.0` 时少用 17.82 GiB 显存（43.9%），Pipeline 时间增加
+26.9%。全部输出在 5,290,752 个 RGB 通道值上逐像素一致（`max_abs_diff=0`）。这是单次
+H100 测量，不代表其他系统或配置的通用性能。
 
-此前的 Cache-DiT 对比已删除。当前环境没有安装 Cache-DiT，旧结果也依赖未固定版本的外部
-环境。只有在当前源码下使用相同 checkpoint、输入、warmup 和计量口径重新运行两种实现后，
-才应重新加入对比数据。
+#### Cache-DiT 对比
+
+使用固定的 Cache-DiT commit
+[`ad9335f`](https://github.com/vipshop/cache-dit/commit/ad9335fdcc7d648b50a7d4ff46b1f25e2abdaf45)
+重新测试，使用相同 checkpoint、prompt、1328x1328 输入、16 steps、CFG=1、一次 warmup 和
+一次 timing run。Cache-DiT 使用默认 leaf-module 选择（1087 个 target），其中 543 个
+常驻（约 50%），`persistent_bins=4`、`async_transfer=True`、`transfer_buckets=4`、
+`prefetch_limit=False`。其 `max_inflight_prefetch_bytes=1,360,433,152`，等于 4 个 Qwen
+transformer block 的 checkpoint state 大小（4 x 340,108,288 bytes），与 TeleFuser
+`prefetch_size=4` 表示的未来非常驻权重体量一致。TeleFuser 使用 block 级异步卸载，
+`offload_ratio=0.5`：
+
+| 实现 | Pipeline 时间 | 峰值已分配显存 |
+|---|---:|---:|
+| TeleFuser block 级 `ASYNC_CPU_OFFLOAD`，`offload_ratio=0.5`，`prefetch_size=4` | 5.153 s | 33.50 GiB |
+| Cache-DiT leafwise，543/1087 常驻，4-block 等价字节预算 | 8.040 s | 31.39 GiB |
+
+Cache-DiT 少用 2.11 GiB 峰值显存（6.3%），但 TeleFuser 快约 1.56x（Pipeline 时间少 35.9%）。
+作为对照，Cache-DiT 开启 `prefetch_limit=True` 时，同样的 `transfer_buckets=4` 会被限制为
+8 个 leaf target，结果是 10.280 s 和 31.23 GiB。改为与 4 个 block 等价的字节窗口后，
+Cache-DiT 的 Pipeline 时间缩短 21.8%，峰值显存增加 0.16 GiB。Cache-DiT 和 TeleFuser 的
+输出都与 no-offload 输出在全部 5,290,752 个 RGB 通道值上逐像素一致
+（`max_abs_diff=0`）。这是单次 H100 对比，target 粒度和配置细节是结果的一部分。
 
 ### 固定内存
 
