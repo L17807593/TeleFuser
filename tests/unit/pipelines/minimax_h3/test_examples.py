@@ -5,7 +5,6 @@ import pytest
 
 from examples.minimax_h3 import minimax_h3_fl2va_h100 as fl2va_example
 from examples.minimax_h3 import minimax_h3_ref2va_h100 as ref2va_example
-from examples.minimax_h3 import minimax_h3_request_h100 as request_example
 from examples.minimax_h3.common import (
     MINIMAX_H3_DEFAULT_FL2VA_IMAGE,
     MINIMAX_H3_DEFAULT_REF2VA_AUDIO,
@@ -73,7 +72,7 @@ def test_ref2va_ordered_cli_materials_preserve_mixed_reference_order() -> None:
 
 
 def test_examples_expose_standard_pipeline_service_entrypoints() -> None:
-    for example in (fl2va_example, ref2va_example, request_example):
+    for example in (fl2va_example, ref2va_example):
         assert example.PPL_CONFIG["model_root"]
         assert callable(example.get_pipeline)
         assert callable(example.run)
@@ -200,6 +199,37 @@ def test_ref2va_run_preserves_ordered_service_conditions() -> None:
     assert ref2va_example.run(Pipeline(), conditions=conditions) is marker
     assert calls[0]["conditions"] is conditions
     assert calls[0]["task"] == "ref2va"
+
+
+def test_ref2va_run_request_preserves_ordered_json_conditions(tmp_path: Path) -> None:
+    request_path = tmp_path / "request.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "task": "ref2va",
+                "prompt": "preserve order",
+                "conditions": [
+                    {"type": "audio", "role": "reference", "uri": "voice.mp3"},
+                    {"type": "image", "role": "reference", "uri": "subject.png"},
+                ],
+                "target": {"short_edge": 768, "aspect_ratio": "16:9", "duration_seconds": 5},
+                "num_inference_steps": 50,
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+    marker = object()
+
+    class Pipeline:
+        def __call__(self, **kwargs: object) -> object:
+            calls.append(kwargs)
+            return marker
+
+    assert ref2va_example.run_request(Pipeline(), request_path, num_inference_steps=20) is marker
+    assert [condition["type"] for condition in calls[0]["conditions"]] == ["audio", "image"]
+    assert calls[0]["conditions"][0]["uri"] == str(tmp_path / "voice.mp3")
+    assert calls[0]["num_inference_steps"] == 20
 
 
 def test_run_with_file_returns_service_artifact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

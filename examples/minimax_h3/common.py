@@ -92,6 +92,23 @@ def partition_for_minimax_h3_request(request: dict[str, Any]) -> str:
     return partition_for_task(request.get("task")).upper()
 
 
+def run_minimax_h3_request(
+    pipeline: MiniMaxH3Pipeline,
+    request_path: str | Path,
+    *,
+    num_inference_steps: int | None = None,
+    expected_partition: str | None = None,
+) -> MiniMaxH3Generation:
+    """Run a JSON request, optionally restricting it to one checkpoint partition."""
+    request = load_minimax_h3_request(request_path)
+    partition = partition_for_minimax_h3_request(request)
+    if expected_partition is not None and partition != expected_partition.upper():
+        raise ValueError(f"request requires {partition} checkpoint partition, expected {expected_partition.upper()}")
+    if num_inference_steps is not None:
+        request["num_inference_steps"] = num_inference_steps
+    return pipeline(**request)
+
+
 def minimax_h3_adaln_cache_timesteps(request: dict[str, Any], *, num_inference_steps: int | None = None) -> list[float]:
     """Return every unique AdaLN timestep needed by a canonical H3 request."""
     profile = minimax_h3_task_profile(str(request["task"]).lower())
@@ -328,5 +345,6 @@ __all__ = [
     "load_minimax_h3_request",
     "minimax_h3_adaln_cache_timesteps",
     "partition_for_minimax_h3_request",
+    "run_minimax_h3_request",
     "save_generation",
 ]

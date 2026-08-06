@@ -139,12 +139,12 @@ python examples/minimax_h3/minimax_h3_ref2va_h100.py \
   --output outputs/minimax_h3_ref2va_ordered.mp4
 ```
 
-The legacy convenience flags still group repeated arguments as images, videos, then audio. Use `--material TYPE=URI` or the JSON request runner whenever
-heterogeneous ordering is semantic. It defaults to `examples/data/minimax-h3/ref2va.json`; relative material URIs
-are resolved from the request file's directory.
+The legacy convenience flags still group repeated arguments as images, videos, then audio. Use `--material TYPE=URI` or
+the Ref2VA JSON request mode whenever heterogeneous ordering is semantic. Relative material URIs are resolved from the
+request file's directory.
 
 ```bash
-python examples/minimax_h3/minimax_h3_request_h100.py \
+python examples/minimax_h3/minimax_h3_ref2va_h100.py \
   --request examples/data/minimax-h3/ref2va.json \
   --output outputs/minimax_h3_ordered_request.mp4
 ```
@@ -193,7 +193,9 @@ python examples/minimax_h3/minimax_h3_ref2va_h100.py \
   --output outputs/minimax_h3_ref2va_online_adaln.mp4
 ```
 
-The generic JSON request runner retains an explicit online-adaln-cache switch for callers that use that entrypoint.
+Ref2VA JSON request mode retains explicit `--online-adaln-cache` and `--no-online-adaln-cache` switches; it defaults
+to cache-off to match the former standalone request runner.
+
 FSDP remains unsupported for cache mode; single-GPU, Ulysses, and DiT TP are supported. Online TP collection gathers
 each step modulation output across TP ranks before releasing the projection weights.
 
@@ -266,8 +268,7 @@ curl -X POST http://127.0.0.1:8001/v1/tasks/create \
   -H "Content-Type: application/json" \
   -d "{\"task\":\"s2v\",\"prompt\":\"Use <Video 1>, then <Audio 2>.\",\"conditions\":[{\"type\":\"video\",\"role\":\"reference\",\"uri\":\"https://example.com/motion.mp4\"},{\"type\":\"audio\",\"role\":\"reference\",\"uri\":\"https://example.com/voice.mp3\"}],\"resolution\":\"768p\",\"aspect_ratio\":\"16:9\",\"target_video_length\":5}"
 ```
-
-Use `/v1/service/metadata` to inspect the active task contract. The JSON request runner remains the convenient local
+Use `/v1/service/metadata` to inspect the active task contract. Ref2VA's `--request` mode is the convenient local
 entrypoint for request files and resolves relative material paths beside the JSON file.
 
 ## Generation And Parallel Options
@@ -303,7 +304,7 @@ FSDP2 remains available for an SP-only DiT profile and cannot be combined with D
 it explicitly for a two-GPU Ulysses run:
 
 ```bash
-python examples/minimax_h3/minimax_h3_request_h100.py \
+python examples/minimax_h3/minimax_h3_ref2va_h100.py \
   --ulysses-degree 2 \
   --enable-fsdp \
   --output outputs/minimax_h3_ref2va_fsdp.mp4
