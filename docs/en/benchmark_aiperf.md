@@ -132,29 +132,34 @@ and uses `tools/validation/benchmark_lingbot_world_v2_direct.py`.
 
 ### Current one-minute streaming replay
 
-The one-minute workload was rerun on 2026-08-03 at TeleFuser commit
-`284996dd616cfd44a55523687b7f2a63a281abb9`. It validates sustained target generation, bounded KV-cache capacity,
-and the paced LiveKit delivery path on the current communication-optimized revision.
+The one-minute workload was rerun on 2026-08-06 with the current source tree, four H100 80 GB GPUs, Python
+3.11.13, PyTorch 2.11.0+cu128, CUDA 12.8, BF16 DiT, FP32 VAE, FlashAttention-4, disabled FSDP, and disabled
+`torch.compile`. The source tree includes the tagged Q/K/V Copy Engine Ulysses path.
 
 The run used the `stream_lingbot_world_v2_1min.json` workload and AIPerf 0.11.0 at commit
-`e977ffbb1648510acec431b2a3fbd1a0f7bb8a35`. The 60-second request was truncated to 60 complete latent chunks:
-957 generated frames representing 59.75 seconds of media. With `local_attn_size=18` and `sink_size=6`, the
-240-latent-frame session reported a fixed 28,080-token KV capacity.
+`e977ffbb1648510acec431b2a3fbd1a0f7bb8a35`. Its `delivery_mode=lossless` request uses FIFO backpressure and
+keeps the LiveKit video track open until the AIPerf client confirms the sender declared frame count. The 60-second
+request generated 957 frames across 60 complete latent chunks, representing 59.75 seconds of media. The steady
+summary excludes the first 13-frame chunk; the 240-latent-frame session reported a fixed 28,080-token KV capacity
+with `local_attn_size=18` and `sink_size=6`.
 
 | Metric | Result |
 |---|---:|
+| Successful sessions | 1 / 1 |
 | Generated target frames / chunks | 957 / 60 |
 | Steady frames / chunks after excluding chunk 0 | 944 / 59 |
-| Steady target compute time / FPS | 58.2791 s / **16.1979** |
-| Chunk compute mean / p50 / p90 / p99 / max | 0.9878 / 0.9593 / 1.0624 / 1.0932 / 1.1149 s |
-| LiveKit stream FPS / client frames | 13.1967 / 803 |
-| First client frame / session runtime | 6.0682 / 66.8948 s |
-| Runtime creation | 1.4176 s |
-| Artifact | `20260803_095518_62ec043c` |
+| Steady target compute time / FPS | 53.6901 s / **17.5824** |
+| Chunk compute mean / p50 / p90 / p99 / max | 0.9100 / 0.9088 / 0.9177 / 0.9751 / 1.0549 s |
+| LiveKit declared / decoded client frames | 958 / 961 |
+| Client callback FPS after first frame | 15.2313 |
+| First client frame / session runtime | 5.9822 / 79.2523 s |
+| Runtime creation | 1.4279 s |
+| Artifact | `20260806_132517_46419f8f` |
 
-The target completed all 60 chunks and cleared the average 16 FPS compute gate. It did not keep every chunk below one
-second: p99 was 1.0932 seconds and the maximum was 1.1149 seconds. The lower client frame count belongs to the paced
-delivery measurement and must not be conflated with target generation completeness.
+The target completed all 60 chunks and clears the average 16 FPS compute gate. Lossless delivery completed only
+after the client confirmed all 958 declared frames. The three additional client decoder callbacks come from the
+LiveKit startup track and must not be interpreted as generated model frames.
+
 
 ## Reproducibility
 

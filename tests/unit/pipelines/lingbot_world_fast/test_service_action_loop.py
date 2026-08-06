@@ -906,3 +906,41 @@ def test_service_start_warms_the_pipeline_with_its_default_shape() -> None:
     assert warmup_config.image.size == (832, 480)
     assert warmup_config.chunk_size == 4
     assert warmup_config.frame_num == 29
+
+
+def test_lossless_output_queue_blocks_without_evicting_video() -> None:
+    async def _run() -> None:
+        service = LingBotWorldFastService(MagicMock())
+        state = _state()
+        state.config.delivery_mode = "lossless"
+        state.loop = asyncio.get_running_loop()
+        state.output_queue = asyncio.Queue(maxsize=1)
+        producer = threading.Thread(
+            target=lambda: (
+                service._put_output(state, {"type": "chunk", "index": 0}),
+                service._put_output(state, {"type": "chunk", "index": 1}),
+            )
+        )
+        producer.start()
+        await asyncio.sleep(0.01)
+        assert producer.is_alive()
+        assert await state.output_queue.get() == {"type": "chunk", "index": 0}
+        await asyncio.to_thread(producer.join, 1.0)
+        assert not producer.is_alive()
+        assert await state.output_queue.get() == {"type": "chunk", "index": 1}
+        assert LingBotWorldFastService._runtime_metrics(state)["dropped_video_payloads"] == 0
+
+    asyncio.run(_run())
+
+
+def test_create_session_validates_delivery_mode() -> None:
+    pipeline = MagicMock()
+    service = LingBotWorldFastService(pipeline)
+    session_id = service.create_session(
+        {"session_id": "lossless", "image": Image.new("RGB", (8, 8)), "delivery_mode": "lossless"}
+    )
+    assert service._sessions[session_id].config.delivery_mode == "lossless"
+    service.close_session(session_id)
+
+    with pytest.raises(ValueError, match="delivery_mode"):
+        service.create_session({"image": Image.new("RGB", (8, 8)), "delivery_mode": "unknown"})
