@@ -10,8 +10,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor
 from packaging.version import Version
+from torch import Tensor
+
 # from xformers.ops import memory_efficient_attention
 
 
@@ -48,9 +49,7 @@ def create_sinusoidal_pos_embedding(
     if time.ndim != 1:
         raise ValueError("The time tensor is expected to be of shape `(batch_size, )`.")
 
-    fraction = torch.linspace(
-        0.0, 1.0, dimension // 2, dtype=torch.float32, device=device
-    )
+    fraction = torch.linspace(0.0, 1.0, dimension // 2, dtype=torch.float32, device=device)
     period = min_period * (max_period / min_period) ** fraction
 
     # Compute the outer product
@@ -58,8 +57,6 @@ def create_sinusoidal_pos_embedding(
     sin_input = scaling_factor[None, :] * time[:, None]
     pos_emb = torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
     return pos_emb
-
-
 
 
 def make_att_2d_masks(pad_masks, att_masks):
@@ -170,8 +167,10 @@ def fv_col_span(prefix_len, num_task_tokens, use_cls, use_patch):
     fv_len = (1 if use_cls else 0) + (num_task_tokens if use_patch else 0)
     return prefix_len - fv_len, prefix_len
 
-def block_suffix_to_fv_(att_2d_masks, suffix_row_start, prefix_len,
-                        num_task_tokens, use_cls=False, use_patch=True, drop_mask=None):
+
+def block_suffix_to_fv_(
+    att_2d_masks, suffix_row_start, prefix_len, num_task_tokens, use_cls=False, use_patch=True, drop_mask=None
+):
     """In-place mask out the suffix-to-future-video attention edge.
 
     `make_att_2d_masks`' cumsum scheme cannot express "a query cannot see a
@@ -201,6 +200,7 @@ def block_suffix_to_fv_(att_2d_masks, suffix_row_start, prefix_len,
         att_2d_masks[:, suffix_row_start:, fv_start:fv_end] = block & keep
     return att_2d_masks
 
+
 def resize_with_pad(img, width, height, pad_value=-1):
     # assume no-op when width height fits already
     if img.ndim != 4:
@@ -211,9 +211,7 @@ def resize_with_pad(img, width, height, pad_value=-1):
     ratio = max(cur_width / width, cur_height / height)
     resized_height = int(cur_height / ratio)
     resized_width = int(cur_width / ratio)
-    resized_img = F.interpolate(
-        img, size=(resized_height, resized_width), mode="bilinear", align_corners=False
-    )
+    resized_img = F.interpolate(img, size=(resized_height, resized_width), mode="bilinear", align_corners=False)
 
     pad_height = max(0, int(height - resized_height))
     pad_width = max(0, int(width - resized_width))
@@ -236,7 +234,8 @@ def our_eager_attention_forward(
         query_states: Query tensor of shape [batch_size, seq_len, num_attention_heads, head_dim].
         key_states: Key tensor of shape [batch_size, seq_len, num_key_value_heads, head_dim].
         value_states: Value tensor of shape [batch_size, seq_len, num_key_value_heads, head_dim].
-        attention_mask: Attention mask tensor, typically [batch_size, 1, seq_len, seq_len] or [batch_size, seq_len, seq_len].
+        attention_mask: Attention mask tensor, typically
+            [batch_size, 1, seq_len, seq_len] or [batch_size, seq_len, seq_len].
 
     Returns:
         Output tensor of shape [batch_size, seq_len, num_attention_heads * head_dim].
@@ -245,33 +244,23 @@ def our_eager_attention_forward(
     num_key_value_heads = key_states.shape[2]
     num_key_value_groups = num_att_heads // num_key_value_heads
 
-    key_states = einops.repeat(
-        key_states, "b l h d -> b l (h g) d", g=num_key_value_groups
-    )
-    value_states = einops.repeat(
-        value_states, "b l h d -> b l (h g) d", g=num_key_value_groups
-    )
+    key_states = einops.repeat(key_states, "b l h d -> b l (h g) d", g=num_key_value_groups)
+    value_states = einops.repeat(value_states, "b l h d -> b l (h g) d", g=num_key_value_groups)
 
     query_states_permuted = torch.einsum("blhd->bhld", query_states)
     key_states_permuted = torch.einsum("blhd->bhld", key_states)
 
-    att_weights = torch.einsum(
-        "bhqd,bhkd->bhqk", query_states_permuted, key_states_permuted
-    )
+    att_weights = torch.einsum("bhqd,bhkd->bhqk", query_states_permuted, key_states_permuted)
     att_weights *= head_dim**-0.5
 
     big_neg = -2.3819763e38
-    masked_att_weights = torch.where(
-        attention_mask[:, None, :, :], att_weights, big_neg
-    )
+    masked_att_weights = torch.where(attention_mask[:, None, :, :], att_weights, big_neg)
 
     probs = nn.functional.softmax(masked_att_weights, dim=-1)
     probs = probs.to(dtype=value_states.dtype)
 
     value_states_permuted = torch.einsum("blhd->bhld", value_states)  # [B, H, L_v, D]
-    att_output = torch.einsum(
-        "bhqk,bhkv->bhqv", probs, value_states_permuted
-    )  # [B, H, L_q, D]
+    att_output = torch.einsum("bhqk,bhkv->bhqv", probs, value_states_permuted)  # [B, H, L_q, D]
     att_output = torch.einsum("bhld->blhd", att_output)  # [B, L, H, D]
     att_output = att_output.reshape(bsize, seq_len, num_att_heads * head_dim)
 
@@ -286,7 +275,7 @@ def apply_rope(
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Applies RoPE positions [B, L] to x [B, L, H, D]."""
-    original_dtype = x.dtype # bf16
+    original_dtype = x.dtype  # bf16
     d = x.shape[-1]
     d_half = d // 2
     device = x.device
@@ -297,19 +286,18 @@ def apply_rope(
 
     freq_exponents = (2.0 / d) * torch.arange(d_half, dtype=dtype, device=device)
     timescale = max_wavelength**freq_exponents
-    radians = torch.einsum("bl,h->blh", positions_casted, 1.0 / timescale) # fp32 -> bf16
+    radians = torch.einsum("bl,h->blh", positions_casted, 1.0 / timescale)  # fp32 -> bf16
 
     radians = radians[..., None, :]  # [B, L, 1, D_half]
 
-    sin = torch.sin(radians) # bf16
-    cos = torch.cos(radians) # bf16
+    sin = torch.sin(radians)  # bf16
+    cos = torch.cos(radians)  # bf16
 
-    x1, x2 = x_casted.split(d_half, dim=-1) # fp32
+    x1, x2 = x_casted.split(d_half, dim=-1)  # fp32
 
-    res = torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1) # fp32
+    res = torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)  # fp32
 
-    return res.to(original_dtype) # bf16
-
+    return res.to(original_dtype)  # bf16
 
 
 # Copyright 2024 The HuggingFace Inc. team. All rights reserved.
@@ -327,9 +315,6 @@ def apply_rope(
 # limitations under the License.
 
 import torch
-import torch.nn.functional as F  # noqa: N812
-from packaging.version import Version
-import einops
 
 FLEX_SPARSE_BLOCK_SIZE = 128
 FLEX_KERNEL_OPTIONS = {"BLOCK_M": 32, "BLOCK_N": 64, "num_warps": 4, "num_stages": 2}
@@ -344,6 +329,7 @@ if Version(torch.__version__) > Version("2.5.0"):
         flex_attention,
     )
 
+
 # @torch.compile(dynamic=False)
 def flex_attention_forward(
     query_states: torch.Tensor,
@@ -357,9 +343,6 @@ def flex_attention_forward(
     """
     batch_size, seq_len, num_att_heads, head_dim = query_states.shape
     original_dtype = query_states.dtype
-    num_key_value_heads = key_states.shape[2]
-    # num_key_value_groups = num_att_heads // num_key_value_heads # 16 // 2 = 8
-
     query_states = query_states.transpose(1, 2)
     key_states = key_states.transpose(1, 2)
     value_states = value_states.transpose(1, 2)
@@ -456,7 +439,6 @@ def build_block_mask(
     This allocates the dense 4D mask once; the returned BlockMask can be reused across layers.
     """
     from torch.nn.attention.flex_attention import (
-        _mask_mod_signature,
         _round_up_to_multiple,
         create_block_mask,
         create_mask,
@@ -475,19 +457,24 @@ def build_block_mask(
     def precomputed_mask_factory(precomputed_mask: torch.Tensor):
         def mask_mod(b, h, q_idx, kv_idx):
             return precomputed_mask[b][h][q_idx][kv_idx]
+
         return mask_mod
 
     mask_4d = create_mask(
         mod_fn=precomputed_mask_factory(padded_mask),
-        B=b_mask, H=h_mask,
-        Q_LEN=q_len_rounded, KV_LEN=kv_len_rounded,
+        B=b_mask,
+        H=h_mask,
+        Q_LEN=q_len_rounded,
+        KV_LEN=kv_len_rounded,
         device=causal_mask.device,
     )
 
     block_mask = create_block_mask(
         mask_mod=precomputed_mask_factory(mask_4d),
-        B=b_mask, H=h_mask,
-        Q_LEN=q_len_rounded, KV_LEN=kv_len_rounded,
+        B=b_mask,
+        H=h_mask,
+        Q_LEN=q_len_rounded,
+        KV_LEN=kv_len_rounded,
         BLOCK_SIZE=block_size,
         device=causal_mask.device,
         _compile=False,
@@ -507,7 +494,6 @@ def flex_attention_with_block_mask(
     Run flex_attention with a pre-built BlockMask (no create_mask allocation per call).
     """
     batch_size = query_states.shape[0]
-    num_att_heads = query_states.shape[2]
     head_dim = query_states.shape[3]
     original_dtype = query_states.dtype
 
@@ -515,8 +501,8 @@ def flex_attention_with_block_mask(
     key_states = key_states.transpose(1, 2).to(torch.float32)
     value_states = value_states.transpose(1, 2).to(torch.float32)
 
-    q_len_rounded = block_mask.shape[-2] if hasattr(block_mask, 'shape') else query_states.shape[2]
-    kv_len_rounded = block_mask.shape[-1] if hasattr(block_mask, 'shape') else key_states.shape[2]
+    q_len_rounded = block_mask.shape[-2] if hasattr(block_mask, "shape") else query_states.shape[2]
+    kv_len_rounded = block_mask.shape[-1] if hasattr(block_mask, "shape") else key_states.shape[2]
 
     pad_q = q_len_rounded - query_states.shape[2]
     pad_k = kv_len_rounded - key_states.shape[2]
@@ -543,12 +529,8 @@ def flex_attention_with_block_mask(
     return attn_output
 
 
-
 # modified from https://github.com/mlfoundations/open_flamingo/blob/main/open_flamingo/src/helpers.py
-import math
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 
 # FFN
@@ -564,7 +546,7 @@ def FeedForward(dim, mult=4):
 
 def reshape_tensor(x, heads):
     bs, length, width = x.shape
-    #(bs, length, width) --> (bs, length, n_heads, dim_per_head)
+    # (bs, length, width) --> (bs, length, n_heads, dim_per_head)
     x = x.view(bs, length, heads, -1)
     # (bs, length, n_heads, dim_per_head) --> (bs, n_heads, length, dim_per_head)
     x = x.transpose(1, 2)
@@ -574,7 +556,6 @@ def reshape_tensor(x, heads):
 
 
 class PerceiverAttention(nn.Module):
-
     def __init__(self, *, dim, dim_head=64, heads=8):
         super().__init__()
         self.scale = dim_head**-0.5
@@ -600,7 +581,7 @@ class PerceiverAttention(nn.Module):
         x = self.norm1(x)
         latents = self.norm2(latents)
 
-        b, l, _ = latents.shape
+        batch_size, latent_length, _ = latents.shape
 
         q = self.to_q(latents)
         kv_input = torch.cat((x, latents), dim=-2)
@@ -616,98 +597,12 @@ class PerceiverAttention(nn.Module):
         weight = torch.softmax(weight.float(), dim=-1).type(weight.dtype)
         out = weight @ v
 
-        out = out.permute(0, 2, 1, 3).reshape(b, l, -1)
+        out = out.permute(0, 2, 1, 3).reshape(batch_size, latent_length, -1)
 
         return self.to_out(out)
 
 
-class AttentionPool2d(nn.Module):
-
-    def __init__(self, seq_len: int, embed_dim: int, num_heads: int, output_dim: int = None):
-        super().__init__()
-        self.positional_embedding = nn.Parameter(torch.randn(seq_len + 1, embed_dim) / embed_dim**0.5)
-        self.k_proj = nn.Linear(embed_dim, embed_dim)
-        self.q_proj = nn.Linear(embed_dim, embed_dim)
-        self.v_proj = nn.Linear(embed_dim, embed_dim)
-        self.c_proj = nn.Linear(embed_dim, output_dim or embed_dim)
-        self.num_heads = num_heads
-
-    def forward(self, x, return_all_tokens=False):
-        # x = x.reshape(x.shape[0], x.shape[1], x.shape[2] * x.shape[3]).permute(2, 0, 1)  # NCHW -> (HW)NC
-        x = x.permute(1, 0, 2)  # (N(HW)C) => (HW)NC
-        x = torch.cat([x.mean(dim=0, keepdim=True), x], dim=0)  # (HW+1)NC
-        x = x + self.positional_embedding[:, None, :].to(x.dtype)  # (HW+1)NC
-        x, _ = F.multi_head_attention_forward(query=x,
-                                              key=x,
-                                              value=x,
-                                              embed_dim_to_check=x.shape[-1],
-                                              num_heads=self.num_heads,
-                                              q_proj_weight=self.q_proj.weight,
-                                              k_proj_weight=self.k_proj.weight,
-                                              v_proj_weight=self.v_proj.weight,
-                                              in_proj_weight=None,
-                                              in_proj_bias=torch.cat([self.q_proj.bias, self.k_proj.bias, self.v_proj.bias]),
-                                              bias_k=None,
-                                              bias_v=None,
-                                              add_zero_attn=False,
-                                              dropout_p=0,
-                                              out_proj_weight=self.c_proj.weight,
-                                              out_proj_bias=self.c_proj.bias,
-                                              use_separate_proj_weight=True,
-                                              training=self.training,
-                                              need_weights=False)
-        if return_all_tokens:
-            return x
-        else:
-            return x[0]
-
-
-class Resampler(nn.Module):
-
-    def __init__(
-        self,
-        dim_in=768,
-        dim_mid=1024,
-        dim_head=64,
-        dim_out=1024,
-        num_layers=8,
-        num_queries=8,
-        num_heads=16,
-        ff_mult=4,
-    ):
-        super().__init__()
-
-        self.queries = nn.Parameter(torch.randn(1, num_queries, dim_in) / dim_mid ** 0.5)
-
-        self.proj_in = nn.Linear(dim_in, dim_mid)
-        self.proj_out = nn.Linear(dim_mid, dim_out)
-        self.norm_out = nn.LayerNorm(dim_out)
-
-        self.layers = nn.ModuleList([])
-        for _ in range(num_layers):
-            self.layers.append(
-                nn.ModuleList(
-                    [
-                        PerceiverAttention(dim=dim_mid, dim_head=dim_head, heads=num_heads),
-                        FeedForward(dim=dim_mid, mult=ff_mult),
-                    ]
-                )
-            )
-
-    def forward(self, x):
-        queries = self.queries.repeat(x.size(0), 1, 1)
-        x = self.proj_in(x)
-
-        for attn, ff in self.layers:
-            queries = attn(x, queries) + queries
-            queries = ff(queries) + queries
-
-        queries = self.proj_out(queries)
-        queries = self.norm_out(queries)
-        return queries
-
 class TaskTokenResampler(nn.Module):
-
     def __init__(
         self,
         dim_in=768,
@@ -730,10 +625,13 @@ class TaskTokenResampler(nn.Module):
         self.layers = nn.ModuleList([])
         for _ in range(num_layers):
             self.layers.append(
-                nn.ModuleList([
-                    PerceiverAttention(dim=dim_mid, dim_head=dim_head, heads=num_heads),
-                    FeedForward(dim=dim_mid, mult=ff_mult),
-                ]))
+                nn.ModuleList(
+                    [
+                        PerceiverAttention(dim=dim_mid, dim_head=dim_head, heads=num_heads),
+                        FeedForward(dim=dim_mid, mult=ff_mult),
+                    ]
+                )
+            )
 
     def forward(self, x, queries):
         queries = self.proj_in1(queries)
@@ -747,191 +645,6 @@ class TaskTokenResampler(nn.Module):
         queries = self.norm_out(queries)
         return queries
 
-
-class ResamplerXL(nn.Module):
-
-    def __init__(
-        self,
-        dim=1024,
-        depth=8,
-        dim_head=64,
-        heads=16,
-        num_queries=8,
-        embedding_dim=768,
-        output1_dim=768,
-        output2_dim=1280,
-        ff_mult=4,
-    ):
-        super().__init__()
-
-        self.latents = nn.Parameter(torch.randn(1, num_queries, dim) / dim**0.5)
-
-        self.proj_in = nn.Linear(embedding_dim, dim)
-
-        # self.proj_out = nn.Linear(dim, output_dim)
-        self.norm_out = nn.LayerNorm(dim)
-
-        self.in_dim = dim
-        self.out_dim = output1_dim + output2_dim
-
-        self.layers = nn.ModuleList([])
-        for _ in range(depth):
-            self.layers.append(
-                nn.ModuleList([
-                    PerceiverAttention(dim=dim, dim_head=dim_head, heads=heads),
-                    FeedForward(dim=dim, mult=ff_mult),
-                ]))
-
-        self.unet_proj_1 = nn.Linear(self.in_dim, output1_dim)
-        self.unet_proj_2 = nn.Linear(self.in_dim, output2_dim)
-        self.unet_attnpool = AttentionPool2d(num_queries, self.in_dim, heads, output2_dim)
-
-    def forward(self, x):
-
-        latents = self.latents.repeat(x.size(0), 1, 1)
-
-        x = self.proj_in(x)
-
-        for attn, ff in self.layers:
-            latents = attn(x, latents) + latents
-            latents = ff(latents) + latents
-
-        hidden_embeds = self.norm_out(latents)
-
-        encoder_hidden_1 = self.unet_proj_1(hidden_embeds)  # [bs, 256, 768]
-        encoder_hidden_2 = self.unet_proj_2(hidden_embeds)  # [bs, 256, 1280]
-        prompt_embeds = torch.cat([encoder_hidden_1, encoder_hidden_2], dim=-1)  # [bs, 256, 2048]
-        pooled_prompt_embeds = self.unet_attnpool(hidden_embeds)  # [bs, 1280]
-
-        return prompt_embeds, pooled_prompt_embeds
-
-
-class ResamplerXLV2(nn.Module):
-
-    def __init__(
-        self,
-        dim=1024,
-        depth=8,
-        dim_head=64,
-        heads=16,
-        num_queries=8,
-        embedding_dim=768,
-        output1_dim=768,
-        output2_dim=1280,
-        ff_mult=4,
-        normalize=True
-    ):
-        super().__init__()
-
-        self.latents = nn.Parameter(torch.randn(1, num_queries, dim) / dim**0.5)
-
-        self.normalize = normalize
-        self.proj_in = nn.Linear(embedding_dim, dim)
-
-        # self.proj_out = nn.Linear(dim, output_dim)
-        self.norm_out = nn.LayerNorm(dim)
-
-        self.in_dim = dim
-        self.out_dim = output1_dim + output2_dim
-
-        self.layers = nn.ModuleList([])
-        for _ in range(depth):
-            self.layers.append(
-                nn.ModuleList([
-                    PerceiverAttention(dim=dim, dim_head=dim_head, heads=heads),
-                    FeedForward(dim=dim, mult=ff_mult),
-                ]))
-
-        self.unet_proj_1 = nn.Linear(self.in_dim, output1_dim)
-        self.unet_proj_2 = nn.Linear(self.in_dim, output2_dim)
-        self.unet_attnpool = AttentionPool2d(num_queries, self.in_dim, heads, output2_dim)
-
-    def forward(self, x,pooled_text_embeds=None):
-
-        latents = self.latents.repeat(x.size(0), 1, 1)
-
-        if self.normalize:
-            x = F.normalize(x)
-
-        x = self.proj_in(x)
-
-        for attn, ff in self.layers:
-            latents = attn(x, latents) + latents
-            latents = ff(latents) + latents
-
-        hidden_embeds = self.norm_out(latents)
-
-        encoder_hidden_1 = self.unet_proj_1(hidden_embeds)  # [bs, 256, 768]
-        encoder_hidden_2 = self.unet_proj_2(hidden_embeds)  # [bs, 256, 1280]
-        prompt_embeds = torch.cat([encoder_hidden_1, encoder_hidden_2], dim=-1)  # [bs, 256, 2048]
-        pooled_prompt_embeds = self.unet_attnpool(hidden_embeds)  # [bs, 1280]
-
-        return prompt_embeds, pooled_prompt_embeds
-
-class ResamplerXLIdentity(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-
-    def forward(self, x, pooled_text_embeds=None):
-        return x, pooled_text_embeds
-
-
-if __name__ == '__main__':
-    image_proj_model = Resampler(dim=1024,
-                                 depth=4,
-                                 dim_head=64,
-                                 heads=12,
-                                 num_queries=1024,
-                                 embedding_dim=1024,
-                                 output_dim=1024,
-                                 ff_mult=4)
-    numel = 0
-    for name, param in image_proj_model.named_parameters():
-        numel += param.numel()
-
-    print(f'Total params: {numel}')
-
-
-
-import torch.nn as nn
-
-def build_mlp(in_hidden_size, hidden_size):
-    modules = [nn.Linear(in_hidden_size, hidden_size)]
-    modules.append(nn.ReLU())
-    modules.append(nn.Linear(hidden_size, hidden_size))
-    return nn.Sequential(*modules)
-
-def build_expand_mlp(in_hidden_size, hidden_size, out_size):
-    modules = [nn.Linear(in_hidden_size, hidden_size)]
-    modules.append(nn.ReLU())
-    modules.append(nn.Linear(hidden_size, hidden_size))
-    modules.append(nn.ReLU())
-    modules.append(nn.Linear(hidden_size, out_size))
-    return nn.Sequential(*modules)
-
-class DepthHead(nn.Module):
-    def __init__(
-        self,
-        proj_config=None,
-        llm_hidden_size=4096,
-        use_intermediate_depth=False,
-    ):
-        super(DepthHead, self).__init__()
-
-        self.projector = Resampler(
-                dim_in=llm_hidden_size,
-                dim_mid=llm_hidden_size,
-                dim_head=proj_config["dim_head"],
-                dim_out=proj_config["dim_out"],
-                num_layers=proj_config["num_layers"],
-                num_heads=proj_config["num_heads"],
-                num_queries=proj_config["num_backbone_tokens"],
-                ff_mult=proj_config["ff_mult"],
-            )
-
-    def forward(self, llm_feats):
-        queries = self.projector(llm_feats)
-        return  queries
 
 class TaskTokenDepthHead(nn.Module):
     def __init__(
@@ -954,15 +667,16 @@ class TaskTokenDepthHead(nn.Module):
         )
 
     def forward(self, llm_feats, queries):
-        queries = self.projector(llm_feats,  queries)
-        return  queries
+        queries = self.projector(llm_feats, queries)
+        return queries
+
+
 import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from transformers import AutoConfig
-
 
 
 class LingBotVLAWeightLoader:
@@ -1168,9 +882,7 @@ def validate_official_6b_checkpoint(state_dict):
         if key not in state_dict:
             raise ValueError(f"Missing official LingBot-VLA v2 weight: {key}")
         if tuple(state_dict[key].shape) != expected:
-            raise ValueError(
-                f"Unexpected shape for {key}: expected {expected}, got {tuple(state_dict[key].shape)}"
-            )
+            raise ValueError(f"Unexpected shape for {key}: expected {expected}, got {tuple(state_dict[key].shape)}")
 
 
 class LingBotVlaV2StateDictConverter:
