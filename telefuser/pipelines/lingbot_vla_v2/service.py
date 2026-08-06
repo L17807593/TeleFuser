@@ -101,7 +101,7 @@ PipelineFactory = Callable[[LingBotVlaV2ServiceConfig], _Pipeline]
 
 
 def _default_pipeline_factory(config: LingBotVlaV2ServiceConfig) -> _Pipeline:
-    return get_lingbot_vla_v2_pipeline(config.model_root, config.qwen3vl_root, device=config.device)
+    return get_lingbot_vla_v2_pipeline(config.model_root, config.qwen3vl_root, device=config.device, warmup=True)
 
 
 def _decode_image(value: str, *, max_image_bytes: int) -> Image.Image:

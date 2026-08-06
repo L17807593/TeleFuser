@@ -36,7 +36,7 @@ class AsyncTaskProcessor:
         self.structured_service = structured_service
         self.max_concurrent = max_concurrent
 
-        self._queue: asyncio.Queue = asyncio.Queue()
+        self._queue: asyncio.Queue[None] = asyncio.Queue()
         self._workers: list[asyncio.Task] = []
         self._running = False
         self._stop_event = asyncio.Event()
@@ -46,6 +46,10 @@ class AsyncTaskProcessor:
     def is_running(self) -> bool:
         """Whether the processor workers are running."""
         return self._running
+
+    def notify_task_available(self) -> None:
+        """Wake one idle worker after a task is added to the task manager."""
+        self._queue.put_nowait(None)
 
     async def start(self) -> None:
         """Start the task processor workers."""
@@ -57,6 +61,7 @@ class AsyncTaskProcessor:
         self._stop_event.clear()
         self._loop = asyncio.get_running_loop()
 
+        self._queue = asyncio.Queue()
         for i in range(self.max_concurrent):
             worker = asyncio.create_task(self._worker_loop(f"worker-{i}"), name=f"task-processor-{i}")
             self._workers.append(worker)
@@ -101,7 +106,7 @@ class AsyncTaskProcessor:
                 task_id = self.task_manager.claim_next_pending_task()
 
                 if task_id is None:
-                    await asyncio.wait_for(self._stop_event.wait(), timeout=1.0)
+                    await asyncio.wait_for(self._queue.get(), timeout=1.0)
                     continue
 
                 await self._process_task(task_id)

@@ -114,6 +114,28 @@ def test_async_task_processor_preserves_cancelled_status() -> None:
     asyncio.run(scenario())
 
 
+def test_async_task_processor_wakes_when_task_becomes_available() -> None:
+    """A newly submitted task should not wait for the idle polling timeout."""
+
+    async def scenario() -> None:
+        task_manager = TaskManager(max_queue_size=10)
+        media_service = _ControlledMediaService()
+        media_service.finish.set()
+        processor = AsyncTaskProcessor(task_manager=task_manager, media_service=media_service, max_concurrent=1)
+
+        await processor.start()
+        try:
+            await asyncio.sleep(0)
+            task_manager.create_task(TaskRequest(task="t2i"))
+            processor.notify_task_available()
+
+            await asyncio.wait_for(media_service.started.wait(), timeout=0.5)
+        finally:
+            await processor.stop()
+
+    asyncio.run(scenario())
+
+
 def test_claim_next_pending_task_atomic_single_winner() -> None:
     """Two PENDING tasks, single slot: only one is claimed, the second claim returns None."""
     task_manager = TaskManager(max_queue_size=10)

@@ -161,6 +161,31 @@ CUDA_VISIBLE_DEVICES=0,1 TF_MODEL_ZOO_PATH=/hhb-data/aigc/model_zoo \
 This is request-level replication, not tensor parallelism inside one policy replica. The response remains a normalized
 base-model canonical action chunk and must not be treated as a physical robot command.
 
+## Single-GPU Service Benchmark
+
+Use the VLA-specific benchmark to measure checkpoint construction, first-request latency, steady-state latency,
+sequential throughput, process RSS, CUDA allocator peaks, and source-image-size overhead. The pipeline always converts
+the three source images to the official `256x256` model input, so source size affects boundary and preprocessing cost,
+not the model token shape.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 .venv-vla/bin/python \
+  tools/validation/benchmark_lingbot_vla_v2_service.py \
+  --model-root /hhb-data/aigc/model_zoo/lingbot/lingbot-vla-v2-6b \
+  --qwen3vl-root /hhb-data/aigc/model_zoo/Qwen3-VL-4B-Instruct \
+  --image examples/data/lingbot_world_fast/image.jpg \
+  --image-sizes 256x256,640x480,1280x720 \
+  --warmup 1 \
+  --runs 20 \
+  --output work_dirs/vla_service_benchmark/report.json
+```
+
+The native service moves the policy to its target GPU and runs one synthetic fixed-shape warmup before readiness. It
+also keeps the allocator cache between requests. The report records construction and startup warmup separately, while
+the first accepted request represents a ready replica. The default `service-thread` execution mode matches the native
+service runner's fixed worker thread; use `--execution-mode direct` only to measure the in-process pipeline ceiling.
+Shutdown still offloads the policy explicitly.
+
 ## TeleFuser Regression Baseline
 
 The validation capture runs through the public loader and pipeline, then records preprocessing tensors, fixed initial

@@ -189,6 +189,7 @@ class ApiServer:
             return
 
         if self.task_processor.is_running:
+            self.task_processor.notify_task_available()
             await self.ensure_artifact_cleanup_running()
             return
 
@@ -197,8 +198,10 @@ class ApiServer:
                 logger.warning("Task processor is not initialized; task will remain pending until services are ready")
                 return
             if self.task_processor.is_running:
+                self.task_processor.notify_task_available()
                 return
             await self.task_processor.start()
+            self.task_processor.notify_task_available()
             await self.ensure_artifact_cleanup_running()
 
     async def ensure_artifact_cleanup_running(self) -> None:

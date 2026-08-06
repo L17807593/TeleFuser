@@ -16,6 +16,8 @@ def get_lingbot_vla_v2_pipeline(
     model_root: str,
     qwen3vl_root: str,
     device: str = "cuda:0",
+    *,
+    warmup: bool = False,
 ) -> LingBotVlaV2Pipeline:
     """Load one official 6B base checkpoint replica for inference."""
     target_device = torch.device(device)
@@ -44,4 +46,7 @@ def get_lingbot_vla_v2_pipeline(
             ),
         ),
     )
+    pipeline.prepare_for_inference()
+    if warmup:
+        pipeline.warmup()
     return pipeline

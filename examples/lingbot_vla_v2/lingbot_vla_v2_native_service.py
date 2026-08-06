@@ -84,6 +84,7 @@ def get_pipeline(parallelism: int = 1) -> LingBotVlaV2Pipeline:
         PPL_CONFIG["model_root"],
         PPL_CONFIG["qwen3vl_root"],
         device=PPL_CONFIG["device"],
+        warmup=True,
     )
 
 

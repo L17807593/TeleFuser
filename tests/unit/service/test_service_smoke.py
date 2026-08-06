@@ -88,3 +88,13 @@ def test_openai_video_retrieve_includes_artifact_metadata_smoke(tmp_path: Path) 
         assert data["artifact_id"] == f"local:tasks/{video_id}/outputs/videos/clip.mp4"
         assert data["artifact_metadata"]["backend"] == "local"
         assert data["artifact_metadata"]["size_bytes"] == 5
+
+
+def test_running_task_processor_is_notified_for_new_work(tmp_path: Path) -> None:
+    server = _make_smoke_server(tmp_path)
+    server.task_processor = Mock()
+    server.task_processor.is_running = True
+
+    asyncio.run(server.ensure_task_processor_running())
+
+    server.task_processor.notify_task_available.assert_called_once_with()

@@ -12,7 +12,7 @@ from telefuser.core.module_manager import ModuleManager
 
 from .data import LingBotVlaV2InputProcessor, LingBotVlaV2Inputs, LingBotVlaV2Observation
 from .policy import LingBotVlaV2PolicyStage
-from .robot_profile import RobotWinProfile
+from .robot_profile import ROBOTWIN_CAMERA_KEYS, RobotWinProfile
 
 
 @dataclass
@@ -39,6 +39,10 @@ class LingBotVlaV2CanonicalActionChunk:
 
 class LingBotVlaV2Pipeline(BasePipeline):
     """Single-replica LingBot-VLA v2 canonical action SDK."""
+
+    # The service owns one fixed-shape resident policy. Per-request GC and
+    # allocator cache eviction add latency without releasing model weights.
+    clear_memory_after_call = False
 
     def _get_stages(self) -> list:
         return [self.policy_stage]
@@ -78,9 +82,7 @@ class LingBotVlaV2Pipeline(BasePipeline):
             action_dim=int(canonical_actions.shape[1]),
             checkpoint_variant=str(getattr(policy_config, "checkpoint_variant", "base")),
             policy_verified=bool(getattr(policy_config, "policy_verified", False)),
-            verification_status=str(
-                getattr(policy_config, "verification_status", "unverified_official_6b_base")
-            ),
+            verification_status=str(getattr(policy_config, "verification_status", "unverified_official_6b_base")),
         )
 
     @torch.inference_mode()
@@ -92,7 +94,29 @@ class LingBotVlaV2Pipeline(BasePipeline):
         """Predict one normalized canonical action chunk."""
         return self.predict(self.input_processor.prepare(observation), seed=seed)
 
+    def prepare_for_inference(self) -> None:
+        """Move the policy to its target device before the service becomes ready."""
+        if not self.policy_stage.onload_models_flag:
+            self.policy_stage.onload_models()
+            self.policy_stage.onload_models_flag = True
+
+    @torch.inference_mode()
+    def warmup(self) -> None:
+        """Initialize fixed-shape CUDA kernels before accepting service requests."""
+        self.prepare_for_inference()
+        image_size = self.input_processor.image_size
+        image = torch.zeros(3, image_size, image_size, dtype=torch.uint8)
+        self(
+            LingBotVlaV2Observation(
+                task="warm up the policy",
+                state=[0.0] * 14,
+                images={key: image for key in ROBOTWIN_CAMERA_KEYS},
+            ),
+            seed=0,
+        )
+
     def close(self) -> None:
         """Release policy device memory."""
         if hasattr(self, "policy_stage"):
             self.policy_stage.offload_models()
+            self.policy_stage.onload_models_flag = False
