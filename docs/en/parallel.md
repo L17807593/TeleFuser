@@ -90,8 +90,9 @@ Input: (B, S_LOCAL, H_GLOBAL, D)
 
 When the installed `tf-kernel` wheel contains the Ulysses CUDA IPC operators and every rank in the Ulysses process
 group is on the same host, TeleFuser uses the source-built Copy Engine backend for grouped Q/K/V scatter. It writes
-directly into each peer final-layout target buffer, caches target allocations by tag/shape/dtype, and fans out over
-one high-priority copy stream. Q, K, and V stay as separate submissions so projection compute can overlap
+directly into each peer final-layout target buffer, keeps up to 12 target allocations in a tag/shape/dtype LRU cache,
+and fans out over one high-priority copy stream. Eviction synchronizes participating devices before closing peer
+mappings. Q, K, and V stay as separate submissions so projection compute can overlap
 with communication, while the three transfers share one CUDA stream-memory handshake that does not occupy an SM.
 Single collectives and output gather stay on the faster PyTorch/NCCL path. Multi-host groups, missing kernels,
 and unsupported CUDA IPC configurations also use the PyTorch/NCCL fallback.

@@ -69,6 +69,14 @@ def _disable_cuda_ipc_group(process_group: dist.ProcessGroup, error: Exception) 
     logger.warning("CUDA IPC Ulysses failed; falling back to NCCL: %s", error)
 
 
+def _close_cuda_ipc_groups() -> None:
+    """Collectively close initialized CUDA IPC groups before process-group teardown."""
+    groups = [group for group in _cuda_ipc_groups.values() if group is not None]
+    _cuda_ipc_groups.clear()
+    for group in groups:
+        group.close()
+
+
 def ulysses_scatter_heads(
     tensor: torch.Tensor,
     process_group: dist.ProcessGroup,
@@ -95,10 +103,16 @@ def ulysses_scatter_heads(
     )
     cuda_ipc_group = _get_cuda_ipc_group(tensor, process_group) if use_cuda_ipc else None
     if cuda_ipc_group is not None:
+        group_was_pending = cuda_ipc_group.has_pending_group
         try:
             handle = cuda_ipc_group.all_to_all_single_4d_async(tensor, mode=0, tag=tag, barrier=barrier)
             return handle.wait
         except RuntimeError as error:
+            if group_was_pending or cuda_ipc_group.has_pending_group:
+                raise RuntimeError(
+                    "CUDA IPC Ulysses failed after a grouped transfer started; "
+                    "the request cannot safely fall back to NCCL"
+                ) from error
             _disable_cuda_ipc_group(process_group, error)
 
     tensor = tensor.reshape(batch, local_seq_len, world_size, local_heads, head_dim)

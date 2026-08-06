@@ -128,3 +128,68 @@ def test_standalone_scatter_stays_on_nccl(mock_rank, mock_world_size) -> None:
 
     get_backend.assert_not_called()
     assert wait().shape == (2, 40, 8, 64)
+
+
+class _FailingGroupedBackend:
+    def __init__(self) -> None:
+        self.pending = False
+
+    @property
+    def has_pending_group(self) -> bool:
+        return self.pending
+
+    def all_to_all_single_4d_async(self, *_args: object, **_kwargs: object) -> None:
+        self.pending = True
+        raise RuntimeError("injected grouped failure")
+
+
+@patch("telefuser.distributed.ulysses_comm.dist.get_world_size", return_value=4)
+@patch("telefuser.distributed.ulysses_comm.dist.get_rank", return_value=0)
+def test_grouped_ipc_failure_does_not_attempt_partial_nccl_fallback(mock_rank, mock_world_size) -> None:
+    del mock_rank, mock_world_size
+    from telefuser.distributed import ulysses_comm
+
+    tensor = torch.randn(2, 10, 32, 64)
+    backend = _FailingGroupedBackend()
+    with (
+        patch.object(ulysses_comm, "_get_cuda_ipc_group", return_value=backend),
+        patch.object(ulysses_comm.fc, "all_to_all_single") as nccl,
+        pytest.raises(RuntimeError, match="cannot safely fall back"),
+    ):
+        ulysses_comm.ulysses_scatter_heads(tensor, MagicMock(), tag="q", barrier=False)
+
+    nccl.assert_not_called()
+
+
+@patch("telefuser.distributed.ulysses_comm.dist.get_world_size", return_value=4)
+@patch("telefuser.distributed.ulysses_comm.dist.get_rank", return_value=0)
+def test_ipc_failure_before_group_start_falls_back_to_nccl(mock_rank, mock_world_size) -> None:
+    del mock_rank, mock_world_size
+    from telefuser.distributed import ulysses_comm
+
+    tensor = torch.randn(2, 10, 32, 64)
+    process_group = MagicMock()
+    backend = MagicMock(has_pending_group=False)
+    backend.all_to_all_single_4d_async.side_effect = RuntimeError("injected setup failure")
+    with (
+        patch.dict(ulysses_comm._cuda_ipc_groups, {id(process_group): backend}, clear=True),
+        patch.object(ulysses_comm, "_get_cuda_ipc_group", return_value=backend),
+        patch.object(ulysses_comm.fc, "all_to_all_single", return_value=tensor.flatten()),
+    ):
+        wait = ulysses_comm.ulysses_scatter_heads(tensor, process_group, tag="q", barrier=False)
+
+    backend.close.assert_called_once_with()
+    assert wait().shape == (2, 40, 8, 64)
+
+
+def test_close_cuda_ipc_groups_closes_initialized_groups_and_clears_cache() -> None:
+    from telefuser.distributed import ulysses_comm
+
+    first = MagicMock()
+    second = MagicMock()
+    with patch.dict(ulysses_comm._cuda_ipc_groups, {1: first, 2: None, 3: second}, clear=True):
+        ulysses_comm._close_cuda_ipc_groups()
+        assert ulysses_comm._cuda_ipc_groups == {}
+
+    first.close.assert_called_once_with()
+    second.close.assert_called_once_with()

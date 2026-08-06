@@ -1,5 +1,6 @@
 """Tests for parallel_worker module."""
 
+import signal
 from queue import Empty
 from unittest.mock import MagicMock, Mock, patch
 
@@ -331,7 +332,8 @@ class TestWorkerLoopUnit:
 
     @patch("telefuser.worker.parallel_worker.dist")
     @patch("telefuser.worker.parallel_worker.current_platform")
-    def test_worker_loop_single_process(self, mock_platform, mock_dist):
+    @patch("telefuser.worker.parallel_worker.signal.signal")
+    def test_worker_loop_single_process(self, mock_signal, mock_platform, mock_dist):
         """Test _worker_loop with world_size=1 (no distributed)."""
         import multiprocessing as mp
 
@@ -366,6 +368,10 @@ class TestWorkerLoopUnit:
         mock_stage.test_method.assert_called_once()
         queue_out.put.assert_called()
         mock_dist.init_process_group.assert_not_called()
+        assert mock_signal.call_args_list == [
+            ((signal.SIGINT, signal.SIG_IGN),),
+            ((signal.SIGINT, mock_signal.return_value),),
+        ]
 
     @patch("telefuser.worker.parallel_worker.dist")
     @patch("telefuser.worker.parallel_worker.current_platform")

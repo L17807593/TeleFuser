@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import socket
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
+
+_MAX_CACHED_TARGETS = 12
 
 
 @dataclass
@@ -68,7 +71,7 @@ class CudaIpcUlyssesGroup:
 
         _, greatest_priority = torch.cuda.Stream.priority_range()
         self._comm_stream = torch.cuda.Stream(device=self.device, priority=greatest_priority)
-        self._targets: dict[tuple[object, ...], _Target] = {}
+        self._targets: OrderedDict[tuple[object, ...], _Target] = OrderedDict()
         self._barrier = torch.zeros(self.world_size, dtype=torch.int64, device=self.device)
         self._peer_barriers, self._barrier_remote_pointers = self._open_peer_handles(self._barrier)
         self._barrier_epoch = 0
@@ -139,13 +142,29 @@ class CudaIpcUlyssesGroup:
         key = (tag, mode, output_shape, input.dtype, input.device)
         target = self._targets.get(key)
         if target is not None:
+            self._targets.move_to_end(key)
             return target
 
+        if len(self._targets) >= _MAX_CACHED_TARGETS:
+            self._evict_oldest_target()
         output = torch.empty(output_shape, dtype=input.dtype, device=input.device)
         peer_outputs, remote_pointers = self._open_peer_handles(output)
         target = _Target(output=output, peer_outputs=peer_outputs, remote_pointers=remote_pointers)
         self._targets[key] = target
         return target
+
+    @staticmethod
+    def _close_target(target: _Target) -> None:
+        for pointer in target.remote_pointers:
+            torch.ops.tf_kernel.cuda_ipc_close_mem_handle(pointer)
+
+    def _evict_oldest_target(self) -> None:
+        # Peer ranks may still be writing while the caller stream consumes an older target.
+        # A cache miss is infrequent, so prefer a device-wide synchronization over unsafe reuse.
+        torch.cuda.synchronize(self.device)
+        dist.barrier(group=self.process_group)
+        _, target = self._targets.popitem(last=False)
+        self._close_target(target)
 
     def all_to_all_single_4d_async(
         self,
@@ -178,6 +197,7 @@ class CudaIpcUlyssesGroup:
                 torch.ops.tf_kernel.ulysses_all_to_all_ce(
                     input, target.peer_outputs[peer], self.rank, self.world_size, mode, peer
                 )
+        input.record_stream(self._comm_stream)
 
         if barrier:
             self._barrier_epoch += 1
@@ -198,9 +218,10 @@ class CudaIpcUlyssesGroup:
         if self._closed:
             return
         self._comm_stream.synchronize()
+        if dist.is_initialized():
+            dist.barrier(group=self.process_group)
         for target in self._targets.values():
-            for pointer in target.remote_pointers:
-                torch.ops.tf_kernel.cuda_ipc_close_mem_handle(pointer)
+            self._close_target(target)
         for pointer in self._barrier_remote_pointers:
             torch.ops.tf_kernel.cuda_ipc_close_mem_handle(pointer)
         self._targets.clear()
