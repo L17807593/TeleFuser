@@ -58,6 +58,7 @@ Reusable stages, model configs, schedulers, and pipeline orchestration.
 |-------|-------|-------------|
 | LingBot-World v2 | Bidirectional streaming | Camera-controlled interactive world model via LiveKit |
 | LingBot-World-Fast | Bidirectional streaming | Legacy/causal-fast model via LiveKit reliable data messages |
+| ABot-World 0.5B-LF | Single-GPU interactive generation | Direct browser control with persistent causal KV state; see the [ABot guide](abot_world/) |
 
 ### Video Generation
 

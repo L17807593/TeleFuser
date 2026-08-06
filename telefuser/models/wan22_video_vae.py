@@ -1458,7 +1458,7 @@ class Wan22VideoVAE(BaseModel):
                     x[:, :, i : i + 1, :, :],
                     feat_cache=self._feat_cache,
                     feat_idx=self._feat_idx,
-                    first_chunk=True,
+                    first_chunk=is_first_clip and i == 0,
                 )
             else:
                 out_ = self.model.decoder(

@@ -24,6 +24,7 @@ TeleFuser is a high-performance runtime for world model inference and multimodal
   chunk-boundary time slicing, reconnect-friendly browser transport, and server-push/bidirectional contracts.
 - ✨ **2026-07-22**: Added [**LingBot-Video**](examples/lingbot_video/README.md) support for Dense and MoE T2I/T2V/TI2V generation, native four-GPU CFG/SP execution, and in-memory MoE refinement.
 - ✨ **2026-07-15**: Added [**LingBot-World v2**](https://github.com/Robbyant/lingbot-world-v2) support for offline generation, interactive WebRTC streaming, and multi-GPU inference.
+- ✨ **2026-08-06**: Added [**ABot-World 0.5B-LF**](docs/en/abot_world.md) single-GPU browser interaction with persistent causal KV state and bounded RoPE positions.
 
 - ✨ **2026-07-06**: Added external **CacheSeek** latent cache integration for service-mode cross-request reuse. Cache hits can skip the first N denoising steps; the Wan2.2 cache-enabled service example snapshots `[5, 10, 15, 20, 25]` by default. See [docs/en/latent_cache.md](docs/en/latent_cache.md).
 
@@ -220,6 +221,7 @@ telefuser/
 | Pipeline | Task | Notes |
 |----------|------|-------|
 | `LingBot-World v2` | Bidirectional world-model streaming | LiveKit control loop via [examples/lingbot/lingbot_world_v2_image_to_video_h100.py](examples/lingbot/lingbot_world_v2_image_to_video_h100.py) |
+| `ABot-World 0.5B-LF` | Single-GPU interactive world model | Direct browser controller via [examples/abot_world/README.md](examples/abot_world/README.md); no LiveKit required |
 | `LiveAct` | S2V | Speech-driven talking head generation via [examples/liveact/liveact_s2v_h100.py](examples/liveact/liveact_s2v_h100.py) |
 | `FlashVSR` | VSR | Streaming video super-resolution via [examples/flashvsr/README.md](examples/flashvsr/README.md) |
 
@@ -257,13 +259,14 @@ See [examples/README.md](examples/README.md) for the example runner and baseline
 - [docs/en/torch_compile_compatibility.md](docs/en/torch_compile_compatibility.md): compile-related constraints
 - [docs/en/adding_new_model.md](docs/en/adding_new_model.md): integrating new models
 - [docs/en/adding_new_example.md](docs/en/adding_new_example.md): authoring examples and pipeline contracts
+- [docs/en/abot_world.md](docs/en/abot_world.md): ABot-World single-GPU interactive pipeline, controls, and tests
 
 ## Known Limitations
 
 - `AdaTaylorCache` is only calibrated for selected model families.
 - `torch.compile` support is still experimental in parts of the stack.
 - Some optimized paths require specific GPU architectures and CUDA versions.
-- World-model examples such as `LingBot-World v2` require external checkpoints and environment setup.
+- World-model examples such as `LingBot-World v2` and `ABot-World` require external checkpoints and environment setup.
 - Multi-machine deployment exists in the architecture but may require project-specific integration and validation.
 
 ## Development
@@ -274,7 +277,7 @@ pre-commit install
 pytest tests/
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution workflow and [AGENTS.md](AGENTS.md) for project-specific agent guidance.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution workflow and [CLAUDE.md](CLAUDE.md) for repository guidance.
 
 ## License
 
