@@ -27,6 +27,7 @@ class StreamDoneMessage(BaseModel):
     type: str = "done"
     session_id: str = ""
     total_chunks: int = 0
+    published_frames: int = 0
     timestamp: float = Field(default_factory=time.time)
 
 

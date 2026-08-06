@@ -157,15 +157,24 @@ class CausalSelfAttention(nn.Module):
     ) -> torch.Tensor | None:
         group = get_ulysses_group(device_mesh)
         ulysses_enabled = group is not None and get_ulysses_world_size(device_mesh) > 1
-        q = rearrange(self.norm_q(self.q(x)), "b s (n d) -> b s n d", n=self.num_heads)
-        k = rearrange(self.norm_k(self.k(x)), "b s (n d) -> b s n d", n=self.num_heads)
+
         v = rearrange(self.v(x), "b s (n d) -> b s n d", n=self.num_heads)
-        qkv_wait = ulysses_scatter_heads(torch.cat((q, k, v), dim=-1), group) if ulysses_enabled else None
+        if ulysses_enabled:
+            v_wait = ulysses_scatter_heads(v, group, tag="v", barrier=False)
+
+        q = rearrange(self.norm_q(self.q(x)), "b s (n d) -> b s n d", n=self.num_heads)
+        if ulysses_enabled:
+            q_wait = ulysses_scatter_heads(q, group, tag="q", barrier=False)
+
+        k = rearrange(self.norm_k(self.k(x)), "b s (n d) -> b s n d", n=self.num_heads)
+        if ulysses_enabled:
+            k_wait = ulysses_scatter_heads(k, group, tag="k")
+
         frame_tokens = grid_size[1] * grid_size[2]
         start_frame = current_start // frame_tokens
         valid_seq_len = math.prod(grid_size)
         if ulysses_enabled:
-            q, k, v = qkv_wait().chunk(3, dim=-1)
+            q, k, v = q_wait(), k_wait(), v_wait()
             padded_seq_len = q.shape[1]
             q = self._apply_causal_rope(q, freqs_cos, freqs_sin, grid_size, start_frame, causal_rope)[:, :valid_seq_len]
             k = self._apply_causal_rope(k, freqs_cos, freqs_sin, grid_size, start_frame, causal_rope)[:, :valid_seq_len]

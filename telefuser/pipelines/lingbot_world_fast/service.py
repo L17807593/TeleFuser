@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncGenerator, Callable, Mapping
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
@@ -65,6 +66,7 @@ _ACTION_DIRECTIONS = ("w", "a", "s", "d")
 MAX_GENERATION_SECONDS = 20.0
 DEFAULT_OUTPUT_QUEUE_SIZE = 4
 _VIDEO_OUTPUT_TYPES = frozenset({"chunk", "preview"})
+_LOSSLESS_OUTPUT_TYPES = _VIDEO_OUTPUT_TYPES | frozenset({"done", "error"})
 _TERMINAL_OUTPUT_TYPES = frozenset({"done", "error"})
 _MAX_INPUT_IMAGE_BYTES = 10 * 1024 * 1024
 _CONTROL_PREFETCH_DEPTH = 0
@@ -317,6 +319,10 @@ class LingBotWorldFastService:
                 f"got {duration_seconds:g} seconds"
             )
 
+        delivery_mode = str(config.get("delivery_mode", defaults.get("delivery_mode", "latest")))
+        if delivery_mode not in {"latest", "lossless"}:
+            raise ValueError(f"delivery_mode must be 'latest' or 'lossless', got {delivery_mode!r}")
+
         max_sequence_length = int(config.get("max_sequence_length", defaults.get("max_sequence_length", 512)))
         if capacity_profile is not None and max_sequence_length > int(capacity_profile["max_sequence_length"]):
             raise ValueError(
@@ -363,6 +369,7 @@ class LingBotWorldFastService:
                     defaults.get("control_pitch_limit_degrees", 85.0),
                 )
             ),
+            delivery_mode=delivery_mode,
             show_control_hud=bool(config.get("show_control_hud", defaults.get("show_control_hud", True))),
             benchmark_metrics=bool(config.get("benchmark_metrics", defaults.get("benchmark_metrics", False))),
             control_idle_timeout=control_idle_timeout,
@@ -435,13 +442,36 @@ class LingBotWorldFastService:
             self._put_output(state, payload)
 
     @staticmethod
-    def _put_output(state: LingBotWorldFastSessionState, payload: dict) -> None:
+    def _put_output(state: LingBotWorldFastSessionState, payload: dict) -> bool:
         if state.output_queue is None or state.loop is None:
-            return
+            return False
+
+        payload_type = str(payload.get("type", ""))
+        if state.config.delivery_mode == "lossless" and payload_type in _LOSSLESS_OUTPUT_TYPES:
+            future = asyncio.run_coroutine_threadsafe(state.output_queue.put(payload), state.loop)
+            while True:
+                try:
+                    future.result(timeout=0.1)
+                    with state.metrics_lock:
+                        state.output_queue_high_watermark = max(
+                            state.output_queue_high_watermark,
+                            state.output_queue.qsize(),
+                        )
+                    return True
+                except FutureTimeoutError:
+                    if not state.active:
+                        future.cancel()
+                        return False
+                except Exception as exc:
+                    logger.warning(f"Failed to enqueue lossless LingBot output: {exc}")
+                    return False
+
         try:
             state.loop.call_soon_threadsafe(LingBotWorldFastService._enqueue_output, state, payload)
         except Exception as exc:
             logger.warning(f"Failed to enqueue LingBotWorld output: {exc}")
+            return False
+        return True
 
     @staticmethod
     def _enqueue_output(state: LingBotWorldFastSessionState, payload: dict) -> None:
@@ -1357,7 +1387,6 @@ class LingBotWorldFastService:
                 },
             )
         finally:
-            state.active = False
             self._lease_manager.deactivate(session_id)
             try:
                 self._release_generation_session(state)
@@ -1385,6 +1414,7 @@ class LingBotWorldFastService:
                     },
                 )
                 self._put_output(state, {"type": "done"})
+                state.active = False
                 with self._sessions_lock:
                     if self._sessions.get(session_id) is state:
                         self._sessions.pop(session_id, None)

@@ -51,7 +51,7 @@ def test_causal_self_attention_uses_unified_attention() -> None:
     assert captured["output_layout"] == "BSND"
 
 
-def test_causal_self_attention_packs_qkv_into_one_ulysses_collective() -> None:
+def test_causal_self_attention_overlaps_tagged_qkv_ulysses_collectives() -> None:
     attention = CausalSelfAttention(dim=32, num_heads=4)
     freqs = precompute_freqs_cis_3d(8)
     freqs_cos = torch.cat([freq.real for freq in freqs], dim=-1)
@@ -63,8 +63,24 @@ def test_causal_self_attention_packs_qkv_into_one_ulysses_collective() -> None:
         "local_end_index": 0,
     }
 
-    def fake_scatter(tensor: torch.Tensor, _group: object):
-        return lambda: tensor
+    events: list[str] = []
+
+    def fake_scatter(
+        tensor: torch.Tensor,
+        _group: object,
+        *,
+        tag: str,
+        barrier: bool = True,
+    ):
+        events.append(f"submit-{tag}")
+        assert barrier is (tag == "k")
+        assert tensor.shape == (1, 4, 4, 8)
+
+        def wait() -> torch.Tensor:
+            events.append(f"wait-{tag}")
+            return tensor
+
+        return wait
 
     def fake_gather(tensor: torch.Tensor, _group: object, *, num_heads: int):
         assert num_heads == 4
@@ -90,9 +106,15 @@ def test_causal_self_attention_packs_qkv_into_one_ulysses_collective() -> None:
             max_attention_size=4,
         )
 
-    scatter.assert_called_once()
-    packed_qkv = scatter.call_args.args[0]
-    assert packed_qkv.shape == (1, 4, 4, 24)
+    assert scatter.call_count == 3
+    assert events == [
+        "submit-v",
+        "submit-q",
+        "submit-k",
+        "wait-q",
+        "wait-k",
+        "wait-v",
+    ]
 
 
 def test_cached_cross_attention_uses_unified_attention_and_bsnd_cache() -> None:

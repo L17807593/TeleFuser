@@ -10,7 +10,7 @@ TF_STATUS_TOPIC = "tf.status"
 TF_METRICS_TOPIC = "tf.metrics"
 TF_ASSET_TOPIC = "tf.asset"
 
-KNOWN_CONTROL_TYPES = frozenset({"control_state", "control", "prompt", "reset", "stop"})
+KNOWN_CONTROL_TYPES = frozenset({"control_state", "control", "prompt", "reset", "stop", "delivery_ack"})
 KNOWN_CONTROLS = frozenset(
     {
         "ArrowUp",
@@ -146,4 +146,8 @@ def _normalize_legacy_message(message: dict[str, Any]) -> dict[str, Any]:
             raise DataProtocolError(f"Unsupported control: {control}")
         if event not in KNOWN_CONTROL_EVENTS:
             raise DataProtocolError(f"Unsupported control event: {event}")
+    elif msg_type == "delivery_ack":
+        published_frames = message.get("published_frames")
+        if not isinstance(published_frames, int) or published_frames < 0:
+            raise DataProtocolError("delivery_ack published_frames must be a non-negative integer")
     return dict(message)
