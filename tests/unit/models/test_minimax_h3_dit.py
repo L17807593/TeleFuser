@@ -4,10 +4,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from telefuser.core.config import AttentionConfig, AttnImplType
 from telefuser.models.minimax_h3_dit import (
     MINIMAX_H3_FP32_BUFFER_NAMES,
     MINIMAX_H3_FP32_PARAM_NAMES,
     MiniMaxH3AdaLNCache,
+    MiniMaxH3Attention,
     MiniMaxH3DiT,
     MiniMaxH3DiTConfig,
     _reorder_grouped_qkv_to_qkv,
@@ -134,6 +136,27 @@ def test_grouped_qkv_reorder_matches_sglang_vector() -> None:
     )
     expected = torch.tensor([0, 1, 6, 7, 2, 3, 8, 9, 4, 5, 10, 11], dtype=torch.float32).reshape(12, 1)
     torch.testing.assert_close(actual, expected)
+
+
+def test_sage_attention_runs_h3_live_prefix_and_zeros_alignment_padding() -> None:
+    module = MiniMaxH3Attention(_small_config()).eval()
+    hidden = torch.randn(64, 32, dtype=torch.bfloat16)
+
+    def sage_output(query: torch.Tensor, *_: torch.Tensor, **__: object) -> torch.Tensor:
+        return query.clone()
+
+    with patch("telefuser.models.minimax_h3_dit.attention", side_effect=sage_output) as sage:
+        output = module(
+            hidden,
+            sequence_lengths=[61, 3],
+            rope_cos_sin_cache=None,
+            attention_config=AttentionConfig.dense_attention(AttnImplType.SAGE_ATTN_2_8_8_SM90),
+            cu_seqlens=torch.tensor([0, 61, 64], dtype=torch.int32),
+        )
+
+    assert sage.call_args.args[0].shape == (1, 61, 4, 8)
+    assert "sequence_lengths" not in sage.call_args.kwargs
+    assert torch.count_nonzero(output[61:]) == 0
 
 
 def test_enable_tp_shards_fused_projections_by_logical_section() -> None:

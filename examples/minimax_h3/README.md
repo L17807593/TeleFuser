@@ -354,14 +354,29 @@ encoding, DiT, video/audio decode, host materialization, and orchestration; it e
 and MP4 encoding. Wall time surrounds the same `run()` call. Full-device memory is sampled from `nvidia-smi`
 every 100 ms during the measured request.
 
-| Feature cache | Computed / skipped DiT calls | Pipeline time | Wall time | DiT time | Pipeline speedup | Peak memory GPU 0 / 1 / 2 / 3 |
-|---|---:|---:|---:|---:|---:|---:|
-| Disabled | 49 / 0 | 79.16 s | 79.40 s | 76.50 s | 1.00x | 51.46 / 50.24 / 50.04 / 50.23 GiB |
-| AdaTaylorCache | 26 / 23 | 43.53 s | 43.94 s | 40.87 s | 1.82x | 53.00 / 51.40 / 51.22 / 51.22 GiB |
+| Attention | Feature cache | Computed / skipped DiT calls | Pipeline time | Wall time | DiT time | Pipeline speedup | Peak memory GPU 0 / 1 / 2 / 3 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| FlashAttention 4 | Disabled | 49 / 0 | 79.10 s | 79.36 s | 76.48 s | 1.00x | 52.90 / 51.65 / 51.49 / 51.66 GiB |
+| SageAttention 2_8_8 SM90 | Disabled | 49 / 0 | 75.96 s | 76.30 s | 73.37 s | 1.04x | 51.49 / 50.11 / 50.10 / 50.04 GiB |
+| FlashAttention 4 | AdaTaylorCache | 26 / 23 | 43.53 s | 43.94 s | 40.87 s | 1.82x | 53.00 / 51.40 / 51.22 / 51.22 GiB |
+
+Sage SM90 reduces pipeline latency by 3.98% and DiT latency by 4.07%. It is approximate and remains an H100 opt-in:
+
+```bash
+python -m examples.minimax_h3.minimax_h3_fl2va_h100 \
+  --gpu-num 4 \
+  --attn-impl SAGE_ATTN_2_8_8_SM90 \
+  --target-video-length 5 \
+  --output outputs/minimax_h3_sage_sm90.mp4
+```
+
+Against the FlashAttention 4 output from the same seed, the Sage run measured video PSNR 20.45 dB, mean SSIM
+0.7683, and audio cosine similarity 0.98505. Review generated quality for the target workload before selecting it in
+production; FlashAttention 4 remains the default.
 
 AdaTaylorCache reduces steady-state pipeline latency by 45.0% and increases maximum single-GPU occupancy by
-1.54 GiB (3.0%). Against the previously matched uncached MP4, PSNR is 26.91, SSIM is 0.8619, audio cosine
-similarity is 0.9562, and audio duration is unchanged. The earlier matched local SGLang
-SP2+TP2 parity run measured 79.37 seconds and 67.8 GiB on GPU 0 under the same request shape.
+0.10 GiB (0.2%) in these measurements. Against the previously matched uncached MP4, PSNR is 26.91, SSIM is 0.8619,
+audio cosine similarity is 0.9562, and audio duration is unchanged. The earlier matched local SGLang SP2+TP2 parity
+run measured 79.37 seconds and 67.8 GiB on GPU 0 under the same request shape.
 
 These numbers describe this request and environment, not a general performance or quality guarantee.

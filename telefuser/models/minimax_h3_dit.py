@@ -16,7 +16,7 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from telefuser.core.base_model import BaseModel
-from telefuser.core.config import AttentionConfig
+from telefuser.core.config import AttentionConfig, AttnImplType
 from telefuser.distributed.collectives import all_gather_cat, all_reduce_sum_
 from telefuser.distributed.device_mesh import (
     get_tp_group,
@@ -442,6 +442,20 @@ class MiniMaxH3Attention(nn.Module):
         self.inner_dim //= world_size
         self.tp_group = group
 
+    @staticmethod
+    def _sage_live_tokens(sequence_lengths: list[int], total_tokens: int) -> int:
+        if len(sequence_lengths) == 1 and sequence_lengths[0] == total_tokens:
+            return total_tokens
+        if (
+            len(sequence_lengths) == 2
+            and sum(sequence_lengths) == total_tokens
+            and sequence_lengths[0] > sequence_lengths[1]
+            and 0 < sequence_lengths[1] < 64
+            and total_tokens % 64 == 0
+        ):
+            return sequence_lengths[0]
+        raise ValueError("MiniMax H3 SageAttention requires one live sequence with optional trailing alignment padding")
+
     def forward(
         self,
         hidden: torch.Tensor,
@@ -473,15 +487,31 @@ class MiniMaxH3Attention(nn.Module):
         use_ulysses = group is not None and dist.get_world_size(group) > 1
         if use_ulysses:
             query, key, value = ulysses_scatter_qkv(query, key, value, group)()
-        output = attention(
-            query,
-            key,
-            value,
-            attention_config=attention_config,
-            scale=self.head_dim**-0.5,
-            sequence_lengths=sequence_lengths,
-            cu_seqlens=cu_seqlens,
-        )
+        if attention_config is not None and attention_config.attn_impl == AttnImplType.SAGE_ATTN_2_8_8_SM90:
+            total_tokens = query.shape[1]
+            live_tokens = self._sage_live_tokens(sequence_lengths, total_tokens)
+            live_output = attention(
+                query[:, :live_tokens].contiguous(),
+                key[:, :live_tokens].contiguous(),
+                value[:, :live_tokens].contiguous(),
+                attention_config=attention_config,
+                scale=self.head_dim**-0.5,
+            )
+            if live_tokens == total_tokens:
+                output = live_output
+            else:
+                output = torch.zeros_like(query)
+                output[:, :live_tokens].copy_(live_output)
+        else:
+            output = attention(
+                query,
+                key,
+                value,
+                attention_config=attention_config,
+                scale=self.head_dim**-0.5,
+                sequence_lengths=sequence_lengths,
+                cu_seqlens=cu_seqlens,
+            )
         if use_ulysses:
             output = ulysses_gather_heads_destination_major(output, group, num_heads=self.num_heads)()
         output = self.out_proj(output[0].reshape(sequence, self.inner_dim))

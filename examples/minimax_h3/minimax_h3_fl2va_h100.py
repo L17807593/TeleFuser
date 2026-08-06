@@ -266,6 +266,11 @@ def main() -> None:
     parser.add_argument("--audio-flow-shift", type=float, default=PPL_CONFIG["audio_flow_shift"])
     parser.add_argument("--device", default=PPL_CONFIG["device"])
     parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4), default=1)
+    parser.add_argument(
+        "--attn-impl",
+        choices=("FLASH_ATTN_4", "SAGE_ATTN_2_8_8_SM90"),
+        default=PPL_CONFIG["attn_impl"].name,
+    )
     parser.add_argument("--enable-feature-cache", action="store_true")
     parser.add_argument("--feature-cache-model-type", default=PPL_CONFIG["feature_cache_model_type"])
     parser.add_argument(
@@ -309,6 +314,7 @@ def main() -> None:
         device=args.device,
         num_inference_steps=args.steps,
         enable_fsdp=args.enable_fsdp,
+        attn_impl=args.attn_impl,
         enable_feature_cache=args.enable_feature_cache,
         feature_cache_model_type=args.feature_cache_model_type,
         feature_cache_n_derivatives=args.feature_cache_n_derivatives,
