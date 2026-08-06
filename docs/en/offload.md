@@ -43,6 +43,12 @@ Data transfer (load) overlaps with computation, hiding latency
 | `offload_ratio` | float | `1.0` | Ratio of layers to offload (1.0 = all layers) |
 | `prefetch_size` | int | `1` | Number of layers to prefetch ahead |
 
+Resident layers are distributed uniformly across the transformer execution order instead of
+being kept as one contiguous prefix. `offload_ratio` determines the resident count independently
+from `prefetch_size`, so `offload_ratio=1.0` keeps no layer permanently resident. Prefetching walks
+the non-resident execution order and uses a bounded ring with at most
+`min(2 * prefetch_size, non_resident_layers)` slots per dtype.
+
 ### AsyncOffloadManager Lazy GPU Cache
 
 `lazy_gpu_cache` is a lower-level `AsyncOffloadManager` constructor option,
@@ -50,7 +56,8 @@ not an `OffloadConfig` field. It controls whether GPU buffers are
 pre-allocated during manager initialization:
 
 - **`lazy_gpu_cache=False` (default)**: GPU buffer pool is allocated during initialization
-- **`lazy_gpu_cache=True`**: GPU buffer pool is allocated on first use (saves VRAM during initialization)
+- **`lazy_gpu_cache=True`**: the reusable pool and first non-resident window are allocated on first use
+  (resident layers, when configured, are still loaded during initialization)
 
 Use `lazy_gpu_cache=True` when:
 - GPU memory is extremely limited during pipeline initialization
@@ -232,6 +239,21 @@ or CPU-GPU interconnects. Tests used one NVIDIA H100 80GB and PyTorch 2.11.0+cu1
 configuration ran one complete warmup followed by one complete generation. DiT time was measured
 with explicit CUDA synchronization at stage entry and exit, so it includes asynchronous weight
 transfer, computation, and offload in that stage.
+
+#### Uniform Resident Scheduling Validation
+
+The base BF16 `examples/qwen_image/qwen_image_t2i_h100.py` example was also run before and after
+the uniform-resident scheduler change on one H100 80GB, using 1664x928 output, 50 steps,
+`offload_ratio=0.5`, and `prefetch_size=1`. Each measurement followed one complete warmup:
+
+| Scheduler | Pipeline time |
+|---|---:|
+| Prefix-resident baseline | 49.783 s |
+| Uniform resident with non-resident sliding window | 37.757 s |
+
+The uniform schedule reduced pipeline time by 24.2%. The generated RGB images were pixel-identical
+across all 4,632,576 channel values (`max_abs_diff=0`). This is a single-run validation, not a
+general performance guarantee for other systems or configurations.
 
 #### FP8 Lightning
 

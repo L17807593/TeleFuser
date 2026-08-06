@@ -43,13 +43,19 @@ TeleFuser 支持四种卸载策略，通过 `WeightOffloadType` 配置：
 | `offload_ratio` | float | `1.0` | 要卸载的层比例（1.0 = 所有层） |
 | `prefetch_size` | int | `1` | 提前预取的层数 |
 
+常驻层会沿 Transformer 执行顺序均匀分布，而不是集中保留一个连续前缀。`offload_ratio`
+独立决定常驻层数量，不再受 `prefetch_size` 下限约束，因此 `offload_ratio=1.0` 不会永久
+保留任何层。预取按照非常驻层的执行顺序推进，每种 dtype 使用的有界 ring slot 数最多为
+`min(2 * prefetch_size, non_resident_layers)`。
+
 ### AsyncOffloadManager 延迟 GPU 缓存
 
 `lazy_gpu_cache` 是底层 `AsyncOffloadManager` 的构造参数，不是
 `OffloadConfig` 字段。它控制是否在 manager 初始化时预分配 GPU 缓冲区：
 
 - **`lazy_gpu_cache=False`（默认）**：在初始化期间分配 GPU 缓冲区池
-- **`lazy_gpu_cache=True`**：在首次使用时分配 GPU 缓冲区池（在初始化期间节省显存）
+- **`lazy_gpu_cache=True`**：在首次使用时分配可复用缓冲区池和首个非常驻预取窗口
+  （如果配置了常驻层，常驻层仍会在初始化时加载）
 
 在以下情况使用 `lazy_gpu_cache=True`：
 - 管道初始化期间 GPU 显存极其有限
@@ -229,6 +235,20 @@ pipe_config.dit_config.offload_config.prefetch_size = 2
 CPU-GPU 互联的通用性能承诺。测试使用单张 NVIDIA H100 80GB，PyTorch 2.11.0+cu130；
 每个配置先运行一次完整 warmup，再运行一次完整生成。DiT 时间在 stage 入口和出口显式同步
 CUDA 后测量，因此包含该阶段的异步权重传输、计算和卸载。
+
+#### 均匀常驻调度验证
+
+基础 BF16 `examples/qwen_image/qwen_image_t2i_h100.py` example 也在单张 H100 80GB 上对
+均匀常驻调度改动前后进行了测试，输出尺寸为 1664x928、50 steps，配置为
+`offload_ratio=0.5`、`prefetch_size=1`。每次测量前均执行一次完整 warmup：
+
+| 调度器 | Pipeline 时间 |
+|---|---:|
+| 前缀常驻基线 | 49.783 s |
+| 均匀常驻与非常驻滑动窗口 | 37.757 s |
+
+均匀调度将 Pipeline 时间降低了 24.2%。两次生成的 RGB 图片在全部 4,632,576 个通道值上
+逐像素一致（`max_abs_diff=0`）。该结果是单次验证，不代表其他系统或配置的通用性能。
 
 #### FP8 Lightning
 
