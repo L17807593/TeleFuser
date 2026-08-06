@@ -871,7 +871,7 @@ class ResamplerXLV2(nn.Module):
 class ResamplerXLIdentity(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        
+
     def forward(self, x, pooled_text_embeds=None):
         return x, pooled_text_embeds
 
@@ -911,13 +911,13 @@ def build_expand_mlp(in_hidden_size, hidden_size, out_size):
 
 class DepthHead(nn.Module):
     def __init__(
-        self, 
+        self,
         proj_config=None,
         llm_hidden_size=4096,
         use_intermediate_depth=False,
     ):
         super(DepthHead, self).__init__()
-        
+
         self.projector = Resampler(
                 dim_in=llm_hidden_size,
                 dim_mid=llm_hidden_size,
@@ -935,7 +935,7 @@ class DepthHead(nn.Module):
 
 class TaskTokenDepthHead(nn.Module):
     def __init__(
-        self, 
+        self,
         proj_config=None,
         llm_hidden_size=4096,
         use_intermediate_depth=False,

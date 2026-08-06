@@ -152,12 +152,12 @@ class Qwen2MoeSharedExpertMLP(nn.Module):
 
 class Qwen2FusedExperts(nn.Module):
     """Fused expert module: stores E experts' weights as 3D tensors for group_gemm.
-    
+
     Shape convention matches nn.Linear(in, out).weight = [out, in]:
       gate_proj: [E, intermediate_size, hidden_size]
       up_proj:   [E, intermediate_size, hidden_size]
       down_proj:  [E, hidden_size, intermediate_size]
-    
+
     The forward() method runs the full fused_moe computation. This is critical
     for FSDP2: calling self.experts(...) triggers FSDP2's forward pre-hook to
     unshard the expert params on ep_fsdp_mesh BEFORE they are used by kernels.
@@ -219,7 +219,7 @@ class Qwen2FusedExperts(nn.Module):
 
     def forward(self, module, num_experts, routing_weights, selected_experts, hidden_states):
         """Run fused_moe_forward with FSDP2-managed weights.
-        
+
         Must be called via self.experts(...) so FSDP2 unshards params first.
         """
         return fused_moe_forward(
@@ -411,7 +411,7 @@ class Qwen2DecoderLayer(GradientCheckpointingLayer):
         self.mlp = Qwen2MLP(config)
         self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        
+
         if config.use_sliding_window and config._attn_implementation != "flash_attention_2":
             logger.warning_once(
                 f"Sliding Window Attention is enabled but not implemented for `{config._attn_implementation}`; "
@@ -450,7 +450,7 @@ class Qwen2DecoderLayer(GradientCheckpointingLayer):
             value_state = self.self_attn.v_proj(hidden_states).view(hidden_shape)
 
             return query_state, key_state, value_state
-        
+
         elif output_atten:
             if att_output.dtype != self.self_attn.o_proj.weight.dtype:
                 att_output = att_output.to(self.self_attn.o_proj.weight.dtype)
@@ -476,7 +476,7 @@ class Qwen2DecoderLayer(GradientCheckpointingLayer):
         else:
             raise ValueError(f"Invaild Operation compute_kqv={compute_kqv} and output_atten={output_atten} with Qwen2DecoderLayer in LingBot-VLA")
 
-    
+
 @auto_docstring
 class Qwen2PreTrainedModel(PreTrainedModel):
     config: Qwen2Config
@@ -494,7 +494,7 @@ class Qwen2PreTrainedModel(PreTrainedModel):
         "hidden_states": Qwen2DecoderLayer,
         "attentions": Qwen2Attention,
     }
-    
+
     def _init_weights(self, module):
         std = self.config.initializer_range
         if isinstance(module, nn.Linear):
@@ -565,4 +565,3 @@ def apply_lingbot_qwen2_patch():
     hf_qwen2.Qwen2PreTrainedModel = Qwen2PreTrainedModel
     hf_qwen2.Qwen2Model = Qwen2Model
     hf_qwen2.Qwen2ForCausalLM = Qwen2ForCausalLM
-

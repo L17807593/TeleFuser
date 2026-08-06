@@ -40,7 +40,7 @@ if is_flash_attn_available():
     from flash_attn.layers.rotary import apply_rotary_emb
     from flash_attn.flash_attn_interface import flash_attn_varlen_func
     from transformers.modeling_flash_attention_utils import _flash_attention_forward
-import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as hf_qwen25vl 
+import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as hf_qwen25vl
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     Qwen2RMSNorm,
     Qwen2_5_VLMLP,
@@ -265,7 +265,7 @@ class Qwen2_5_VLDecoderLayer(GradientCheckpointingLayer):
                 key_state = self.k_layernorm(key_state)
 
             return query_state, key_state, value_state
-        
+
         elif output_atten:
             if att_output.dtype != self.self_attn.o_proj.weight.dtype:
                 att_output = att_output.to(self.self_attn.o_proj.weight.dtype)
@@ -291,7 +291,7 @@ class Qwen2_5_VLTextModel(Qwen2_5_VLPreTrainedModel):
     get_input_embeddings = _Qwen2_5_VLTextModel.get_input_embeddings
     set_input_embeddings = _Qwen2_5_VLTextModel.set_input_embeddings
     forward = _Qwen2_5_VLTextModel.forward
-        
+
     def __init__(self, config: Qwen2_5_VLConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
