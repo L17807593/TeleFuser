@@ -292,8 +292,8 @@ FlashAttention 4 is unavailable.
 
 For multi-GPU resident profiles, `WorkerTensorChannel` transports text conditioning, visual condition rows, and the
 final video latent directly between worker groups. CUDA intermediates therefore do not stage through the parent
-process or CPU. The pipeline reports media, text, condition VAE, denoising, video/audio decode, allocator peak, DiT
-communication, and computed/skipped feature-cache steps in `MiniMaxH3Generation.runtime_metrics`.
+process or CPU. The pipeline reports media, text, condition VAE, denoising, video/audio decode, allocator peak, and
+computed/skipped feature-cache steps in `MiniMaxH3Generation.runtime_metrics`.
 
 H3 also uses eager BF16 Triton paths for Q/K RMSNorm plus partial NeoX RoPE, indexed modulation, SwiGLU, and Ulysses
 relayout when their input contracts match. Compatible `tf-kernel` builds may accelerate public RMSNorm, SwiGLU, and
@@ -347,20 +347,21 @@ python examples/run_examples.py \
 
 ## Measured Four-GPU Profile
 
-The comparison below uses the frozen 768p, five-second, 50-point T2VA request with seed 0 and the resident
-Ulysses2 x TP2 four-H100 profile. Each configuration starts a fresh pipeline, runs one unmeasured warmup request,
-then measures the second request. Pipeline time includes text encoding, DiT, video/audio decode, host
-materialization, and orchestration; it excludes model/worker initialization and MP4 encoding. Wall time surrounds
-the same `run()` call. Full-device memory is sampled from `nvidia-smi` every 100 ms during the measured request.
+The comparison below was retested on 2026-08-06 using the frozen 768p, five-second, 50-point T2VA request with seed
+0, online AdaLN cache enabled, and the resident Ulysses2 x TP2 four-H100 profile. Each configuration starts
+a fresh pipeline, runs one unmeasured warmup request, then measures the second request. Pipeline time includes text
+encoding, DiT, video/audio decode, host materialization, and orchestration; it excludes model/worker initialization
+and MP4 encoding. Wall time surrounds the same `run()` call. Full-device memory is sampled from `nvidia-smi`
+every 100 ms during the measured request.
 
 | Feature cache | Computed / skipped DiT calls | Pipeline time | Wall time | DiT time | Pipeline speedup | Peak memory GPU 0 / 1 / 2 / 3 |
 |---|---:|---:|---:|---:|---:|---:|
-| Disabled | 49 / 0 | 77.93 s | 78.28 s | 75.26 s | 1.00x | 62.35 / 61.10 / 61.10 / 61.10 GiB |
-| AdaTaylorCache | 26 / 23 | 42.64 s | 42.95 s | 40.07 s | 1.83x | 63.63 / 62.42 / 62.43 / 62.43 GiB |
+| Disabled | 49 / 0 | 79.16 s | 79.40 s | 76.50 s | 1.00x | 51.46 / 50.24 / 50.04 / 50.23 GiB |
+| AdaTaylorCache | 26 / 23 | 43.53 s | 43.94 s | 40.87 s | 1.82x | 53.00 / 51.40 / 51.22 / 51.22 GiB |
 
-AdaTaylorCache reduces steady-state pipeline latency by 45.3% and increases maximum single-GPU occupancy by
-1.28 GiB (2.0%). Against the matched uncached MP4, PSNR is 26.91, SSIM is 0.8619, audio cosine similarity is
-0.9562, and audio duration is unchanged. The earlier matched local SGLang SP2+TP2 parity run measured 79.37 seconds
-and 67.8 GiB on GPU 0 under the same request shape.
+AdaTaylorCache reduces steady-state pipeline latency by 45.0% and increases maximum single-GPU occupancy by
+1.54 GiB (3.0%). Against the previously matched uncached MP4, PSNR is 26.91, SSIM is 0.8619, audio cosine
+similarity is 0.9562, and audio duration is unchanged. The earlier matched local SGLang
+SP2+TP2 parity run measured 79.37 seconds and 67.8 GiB on GPU 0 under the same request shape.
 
 These numbers describe this request and environment, not a general performance or quality guarantee.

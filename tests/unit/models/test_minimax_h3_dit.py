@@ -217,6 +217,17 @@ def _small_packed_inputs() -> dict[str, object]:
     }
 
 
+def test_noop_feature_cache_does_not_update_residuals() -> None:
+    torch.manual_seed(0)
+    model = MiniMaxH3DiT(_small_config()).eval()
+    cache = model.feature_cache
+
+    with patch.object(cache, "update", wraps=cache.update) as update:
+        model(**_small_packed_inputs())
+
+    update.assert_not_called()
+
+
 def test_feature_cache_skips_joint_blocks_and_keeps_both_output_modalities() -> None:
     class _ComputeThenReuseCache:
         def __init__(self) -> None:
@@ -398,6 +409,70 @@ def test_inference_only_adaln_cache_matches_live_projections_and_releases_weight
     model.to("cpu")
 
 
+def test_load_inference_only_adaln_validates_fingerprint_once(tmp_path) -> None:
+    model = MiniMaxH3DiT(_small_config()).eval()
+    cache = model.prepare_adaln_cache(torch.tensor([0.5]))
+    cache.save(tmp_path)
+
+    with patch.object(model, "adaln_fingerprint", wraps=model.adaln_fingerprint) as fingerprint:
+        model.load_inference_only_adaln(tmp_path)
+
+    assert fingerprint.call_count == 1
+    assert model.time_embedder is None
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_inference_only_adaln_cache_resolves_indices_on_device() -> None:
+    config = _small_config()
+    cache = MiniMaxH3AdaLNCache(
+        timesteps=torch.tensor([0.25, 0.5, 0.75]),
+        block_outputs=tuple(
+            torch.randn(3, config.adaln_out_features, dtype=torch.bfloat16) for _ in range(config.num_layers)
+        ),
+        final_output=torch.randn(3, config.final_adaln_out_features, dtype=torch.bfloat16),
+        config=config,
+        model_fingerprint="test",
+    )
+    device = torch.device("cuda", torch.cuda.current_device())
+    cached_timesteps, block_outputs, final_output = cache._outputs_for_device(device)
+
+    with patch.object(cache, "_cpu_indices_for", side_effect=AssertionError("unexpected CPU lookup")):
+        indices = cache._indices_for(
+            torch.tensor([0.75, 0.25], device=device),
+            device,
+            cached_timesteps,
+        )
+
+    assert indices.tolist() == [2, 0]
+    assert all(output.device == device for output in block_outputs)
+    assert final_output.device == device
+    assert cache._outputs_for_device(device)[0] is cached_timesteps
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_online_adaln_cache_defers_device_synchronization_until_finalize() -> None:
+    config = _small_config()
+    device = torch.device("cuda", torch.cuda.current_device())
+    model = MiniMaxH3DiT(config).eval().to(device)
+    model.enable_online_adaln_cache()
+    timesteps = torch.tensor([0.25, 0.5], device=device)
+    adaln_input = torch.randn(2, config.time_embed_dim, device=device, dtype=torch.bfloat16)
+
+    with patch(
+        "telefuser.models.minimax_h3_dit.torch.cuda.synchronize",
+        wraps=torch.cuda.synchronize,
+    ) as synchronize:
+        model._record_online_adaln(timesteps, adaln_input)
+        synchronize.assert_not_called()
+        assert all(tensor.is_pinned() for tensor in model._online_adaln_batches[0])
+
+        assert model.finalize_online_adaln_cache() is True
+
+    assert synchronize.call_count == 1
+
+
 def test_inference_only_adaln_cache_rejects_weight_mismatch_and_missing_timestep(tmp_path) -> None:
     torch.manual_seed(0)
     source = MiniMaxH3DiT(_small_config()).eval()
@@ -444,9 +519,12 @@ def test_online_adaln_cache_finalizes_after_first_forward_and_reuses_outputs() -
     expected_video, expected_audio = model(**inputs)
     assert model._adaln_cache is None
     assert model.time_embedder is not None
-    assert model._online_adaln_rows
+    assert model._online_adaln_batches
 
-    assert model.finalize_online_adaln_cache() is True
+    with patch.object(model, "adaln_fingerprint", wraps=model.adaln_fingerprint) as fingerprint:
+        assert model.finalize_online_adaln_cache() is True
+
+    assert fingerprint.call_count == 1
     assert model._adaln_cache is not None
     assert model.time_embedder is None
     assert all(block.adaln_proj.linear is None for block in model.blocks)

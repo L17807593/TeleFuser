@@ -27,7 +27,7 @@ from telefuser.distributed.device_mesh import (
 )
 from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequence_parallel_unshard
 from telefuser.distributed.ulysses_comm import ulysses_gather_heads_destination_major, ulysses_scatter_qkv
-from telefuser.feature_cache import AdaTaylorCacheCalibrator
+from telefuser.feature_cache import AdaTaylorCacheCalibrator, NoOpCache
 from telefuser.ops import RMSNorm, apply_qk_norm_rope_neox, indexed_gate, indexed_scale_shift, silu_and_mul_reuse_input
 from telefuser.ops.attention import attention
 from telefuser.ops.rotary import apply_rotary_emb_neox
@@ -126,9 +126,10 @@ class MiniMaxH3AdaLNCache:
     config: MiniMaxH3DiTConfig
     model_fingerprint: str
     partition: str | None = None
-    _device_outputs: dict[str, tuple[tuple[torch.Tensor, ...], torch.Tensor]] = field(
+    _device_outputs: dict[str, tuple[torch.Tensor, tuple[torch.Tensor, ...], torch.Tensor]] = field(
         default_factory=dict, init=False, repr=False
     )
+    _cpu_positions: dict[str, int] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.timesteps = self.timesteps.detach().to(device="cpu", dtype=torch.float32).contiguous()
@@ -153,6 +154,7 @@ class MiniMaxH3AdaLNCache:
             raise ValueError(
                 f"AdaLN cache final output has shape {tuple(self.final_output.shape)}, expected {expected_final_shape}."
             )
+        self._cpu_positions = {float(value).hex(): index for index, value in enumerate(self.timesteps.tolist())}
 
     @classmethod
     def from_model(
@@ -183,11 +185,10 @@ class MiniMaxH3AdaLNCache:
             partition=partition,
         )
 
-    def _indices_for(self, timesteps: torch.Tensor) -> torch.Tensor:
-        positions = {float(value).hex(): index for index, value in enumerate(self.timesteps.tolist())}
+    def _cpu_indices_for(self, timesteps: torch.Tensor) -> torch.Tensor:
         indices: list[int] = []
         for timestep in timesteps.detach().to(device="cpu", dtype=torch.float32).tolist():
-            index = positions.get(float(timestep).hex())
+            index = self._cpu_positions.get(float(timestep).hex())
             if index is None:
                 raise ValueError(
                     f"AdaLN cache is missing timestep {timestep:.8g}; rebuild it for the requested denoising schedule."
@@ -195,24 +196,41 @@ class MiniMaxH3AdaLNCache:
             indices.append(index)
         return torch.tensor(indices, dtype=torch.long)
 
-    def _outputs_for_device(self, device: torch.device) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+    def _outputs_for_device(self, device: torch.device) -> tuple[torch.Tensor, tuple[torch.Tensor, ...], torch.Tensor]:
         if device.type == "cpu":
-            return self.block_outputs, self.final_output
+            return self.timesteps, self.block_outputs, self.final_output
         key = str(device)
         outputs = self._device_outputs.get(key)
         if outputs is None:
             outputs = (
+                self.timesteps.to(device=device, non_blocking=True),
                 tuple(output.to(device=device, non_blocking=True) for output in self.block_outputs),
                 self.final_output.to(device=device, non_blocking=True),
             )
             self._device_outputs[key] = outputs
         return outputs
 
+    def _indices_for(
+        self,
+        timesteps: torch.Tensor,
+        device: torch.device,
+        cached_timesteps: torch.Tensor,
+    ) -> torch.Tensor:
+        if device.type == "cpu":
+            return self._cpu_indices_for(timesteps)
+
+        requested = timesteps.detach().to(device=device, dtype=torch.float32)
+        indices = torch.searchsorted(cached_timesteps, requested)
+        safe_indices = indices.clamp_max(cached_timesteps.numel() - 1)
+        matches = (indices < cached_timesteps.numel()) & (cached_timesteps.index_select(0, safe_indices) == requested)
+        torch._assert_async(matches.all(), "AdaLN cache is missing a requested timestep.")
+        return safe_indices
+
     def resolve(
         self, model: Any, timesteps: torch.Tensor, device: torch.device
     ) -> tuple[tuple[tuple[torch.Tensor, ...], ...], tuple[torch.Tensor, torch.Tensor]]:
-        indices = self._indices_for(timesteps).to(device)
-        block_outputs, final_output = self._outputs_for_device(device)
+        cached_timesteps, block_outputs, final_output = self._outputs_for_device(device)
+        indices = self._indices_for(timesteps, device, cached_timesteps)
         block_params = tuple(
             block.adaln_proj.split_output(output.index_select(0, indices))
             for block, output in zip(model.blocks, block_outputs, strict=True)
@@ -405,7 +423,6 @@ class MiniMaxH3Attention(nn.Module):
         self.out_proj = nn.Linear(self.inner_dim, config.hidden_size, bias=False, dtype=torch.bfloat16)
         self.ulysses_group: dist.ProcessGroup | None = None
         self.tp_group: dist.ProcessGroup | None = None
-        self._communication_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
 
     def set_ulysses_group(self, group: dist.ProcessGroup | None) -> None:
         self.ulysses_group = group
@@ -424,12 +441,6 @@ class MiniMaxH3Attention(nn.Module):
         self.num_heads //= world_size
         self.inner_dim //= world_size
         self.tp_group = group
-
-    def reset_communication_metrics(self) -> None:
-        self._communication_events.clear()
-
-    def communication_seconds(self) -> float:
-        return sum(start.elapsed_time(end) for start, end in self._communication_events) / 1000.0
 
     def forward(
         self,
@@ -461,12 +472,7 @@ class MiniMaxH3Attention(nn.Module):
         group = self.ulysses_group
         use_ulysses = group is not None and dist.get_world_size(group) > 1
         if use_ulysses:
-            scatter_start = torch.cuda.Event(enable_timing=True)
-            scatter_end = torch.cuda.Event(enable_timing=True)
-            scatter_start.record()
             query, key, value = ulysses_scatter_qkv(query, key, value, group)()
-            scatter_end.record()
-            self._communication_events.append((scatter_start, scatter_end))
         output = attention(
             query,
             key,
@@ -477,12 +483,7 @@ class MiniMaxH3Attention(nn.Module):
             cu_seqlens=cu_seqlens,
         )
         if use_ulysses:
-            gather_start = torch.cuda.Event(enable_timing=True)
-            gather_end = torch.cuda.Event(enable_timing=True)
-            gather_start.record()
             output = ulysses_gather_heads_destination_major(output, group, num_heads=self.num_heads)()
-            gather_end.record()
-            self._communication_events.append((gather_start, gather_end))
         output = self.out_proj(output[0].reshape(sequence, self.inner_dim))
         if self.tp_group is not None:
             all_reduce_sum_((output,), group=self.tp_group)
@@ -713,6 +714,8 @@ class MiniMaxH3DiT(BaseModel):
         self._online_adaln_cache_enabled = False
         self._online_adaln_partition: str | None = None
         self._online_adaln_rows: dict[str, tuple[float, tuple[torch.Tensor, ...], torch.Tensor]] = {}
+        self._online_adaln_batches: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        self._online_adaln_copy_device: torch.device | None = None
 
     def adaln_fingerprint(self) -> str:
         if self.time_embedder is None:
@@ -742,6 +745,8 @@ class MiniMaxH3DiT(BaseModel):
         self._online_adaln_cache_enabled = True
         self._online_adaln_partition = partition
         self._online_adaln_rows.clear()
+        self._online_adaln_batches.clear()
+        self._online_adaln_copy_device = None
 
     def _record_online_adaln(
         self, timesteps: torch.Tensor, adaln_input: torch.Tensor
@@ -764,17 +769,23 @@ class MiniMaxH3DiT(BaseModel):
                 group=final_projection.tp_group,
                 world_size=final_projection.tp_world_size,
             )
-        timestep_values = timesteps.detach().to(device="cpu", dtype=torch.float32).tolist()
-        for row, timestep in enumerate(timestep_values):
-            key = float(timestep).hex()
-            self._online_adaln_rows[key] = (
-                float(timestep),
-                tuple(
-                    output[row].detach().to(device="cpu", dtype=torch.bfloat16).contiguous()
-                    for output in raw_block_outputs
-                ),
-                raw_final_output[row].detach().to(device="cpu", dtype=torch.bfloat16).contiguous(),
-            )
+        stacked_block_outputs = torch.stack(raw_block_outputs).detach()
+        if stacked_block_outputs.device.type == "cuda":
+            self._online_adaln_copy_device = stacked_block_outputs.device
+
+            def copy_to_pinned_cpu(value: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+                output = torch.empty(value.shape, device="cpu", dtype=dtype, pin_memory=True)
+                output.copy_(value, non_blocking=True)
+                return output
+
+            timesteps_cpu = copy_to_pinned_cpu(timesteps.detach(), torch.float32)
+            block_outputs_cpu = copy_to_pinned_cpu(stacked_block_outputs, torch.bfloat16)
+            final_output_cpu = copy_to_pinned_cpu(raw_final_output.detach(), torch.bfloat16)
+        else:
+            timesteps_cpu = timesteps.detach().to(device="cpu", dtype=torch.float32).contiguous()
+            block_outputs_cpu = stacked_block_outputs.to(device="cpu", dtype=torch.bfloat16).contiguous()
+            final_output_cpu = raw_final_output.detach().to(device="cpu", dtype=torch.bfloat16).contiguous()
+        self._online_adaln_batches.append((timesteps_cpu, block_outputs_cpu, final_output_cpu))
         block_params = tuple(
             block.adaln_proj.split_output(output) for block, output in zip(self.blocks, raw_block_outputs, strict=True)
         )
@@ -784,8 +795,18 @@ class MiniMaxH3DiT(BaseModel):
     def finalize_online_adaln_cache(self) -> bool:
         if not self._online_adaln_cache_enabled:
             return self._adaln_cache is not None
-        if not self._online_adaln_rows:
+        if not self._online_adaln_batches:
             raise RuntimeError("Cannot finalize an online AdaLN cache before any request timestep was observed.")
+        if self._online_adaln_copy_device is not None:
+            torch.cuda.synchronize(self._online_adaln_copy_device)
+        for timesteps, block_outputs, final_output in self._online_adaln_batches:
+            for row, timestep in enumerate(timesteps.tolist()):
+                key = float(timestep).hex()
+                self._online_adaln_rows[key] = (
+                    float(timestep),
+                    tuple(block_outputs[:, row].unbind(dim=0)),
+                    final_output[row],
+                )
         rows = [
             self._online_adaln_rows[key]
             for key in sorted(self._online_adaln_rows, key=lambda item: self._online_adaln_rows[item][0])
@@ -800,10 +821,12 @@ class MiniMaxH3DiT(BaseModel):
             model_fingerprint=self.adaln_fingerprint(),
             partition=self._online_adaln_partition,
         )
-        self.enable_inference_only_adaln(cache)
+        self._activate_inference_only_adaln(cache)
         self._online_adaln_cache_enabled = False
         self._online_adaln_partition = None
         self._online_adaln_rows.clear()
+        self._online_adaln_batches.clear()
+        self._online_adaln_copy_device = None
         return True
 
     def prepare_adaln_cache(
@@ -815,6 +838,9 @@ class MiniMaxH3DiT(BaseModel):
         if self._adaln_cache is not None:
             raise RuntimeError("MiniMax H3 inference-only AdaLN mode is already enabled.")
         cache.validate_model(self)
+        self._activate_inference_only_adaln(cache)
+
+    def _activate_inference_only_adaln(self, cache: MiniMaxH3AdaLNCache) -> None:
         self._adaln_cache = cache
         for block in self.blocks:
             block.adaln_proj.release_weights()
@@ -822,9 +848,10 @@ class MiniMaxH3DiT(BaseModel):
         self.time_embedder = None
 
     def load_inference_only_adaln(self, directory: str | Path, *, expected_partition: str | None = None) -> None:
-        self.enable_inference_only_adaln(
-            MiniMaxH3AdaLNCache.load(directory, self, expected_partition=expected_partition)
-        )
+        if self._adaln_cache is not None:
+            raise RuntimeError("MiniMax H3 inference-only AdaLN mode is already enabled.")
+        cache = MiniMaxH3AdaLNCache.load(directory, self, expected_partition=expected_partition)
+        self._activate_inference_only_adaln(cache)
 
     def _preserve_fp32_boundaries(self) -> None:
         for name in MINIMAX_H3_FP32_PARAM_NAMES:
@@ -1062,7 +1089,7 @@ class MiniMaxH3DiT(BaseModel):
         if feature_cache.should_compute(True):
             # H3's gated residual ops may reuse their input storage. Preserve the
             # pre-block value so cache residuals always span the complete block stack.
-            input_hidden = hidden.clone()
+            input_hidden = None if isinstance(feature_cache, NoOpCache) else hidden.clone()
             if self.tp_flag and block_adaln_params is None:
                 local_adaln = torch.stack([block.adaln_proj.project_local(adaln_input) for block in self.blocks])
                 first_projection = self.blocks[0].adaln_proj
@@ -1087,6 +1114,7 @@ class MiniMaxH3DiT(BaseModel):
                     adaln_params=None if block_adaln_params is None else block_adaln_params[index],
                 )
             if isinstance(feature_cache, AdaTaylorCacheCalibrator):
+                assert input_hidden is not None
                 # Video rows greatly outnumber audio rows in H3. Calibrate decisions on
                 # audio residuals so the joint hidden cache does not neglect its weaker modality.
                 local_audio_positions = (
@@ -1099,7 +1127,7 @@ class MiniMaxH3DiT(BaseModel):
                 # shared parameter format loads unchanged.
                 feature_cache.should_compute(False)
                 feature_cache.update(calibration_output, calibration_input, False)
-            else:
+            elif input_hidden is not None:
                 feature_cache.update(hidden, input_hidden, True)
         else:
             hidden = feature_cache.approximate(hidden, True)
@@ -1168,13 +1196,6 @@ class MiniMaxH3DiT(BaseModel):
         if self._adaln_cache is None:
             self.final_layer.adaln_proj.enable_tp(group, rank=rank, world_size=world_size)
         self.tp_flag = True
-
-    def reset_communication_metrics(self) -> None:
-        for block in self.blocks:
-            block.attn.reset_communication_metrics()
-
-    def communication_seconds(self) -> float:
-        return sum(block.attn.communication_seconds() for block in self.blocks)
 
     def get_fsdp_module_names(self) -> list[str]:
         return ["blocks"]

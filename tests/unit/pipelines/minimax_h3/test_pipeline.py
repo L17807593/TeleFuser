@@ -192,7 +192,6 @@ def test_t2va_denoising_stage_runs_complete_packed_contract_on_cpu() -> None:
     assert result.packed["seq_len"] % 64 == 0
     assert result.runtime_metrics["peak_allocated_bytes"] == 0
     assert result.runtime_metrics["peak_reserved_bytes"] == 0
-    assert result.runtime_metrics["communication_seconds"] == 0.0
     assert result.runtime_metrics["feature_cache_computed_steps"] == 1
     assert result.runtime_metrics["feature_cache_skipped_steps"] == 0
 
