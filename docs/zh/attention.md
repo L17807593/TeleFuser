@@ -153,9 +153,9 @@ sparse_state.update(numeral_timestep=20, layer_idx=5)
 
 # 检查是否应使用密集
 if sparse_state.should_use_dense():
-    # 使用密集注意力
+    attention_mode = "dense"
 else:
-    # 使用稀疏注意力
+    attention_mode = "sparse"
 ```
 
 ## Pipeline 支持情况

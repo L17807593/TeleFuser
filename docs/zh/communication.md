@@ -62,7 +62,7 @@ DP -> CFG -> SP (ring, ulysses) -> PP -> TP
 
 同时启用 Ring 和 Ulysses 时，SP 是二维 `(ring, ulysses)` 子 mesh。`get_cfg_group()`、
 `get_ring_group()`、`get_ulysses_group()` 和 `get_pp_group()` 等 accessor 避免模型重复推导 rank 列表。
-配置的 world size 必须等于所有并行 degree 的乘积。目前 SP 和 TP 互斥。
+配置的 world size 必须等于所有并行 degree 的乘积。在所选 pipeline 支持时，SP 和 TP 可以作为独立的 mesh 维度组合。
 
 ## 共享 Collective 原语
 

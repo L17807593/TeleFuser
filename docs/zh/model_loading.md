@@ -18,10 +18,11 @@ TeleFuser 采用 **Hash-based 自动模型识别**机制。系统通过计算模
 ### Hash 匹配机制
 
 ```
-模型文件 → 提取 state_dict keys → 计算 MD5 hash → 匹配预配置 → 初始化对应 model class
+模型文件 → 提取 state_dict keys → 计算 MD5 hash → 匹配 registry 注册 → 初始化对应 model class
 ```
 
-预配置的模型信息存储在 `telefuser/core/model_config.py` 中。
+模型 hash 注册与对应模型类放在同一模块中。`ModelRegistry` 首次使用时会自动发现调用
+`register_model_config()` 的模块；实现见 `telefuser/core/model_registry.py`。
 
 ## 快速开始
 
@@ -130,7 +131,7 @@ dit = module_manager.fetch_module("wan_video_dit", index=0)
 
 ### HuggingFace 模型加载
 
-对于不在预配置 hash 列表中的模型，可以使用 HuggingFace 加载方式：
+对于没有匹配 hash 注册的模型，可以使用 HuggingFace 加载方式：
 
 ```python
 # 从 HuggingFace 加载
@@ -157,9 +158,9 @@ ModuleManager 支持以下模型文件格式：
 
 如果模型无法被自动识别，可能原因：
 
-1. **模型未在预配置列表中**
-   - 检查 `telefuser/core/model_config.py` 是否包含该模型的 hash
-   - 如果是新模型，需要按照[开发文档](./adding_new_model.md)添加配置
+1. **模型尚未注册**
+   - 检查定义模型类的模块是否调用了 `register_model_config()`
+   - 如果是新模型，需要按照[开发文档](./adding_new_model.md)添加注册
 
 2. **模型文件损坏或不完整**
    - 验证文件完整性
@@ -191,12 +192,12 @@ module_manager.load_model(...)
 load model /path/to/model.safetensors with state hash xxxxxxxxxx
 ```
 
-这表示该模型不在预配置列表中。你需要：
+这表示该模型没有匹配的 registry 注册。你需要：
 1. 使用 `weight_viewer.py` 工具计算 hash：
    ```bash
    python tools/viewer/weight_viewer.py /path/to/model.safetensors --quiet
    ```
-2. 按照开发文档添加模型配置
+2. 按照开发文档添加模型注册
 
 ## 最佳实践
 

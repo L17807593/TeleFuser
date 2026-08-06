@@ -173,8 +173,8 @@ Linear → RMSNorm(q_norm) → RoPE → Attention
 ```python
 # Attention - 始终使用优化内核，禁用编译
 @torch.compiler.disable
-def attention(q, k, v, ...):
-    return flash_attn2(q, k, v, ...)
+def attention(q, k, v, **kwargs):
+    return flash_attn2(q, k, v, **kwargs)
 
 # RoPE - 使用 Triton 内核，禁用编译
 @torch.compiler.disable

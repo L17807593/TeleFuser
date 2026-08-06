@@ -174,8 +174,8 @@ Key insight: Since Attention uses `@torch.compiler.disable`, any fusion beyond R
 ```python
 # Attention - always use optimized kernel, disable compile
 @torch.compiler.disable
-def attention(q, k, v, ...):
-    return flash_attn2(q, k, v, ...)
+def attention(q, k, v, **kwargs):
+    return flash_attn2(q, k, v, **kwargs)
 
 # RoPE - use Triton kernel, disable compile
 @torch.compiler.disable

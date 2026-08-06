@@ -80,14 +80,14 @@ class Wan21VideoPipelineConfig:
 ```python
 def __call__(
     self,
-    prompt: str | List[str],
-    ...
+    prompt: str | list[str],
+    *,
     sigma_shift: float = 5.0,         # 噪声调度参数
     boundary: float = 0.875,          # MoE 切换边界
     tiled: bool = False,              # 分块推理
     tile_size: tuple[int, int] = (30, 52),
+) -> object:
     ...
-)
 ```
 
 ### Example 中的配置
@@ -152,7 +152,6 @@ def run(
         seed=seed,
         height=height,
         width=width,
-        ...
     )
     return video
 ```
@@ -263,22 +262,14 @@ class ParallelConfig:
 注意力实现配置：
 
 ```python
-@dataclass
-class AttentionConfig:
-    """Unified configuration for all attention implementations."""
+from telefuser.core.config import AttentionConfig, AttnImplType
 
-    attn_impl: AttnImplType = AttnImplType.TORCH_SDPA
-    sparse_config: SparseAttentionConfig | None = None
-
-    @classmethod
-    def radial_attention(cls, ...) -> AttentionConfig:
-        """创建 radial attention 配置（视频生成稀疏注意力）。"""
-        ...
-
-    @classmethod
-    def dense_attention(cls, attn_impl: AttnImplType = AttnImplType.FLASH_ATTN_2) -> AttentionConfig:
-        """创建稠密注意力配置。"""
-        ...
+radial_config = AttentionConfig.radial_attention(
+    dense_timesteps=40,
+    dense_layers=0,
+    decay_factor=1.0,
+)
+dense_config = AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_2)
 ```
 
 ## 配置导出

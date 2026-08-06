@@ -246,11 +246,11 @@ python tools/viewer/weight_viewer.py /path/to/your/model.safetensors \
 python tools/viewer/weight_viewer.py "/path/to/model-*.safetensors" --quiet
 ```
 
-**注意**：在添加到 `model_config.py` 时，确保 hash 是基于**合并后的完整权重**计算的。
+**注意**：应在拥有该 checkpoint 格式的模型类旁注册基于**合并后的完整权重**计算的 hash。
 
-### 步骤 4：添加模型配置
+### 步骤 4：注册模型检测信息
 
-编辑 `telefuser/core/model_config.py`，添加模型配置。
+在定义 `MyCustomDiT` 的模块中添加注册。`ModelRegistry` 会自动发现该模块，因此不要把注册放进集中的列表，也不需要在 `telefuser.models.__init__` 中手动导入模型。
 
 首先，从 weight_viewer 输出中获取信息：
 
@@ -262,24 +262,21 @@ Files: 1
 hash with shape: a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
 ```
 
-然后添加配置：
+然后添加注册：
 
 ```python
-from ..models.my_custom_dit import MyCustomDiT
+# telefuser/models/my_custom_dit.py
+from telefuser.core.model_registry import register_model_config
 
-model_loader_configs = [
-    # ... 现有配置 ...
-    
-    # MyCustomDiT - Standard version (from weight_viewer: hash=a1b2c3d4...)
-    # Parameters: 6.91B
-    (
-        None,                                  # hash without shape (可选，用于非严格匹配)
-        "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",   # hash with shape（来自 weight_viewer）
-        ["my_custom_dit"],                     # model_name（用于 fetch_module）
-        [MyCustomDiT],                         # model_class
-        "official",                             # model_resource: "official" 或 "diffusers"
-    ),
-]
+# MyCustomDiT - Standard version (from weight_viewer: hash=a1b2c3d4...)
+# Parameters: 6.91B
+register_model_config(
+    None,                                  # hash without shape（可选，用于非严格匹配）
+    "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",   # hash with shape（来自 weight_viewer）
+    ["my_custom_dit"],                     # model name（用于 fetch_module()）
+    [MyCustomDiT],                         # model class
+    "official",                           # source format: "official" 或 "diffusers"
+)
 ```
 
 #### 添加多个变体
@@ -295,32 +292,20 @@ Files: 1
 hash with shape: b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7  # 不同的 hash！
 ```
 
-添加到配置：
+在模型类旁为每个变体注册：
 
 ```python
-    # MyCustomDiT - Standard version (hash: a1b2c3d4...)
-    (
-        None,
-        "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
-        ["my_custom_dit"],
-        [MyCustomDiT],
-        "official",
-    ),
-    
-    # MyCustomDiT - FP8 version (hash: b2c3d4e5...) 
-    # Note: FP8 quantized weights
-    (
-        None,
-        "b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7",
-        ["my_custom_dit"],
-        [MyCustomDiT],
-        "official",
-    ),
+# MyCustomDiT - Standard version (hash: a1b2c3d4...)
+register_model_config(None, "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6", ["my_custom_dit"], [MyCustomDiT], "official")
+
+# MyCustomDiT - FP8 version (hash: b2c3d4e5...)
+# Note: FP8 quantized weights
+register_model_config(None, "b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7", ["my_custom_dit"], [MyCustomDiT], "official")
 ```
 
 **提示**：如果变体的 tensor shape 不同（如 pruned 模型），考虑使用非严格匹配（仅使用 `keys_hash`）。
 
-配置字段说明：
+注册字段说明：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -335,7 +320,7 @@ hash with shape: b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7  # 不同的 hash！
 创建测试脚本验证模型加载：
 
 ```python
-# tests/test_my_custom_model_loading.py
+# tests/unit/models/test_my_custom_model_loading.py
 import torch
 import pytest
 from telefuser.core.module_manager import ModuleManager
@@ -367,7 +352,7 @@ if __name__ == "__main__":
 运行测试：
 
 ```bash
-pytest tests/test_my_custom_model_loading.py -v
+pytest tests/unit/models/test_my_custom_model_loading.py -v
 ```
 
 ## 在 Pipeline 示例中使用模型
@@ -514,8 +499,8 @@ python tools/viewer/weight_viewer.py /path/to/model.safetensors --export model_i
 ### 2. 检查 hash 匹配过程
 
 ```python
-from telefuser.utils.model_weight import load_state_dict, hash_state_dict_keys
-from telefuser.core.model_config import model_loader_configs
+from telefuser.core.model_registry import ModelRegistry
+from telefuser.utils.model_weight import hash_state_dict_keys, load_state_dict
 
 sd = load_state_dict("/path/to/model.safetensors")
 hash_with_shape = hash_state_dict_keys(sd, with_shape=True)
@@ -524,9 +509,9 @@ hash_without_shape = hash_state_dict_keys(sd, with_shape=False)
 print(f"Model hash (with shape): {hash_with_shape}")
 print(f"Model hash (without shape): {hash_without_shape}")
 
-# 检查是否在配置中
+# 检查自动发现的注册是否匹配
 found = False
-for config in model_loader_configs:
+for config in ModelRegistry.instance().get_configs():
     keys_hash, keys_hash_with_shape, model_names, model_classes, resource = config
     if keys_hash_with_shape == hash_with_shape:
         print(f"✓ Found match (strict): {model_names}")
@@ -536,9 +521,9 @@ for config in model_loader_configs:
         found = True
 
 if not found:
-    print("✗ No matching configuration found!")
-    print(f"Add this to model_config.py:")
-    print(f'    (None, "{hash_with_shape}", ["your_model_name"], [YourModelClass], "official"),')
+    print("✗ No matching registration found!")
+    print("Add this beside the model class:")
+    print(f'register_model_config(None, "{hash_with_shape}", ["your_model_name"], [YourModelClass], "official")')
 ```
 
 ### 3. 验证转换器输出
@@ -569,15 +554,15 @@ from telefuser.core.module_manager import ModuleManager
 mm = ModuleManager(device='cpu')
 mm.load_model('/path/to/your/model.safetensors')
 print('✓ Configuration is correct!')
-print(f'Loaded models: {mm.module_name}')
+print(f'Loaded models: {mm.module_names}')
 "
 ```
 
 ## 最佳实践
 
-1. **保持配置有序**
-   - 按模型类型分组
-   - 同一模型的不同变体放在一起
+1. **将注册和模型类放在一起**
+   - 每个 `register_model_config()` 调用都应位于拥有相应类的模块中
+   - 将同一 checkpoint 格式的变体放在一起
    - 添加注释说明版本差异
 
 2. **使用严格匹配优先**
@@ -588,13 +573,13 @@ print(f'Loaded models: {mm.module_name}')
    ```python
      # Wan2.1 T2V 14B - FP8 per-channel quantized
      # Note: This version has scaled weights for FP8 inference
-     (
+     register_model_config(
          None,
          "4cf556355bc7e9b6545b38f4930f60b1",
          ["wan_video_dit"],
          [WanModel],
          "official",
-     ),
+     )
    ```
 
 4. **测试所有变体**
@@ -623,7 +608,7 @@ print(f'Loaded models: {mm.module_name}')
 参考以下文件了解完整实现：
 
 - 模型实现：`telefuser/models/wan_video_dit.py`
-- 配置定义：`telefuser/core/model_config.py`（WanModel 相关配置）
+- 模型注册：`telefuser/models/wan_video_dit.py` 末尾的 `register_model_config()` 调用
 - 使用示例：`examples/wan_video/wan21_14b_image_to_video_h100.py`
 
 ## 优化模型推理

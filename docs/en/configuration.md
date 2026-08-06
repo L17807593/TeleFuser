@@ -80,14 +80,14 @@ class Wan21VideoPipelineConfig:
 ```python
 def __call__(
     self,
-    prompt: str | List[str],
-    ...
+    prompt: str | list[str],
+    *,
     sigma_shift: float = 5.0,         # Noise schedule parameter
     boundary: float = 0.875,          # MoE switching boundary
     tiled: bool = False,              # Tiled inference
     tile_size: tuple[int, int] = (30, 52),
+) -> object:
     ...
-)
 ```
 
 ### Example Configuration
@@ -152,7 +152,6 @@ def run(
         seed=seed,
         height=height,
         width=width,
-        ...
     )
     return video
 ```
@@ -263,22 +262,14 @@ class ParallelConfig:
 Attention implementation configuration:
 
 ```python
-@dataclass
-class AttentionConfig:
-    """Unified configuration for all attention implementations."""
+from telefuser.core.config import AttentionConfig, AttnImplType
 
-    attn_impl: AttnImplType = AttnImplType.TORCH_SDPA
-    sparse_config: SparseAttentionConfig | None = None
-
-    @classmethod
-    def radial_attention(cls, ...) -> AttentionConfig:
-        """Create config for radial attention (sparse attention for video)."""
-        ...
-
-    @classmethod
-    def dense_attention(cls, attn_impl: AttnImplType = AttnImplType.FLASH_ATTN_2) -> AttentionConfig:
-        """Create config for dense attention."""
-        ...
+radial_config = AttentionConfig.radial_attention(
+    dense_timesteps=40,
+    dense_layers=0,
+    decay_factor=1.0,
+)
+dense_config = AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_2)
 ```
 
 ## Config Dump

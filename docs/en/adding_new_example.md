@@ -64,10 +64,9 @@ from PIL import Image
 
 from telefuser.core.config import AttentionConfig, AttnImplType, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
-from telefuser.pipelines.{model_family}.{pipeline_module} import (
-    {PipelineClass},
-    {PipelineConfigClass},
-)
+# Replace these comments with imports from the maintained example for the model
+# family. For example:
+# from telefuser.pipelines.wan_video.pipeline import Wan21VideoPipeline, Wan21VideoPipelineConfig
 from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import save_video  # or save_image for images
 
@@ -84,7 +83,7 @@ PPL_CONFIG = dict(
     resolution="720p",
     cfg_scale=5.0,
     seed=42,
-    # ... other parameters
+    target_fps=16,
 )
 
 # ============================================================================
@@ -101,15 +100,9 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
     Returns:
         Initialized pipeline instance
     """
-    module_manager = ModuleManager(device="cpu")
-    # Load models...
-    
-    pipe = PipelineClass(device="cuda", torch_dtype=torch.bfloat16)
-    pipe_config = PipelineConfigClass()
-    # Configure pipeline...
-    
-    pipe.init(module_manager, pipe_config)
-    return pipe
+    raise NotImplementedError(
+        "Replace this template with the model-specific loader from a maintained example."
+    )
 
 # ============================================================================
 # Inference Section
@@ -131,7 +124,7 @@ def run(pipeline, prompt, negative_prompt="", seed=PPL_CONFIG["seed"], **kwargs)
     video = pipeline(
         prompt=prompt,
         negative_prompt=f"{negative_prompt} {PPL_CONFIG['negative_prompt']}",
-        # ... other parameters from PPL_CONFIG
+        **kwargs,
     )
     return video
 
@@ -508,8 +501,8 @@ Add docstring at the top explaining usage:
 This example demonstrates text-to-video generation using Wan2.1 14B model.
 
 Usage:
-    python wan21_14b_text_to_video_h100.py --prompt "A cat playing piano"
-    python wan21_14b_text_to_video_h100.py --gpu_num 2 --prompt "..."
+    python examples/wan_video/wan21_14b_text_to_video_h100.py --prompt "A cat playing piano"
+    python examples/wan_video/wan21_14b_text_to_video_h100.py --gpu_num 2 --prompt "..."
 """
 ```
 
@@ -518,11 +511,14 @@ Usage:
 Provide interesting default prompts that showcase model capabilities:
 
 ```python
+@click.command()
 @click.option(
     "--prompt",
     default="A stylish woman walking down a Tokyo street filled with warm golden sunlight...",
     help="Positive guidance text prompt",
 )
+def main(prompt: str) -> None:
+    print(prompt)
 ```
 
 ### 3. Consistent Parameter Naming
@@ -544,11 +540,13 @@ Follow established naming conventions:
 Clean up resources at the end:
 
 ```python
-def main(...):
-    pipe = get_pipeline(...)
-    output = run(pipe, ...)
-    save_video(output, ...)
-    del pipe  # Free GPU memory
+def main() -> None:
+    pipe = get_pipeline(parallelism=1, model_root="/path/to/model")
+    try:
+        output = run(pipe, prompt="A sample prompt")
+        save_video(output, "output.mp4", fps=16, quality=6)
+    finally:
+        del pipe  # Free GPU memory
 ```
 
 ### 5. Timing and Logging
@@ -576,12 +574,12 @@ For complete implementations, refer to:
 
 | Example | Features | File |
 |---------|----------|------|
-| Basic T2V | Hash-based loading, parallel | `wan21_14b_text_to_video_h100.py` |
-| Basic I2V | Image input, CLIP stage | `wan21_14b_image_to_video_h100.py` |
-| HF Loading | from_pretrained, simple setup | `wan21_1_3b_text_to_video_hf.py` |
-| LoRA | LoRA configuration | `wan21_14b_image_to_video_lora_h100.py` |
-| Feature Cache | Caching acceleration | `wan22_14b_image_to_video_h100.py` |
-| Distill | Dual DiT (high/low noise) | `wan22_14b_image_to_video_distill_h100.py` |
+| Basic T2V | Hash-based loading, parallel | `examples/wan_video/wan21_14b_text_to_video_h100.py` |
+| Basic I2V | Image input, CLIP stage | `examples/wan_video/wan21_14b_image_to_video_h100.py` |
+| HF Loading | from_pretrained, simple setup | `examples/wan_video/wan21_1_3b_text_to_video_hf.py` |
+| LoRA | LoRA configuration | `examples/wan_video/wan21_14b_image_to_video_lora_h100.py` |
+| Feature Cache | Caching acceleration | `examples/wan_video/wan22_14b_image_to_video_h100.py` |
+| Distill | Dual DiT (high/low noise) | `examples/wan_video/wan22_14b_image_to_video_distill_h100.py` |
 
 ## Related Documentation
 

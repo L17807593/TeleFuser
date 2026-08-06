@@ -227,7 +227,7 @@ Brief overview:
 1. **Implement Model Class**: Create a model class inheriting `BaseModel`
 2. **Implement StateDictConverter**: Handle weight format conversion
 3. **Calculate Model Hash**: Use `weight_viewer.py` tool
-4. **Add Configuration**: Register in `telefuser/core/model_config.py`
+4. **Register model detection**: Add `register_model_config()` beside the model class that owns the checkpoint format
 
 ```bash
 # Calculate model hash

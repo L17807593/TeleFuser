@@ -64,10 +64,8 @@ from PIL import Image
 
 from telefuser.core.config import AttentionConfig, AttnImplType, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
-from telefuser.pipelines.{model_family}.{pipeline_module} import (
-    {PipelineClass},
-    {PipelineConfigClass},
-)
+# 将下列注释替换为该模型族已维护示例中的实际导入。例如：
+# from telefuser.pipelines.wan_video.pipeline import Wan21VideoPipeline, Wan21VideoPipelineConfig
 from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import save_video  # 图像用 save_image
 
@@ -84,7 +82,7 @@ PPL_CONFIG = dict(
     resolution="720p",
     cfg_scale=5.0,
     seed=42,
-    # ... 其他参数
+    target_fps=16,
 )
 
 # ============================================================================
@@ -101,15 +99,9 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
     Returns:
         已初始化的 pipeline 实例
     """
-    module_manager = ModuleManager(device="cpu")
-    # 加载模型...
-    
-    pipe = PipelineClass(device="cuda", torch_dtype=torch.bfloat16)
-    pipe_config = PipelineConfigClass()
-    # 配置 pipeline...
-    
-    pipe.init(module_manager, pipe_config)
-    return pipe
+    raise NotImplementedError(
+        "请将此模板替换为该模型族已维护示例中的模型专用加载逻辑。"
+    )
 
 # ============================================================================
 # 推理部分
@@ -131,7 +123,7 @@ def run(pipeline, prompt, negative_prompt="", seed=PPL_CONFIG["seed"], **kwargs)
     video = pipeline(
         prompt=prompt,
         negative_prompt=f"{negative_prompt} {PPL_CONFIG['negative_prompt']}",
-        # ... 其他参数从 PPL_CONFIG 获取
+        **kwargs,
     )
     return video
 
@@ -508,8 +500,8 @@ output_dir = os.getenv("TELEAI_EXAMPLE_OUTPUT_DIR", "./")
 本示例演示如何使用 Wan2.1 14B 模型进行文本生成视频。
 
 Usage:
-    python wan21_14b_text_to_video_h100.py --prompt "一只猫在弹钢琴"
-    python wan21_14b_text_to_video_h100.py --gpu_num 2 --prompt "..."
+    python examples/wan_video/wan21_14b_text_to_video_h100.py --prompt "一只猫在弹钢琴"
+    python examples/wan_video/wan21_14b_text_to_video_h100.py --gpu_num 2 --prompt "..."
 """
 ```
 
@@ -518,11 +510,14 @@ Usage:
 提供能展示模型能力的有趣默认提示词：
 
 ```python
+@click.command()
 @click.option(
     "--prompt",
     default="一位时尚女性在东京街头漫步，温暖的阳光...",
     help="正向引导文本提示词",
 )
+def main(prompt: str) -> None:
+    print(prompt)
 ```
 
 ### 3. 一致的参数命名
@@ -544,11 +539,13 @@ Usage:
 在结束时清理资源：
 
 ```python
-def main(...):
-    pipe = get_pipeline(...)
-    output = run(pipe, ...)
-    save_video(output, ...)
-    del pipe  # 释放 GPU 内存
+def main() -> None:
+    pipe = get_pipeline(parallelism=1, model_root="/path/to/model")
+    try:
+        output = run(pipe, prompt="示例提示词")
+        save_video(output, "output.mp4", fps=16, quality=6)
+    finally:
+        del pipe  # 释放 GPU 内存
 ```
 
 ### 5. 计时与日志
@@ -576,12 +573,12 @@ filename = get_example_name(__file__).replace(".py", f"_{gpu_num}gpu.mp4")
 
 | 示例 | 特性 | 文件 |
 |------|------|------|
-| 基础 T2V | Hash-based 加载，并行 | `wan21_14b_text_to_video_h100.py` |
-| 基础 I2V | 图像输入，CLIP stage | `wan21_14b_image_to_video_h100.py` |
-| HF 加载 | from_pretrained，简单配置 | `wan21_1_3b_text_to_video_hf.py` |
-| LoRA | LoRA 配置 | `wan21_14b_image_to_video_lora_h100.py` |
-| Feature Cache | 缓存加速 | `wan22_14b_image_to_video_h100.py` |
-| Distill | 双 DiT（高/低噪声） | `wan22_14b_image_to_video_distill_h100.py` |
+| 基础 T2V | Hash-based 加载，并行 | `examples/wan_video/wan21_14b_text_to_video_h100.py` |
+| 基础 I2V | 图像输入，CLIP stage | `examples/wan_video/wan21_14b_image_to_video_h100.py` |
+| HF 加载 | from_pretrained，简单配置 | `examples/wan_video/wan21_1_3b_text_to_video_hf.py` |
+| LoRA | LoRA 配置 | `examples/wan_video/wan21_14b_image_to_video_lora_h100.py` |
+| Feature Cache | 缓存加速 | `examples/wan_video/wan22_14b_image_to_video_h100.py` |
+| Distill | 双 DiT（高/低噪声） | `examples/wan_video/wan22_14b_image_to_video_distill_h100.py` |
 
 ## 相关文档
 

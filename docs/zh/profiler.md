@@ -379,11 +379,21 @@ class TextEncodingStage(BaseStage):
 ```python
 # 推荐 - 描述性强且唯一
 @ProfilingContext4Debug("vae_decode_video")
+def decode_video() -> None:
+    ...
+
 @ProfilingContext4Debug("dit_denoising_step_0")
+def denoise_step() -> None:
+    ...
 
 # 避免 - 通用或重复
 @ProfilingContext4Debug("process")
+def process() -> None:
+    ...
+
 @ProfilingContext4Debug("model")
+def model() -> None:
+    ...
 ```
 
 ### 2. 在 Stage 中使用 ProfilingContext4Debug

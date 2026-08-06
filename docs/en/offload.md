@@ -43,8 +43,8 @@ Data transfer (load) overlaps with computation, hiding latency
 | `offload_ratio` | float | `1.0` | Ratio of layers to offload (1.0 = all layers) |
 | `prefetch_size` | int | `1` | Number of layers to prefetch ahead |
 
-Resident layers are distributed uniformly across the transformer execution order instead of
-being kept as one contiguous prefix. `offload_ratio` determines the resident count independently
+Resident layers are distributed uniformly across the transformer execution order. `offload_ratio`
+determines the resident count independently
 from `prefetch_size`, so `offload_ratio=1.0` keeps no layer permanently resident. Prefetching walks
 the non-resident execution order and uses a bounded ring with at most
 `min(2 * prefetch_size, non_resident_layers)` slots per dtype.
@@ -240,72 +240,48 @@ configuration ran one complete warmup followed by one complete generation. DiT t
 with explicit CUDA synchronization at stage entry and exit, so it includes asynchronous weight
 transfer, computation, and offload in that stage.
 
-#### Uniform Resident Scheduling Validation
+The example result below reports the pipeline wall time printed by the example. It is separate from
+the DiT-only timings reported in the other benchmark sections.
 
-The base BF16 `examples/qwen_image/qwen_image_t2i_h100.py` example was also run before and after
-the uniform-resident scheduler change on one H100 80GB, using 1664x928 output, 50 steps,
-`offload_ratio=0.5`, and `prefetch_size=1`. Each measurement followed one complete warmup:
+#### Base BF16 Qwen-Image Example
 
-| Scheduler | Pipeline time |
+The `examples/qwen_image/qwen_image_t2i_h100.py` example was run on one NVIDIA H100 80GB with
+Qwen-Image-2512 BF16 weights, 1664x928 output, 50 steps, CFG=4, `offload_ratio=0.5`, and the
+default `prefetch_size=1`. The run performed one complete warmup followed by one timing run:
+
+| Implementation | Pipeline time |
 |---|---:|
-| Prefix-resident baseline | 49.783 s |
 | Uniform resident with non-resident sliding window | 37.757 s |
 
-The uniform schedule reduced pipeline time by 24.2%. The generated RGB images were pixel-identical
-across all 4,632,576 channel values (`max_abs_diff=0`). This is a single-run validation, not a
-general performance guarantee for other systems or configurations.
+The generated RGB image was pixel-identical to the pre-optimization output across all 4,632,576
+channel values (`max_abs_diff=0`). This is a single-run validation, not a general performance
+guarantee for other systems or configurations.
 
 #### FP8 Lightning
 
-Qwen-Image-2512-Lightning FP8 weights, 1328×1328, 16 steps, CFG=1, and
-`offload_ratio=0.5`:
+The current `examples/qwen_image/qwen_image_t2i_lightning_fp8_h100.py` run was
+executed with `TF_MODEL_ZOO_PATH=/hhb-data/aigc/model_zoo` on one H100 after adding
+pre-quantized checkpoint loading. The model-zoo checkpoint
+`Qwen-Image-2512-Lightning/qwen_image_2512_fp8_e4m3fn_scaled_8steps_v1.0.safetensors`
+contains per-output-channel `weight_scale` tensors for the transformer-block linears.
+The loader now constructs scale-aware `LinearFP8` modules before assigning the state dict.
+The example uses 1328x1328 output, 16 steps, CFG=1, one warmup, and one timing run.
+For the async run, `offload_ratio=1.0`, `prefetch_size=2`, and the default
+`pin_cpu_memory=True` were used:
 
-| Mode / `prefetch_size` | DiT time | Peak allocated VRAM |
+| Configuration | Pipeline time | Peak allocated VRAM |
 |---|---:|---:|
-| `NO_CPU_OFFLOAD` | 4.360 s | 40.55 GiB |
-| `ASYNC_CPU_OFFLOAD`, 1 | 5.184 s | 31.61 GiB |
-| `ASYNC_CPU_OFFLOAD`, 2 | 4.966 s | 32.24 GiB |
-| `ASYNC_CPU_OFFLOAD`, 4 | 4.570 s | 33.50 GiB |
-| `ASYNC_CPU_OFFLOAD`, 8 | 4.469 s | 36.04 GiB |
-| `ASYNC_CPU_OFFLOAD`, 12 | 4.465 s | 38.57 GiB |
+| Pre-quantized FP8 Lightning, `NO_CPU_OFFLOAD` | 5.106 s | 40.55 GiB |
+| Pre-quantized FP8 Lightning, `ASYNC_CPU_OFFLOAD`, `offload_ratio=1.0`, `prefetch_size=2` | 6.481 s | 22.73 GiB |
 
-`prefetch_size=8` is only 2.5% slower than no offload while using 4.51 GiB less VRAM;
-increasing it to 12 provides essentially no speed benefit. As an overlap control, forcing the
-compute stream to wait for the copy stream after every prefetch made the same FP8
-`prefetch_size=2` configuration take 6.039 s, versus 4.966 s on the normal asynchronous path.
-This demonstrates effective H2D/compute overlap in the normal path.
+The async configuration used 17.82 GiB less VRAM (43.9%) at a 26.9% longer pipeline time.
+Both outputs were pixel-identical across all 5,290,752 RGB channel values
+(`max_abs_diff=0`). These are single-run H100 measurements, not general performance guarantees.
 
-#### Original Cache-DiT Comparison
-
-To compare scheduling granularity, the [original Cache-DiT `layerwise_cpu_offload` implementation](https://github.com/vipshop/cache-dit/blob/main/src/cache_dit/offload/layerwise.py) was applied to the full DiT with its default leaf-module selection. Under the same FP8 model, input, warmup, and timing protocol, Cache-DiT selected 1,087 leaf targets, kept 543 persistent targets (about 50%), and used `transfer_buckets=4` with its bounded prefetch window.
-
-| Implementation | DiT time | Peak allocated VRAM |
-|---|---:|---:|
-| TeleFuser block-level `ASYNC_CPU_OFFLOAD`, `prefetch_size=4` | 4.570 s | 33.50 GiB |
-| Original Cache-DiT leafwise, `transfer_buckets=4` | 9.695 s | 31.20 GiB |
-
-Cache-DiT used 2.30 GiB less peak VRAM, yet TeleFuser's DiT was still 2.12× faster (52.9% less time). For Qwen-Image, using transformer blocks as the transfer, buffer-reuse, and prefetch unit avoids the small-grained H2D, parameter-rebinding, and allocation overhead of 1,087 leaf-module targets.
-
-#### Base BF16 Qwen-Image
-
-Qwen-Image-2512 BF16 weights, 1664×928, 50 steps, and CFG=4:
-
-| `offload_ratio` | `prefetch_size` | DiT time | Peak allocated VRAM |
-|---:|---:|---:|---:|
-| No offload | — | 26.990 s | 55.84 GiB |
-| 0.5 | 2 | 46.253 s | 39.00 GiB |
-| 0.5 | 4 | 42.470 s | 44.81 GiB |
-| 0.5 | 8 | 39.954 s | 49.88 GiB |
-| 0.6 | 8 | 47.473 s | 46.08 GiB |
-| 0.75 | 8 | 56.335 s | 40.38 GiB |
-
-For this model, increasing prefetch depth improves speed: at 50% offload, moving from two to
-eight prefetched blocks reduces DiT time by 13.6% but raises peak VRAM by 10.88 GiB. Raising
-`offload_ratio` reduces resident layers and VRAM, but also increases the H2D bytes required by
-every denoising step. Even with eight prefetched blocks, 60% and 75% offload are slower than the
-50%/two-block baseline. Tune `prefetch_size` first at a fixed `offload_ratio`, then choose the
-memory-speed trade-off within the VRAM budget.
-
+The previous Cache-DiT comparison has been removed. Cache-DiT is not installed in the
+current environment, and its earlier result used an unpinned external setup. A new
+comparison should only be added after both implementations run from current sources
+with identical checkpoint, input, warmup, and measurement protocols.
 
 ### Pinned Memory
 
@@ -383,19 +359,21 @@ class AsyncOffloadManager:
         offload_ratio: float = 1,
         prefetch_size: int = 1,
         lazy_gpu_cache: bool = False,
-    ) -> None
+    ) -> None:
+        ...
     
     def allocate_gpu_cache(self) -> None:
         """Manually allocate GPU cache."""
-        
+        ...
     def cleanup_gpu_cache(self) -> None:
         """Release GPU cache."""
-        
+        ...
     def disable_offload(self) -> None:
         """Disable offloading and load all layers."""
-        
+        ...
     def enable_offload(self) -> None:
         """Re-enable offloading."""
+        ...
 ```
 
 ## Sequential CPU Offload
@@ -572,30 +550,38 @@ The `vram_limit` parameter controls automatic state promotion:
 ```python
 def enable_sequential_cpu_offload(
     model: torch.nn.Module,
-    module_map: dict,
-    module_config: dict,
+    module_map: dict[type, type],
+    module_config: dict[str, object],
     max_num_param: int | None = None,
-    overflow_module_config: dict | None = None,
+    overflow_module_config: dict[str, object] | None = None,
     vram_limit: float | None = None,
-) -> None
+) -> None:
+    ...
 
 class AutoWrappedLinear(torch.nn.Linear, AutoTorchModule):
     def __init__(
         self,
         module: torch.nn.Linear,
-        offload_dtype,
-        offload_device,
-        onload_dtype,
-        onload_device,
-        computation_dtype,
-        computation_device,
-        vram_limit,
+        offload_dtype: torch.dtype,
+        offload_device: torch.device | str,
+        onload_dtype: torch.dtype,
+        onload_device: torch.device | str,
+        computation_dtype: torch.dtype,
+        computation_device: torch.device | str,
+        vram_limit: float | None,
         name: str = "",
-    )
+        **kwargs: object,
+    ) -> None:
+        ...
     
     def offload(self) -> None:   # Switch to state 0
+        ...
+
     def onload(self) -> None:    # Switch to state 1
+        ...
+
     def keep(self) -> None:      # Switch to state 2
+        ...
 ```
 
 ## References

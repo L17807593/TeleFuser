@@ -18,10 +18,11 @@ TeleFuser adopts a **Hash-based automatic model recognition** mechanism. The sys
 ### Hash Matching Mechanism
 
 ```
-Model File → Extract state_dict keys → Compute MD5 hash → Match pre-configuration → Initialize corresponding model class
+Model File → Extract state_dict keys → Compute MD5 hash → Match registry entry → Initialize corresponding model class
 ```
 
-Pre-configured model information is stored in `telefuser/core/model_config.py`.
+Hash registrations live beside the model classes that own them. `ModelRegistry` discovers modules that call
+`register_model_config()` on first use; see `telefuser/core/model_registry.py`.
 
 ## Quick Start
 
@@ -130,7 +131,7 @@ dit = module_manager.fetch_module("wan_video_dit", index=0)
 
 ### HuggingFace Model Loading
 
-For models not in the pre-configured hash list, use HuggingFace loading:
+For models without a registered hash entry, use HuggingFace loading:
 
 ```python
 # Load from HuggingFace
@@ -157,9 +158,9 @@ ModuleManager supports the following model file formats:
 
 If the model cannot be automatically recognized, possible reasons:
 
-1. **Model not in pre-configured list**
-   - Check if `telefuser/core/model_config.py` contains the model's hash
-   - If it's a new model, follow the [development guide](./adding_new_model.md) to add configuration
+1. **Model not registered**
+   - Check the module that owns the model class for a `register_model_config()` call
+   - If it's a new model, follow the [development guide](./adding_new_model.md) to add its registration
 
 2. **Model file corrupted or incomplete**
    - Verify file integrity
@@ -191,12 +192,12 @@ If you see hash in logs but it doesn't match:
 load model /path/to/model.safetensors with state hash xxxxxxxxxx
 ```
 
-This means the model is not in the pre-configuration list. You need to:
+This means the model has no matching registry entry. You need to:
 1. Use `weight_viewer.py` tool to calculate hash:
    ```bash
    python tools/viewer/weight_viewer.py /path/to/model.safetensors --quiet
    ```
-2. Follow the development guide to add model configuration
+2. Follow the development guide to add a model registration
 
 ## Best Practices
 

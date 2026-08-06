@@ -246,11 +246,12 @@ If the model is split into multiple files:
 python tools/viewer/weight_viewer.py "/path/to/model-*.safetensors" --quiet
 ```
 
-**Note**: When adding to `model_config.py`, ensure the hash is based on **merged complete weights**.
+**Note**: Register the hash from the **merged complete weights** beside the model class that owns the checkpoint format.
 
-### Step 4: Add Model Configuration
+### Step 4: Register Model Detection
 
-Edit `telefuser/core/model_config.py` to add model configuration.
+Add the registration in the module that defines `MyCustomDiT`. `ModelRegistry` discovers this module automatically, so
+do not add the registration to a centralized list or import the model manually from `telefuser.models.__init__`.
 
 First, get information from weight_viewer output:
 
@@ -262,24 +263,21 @@ Files: 1
 hash with shape: a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
 ```
 
-Then add configuration:
+Then add the registration:
 
 ```python
-from ..models.my_custom_dit import MyCustomDiT
+# telefuser/models/my_custom_dit.py
+from telefuser.core.model_registry import register_model_config
 
-model_loader_configs = [
-    # ... existing configurations ...
-    
-    # MyCustomDiT - Standard version (from weight_viewer: hash=a1b2c3d4...)
-    # Parameters: 6.91B
-    (
-        None,                                  # hash without shape (optional, for non-strict matching)
-        "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",   # hash with shape (from weight_viewer)
-        ["my_custom_dit"],                     # model_name (for fetch_module)
-        [MyCustomDiT],                         # model_class
-        "official",                             # model_resource: "official" or "diffusers"
-    ),
-]
+# MyCustomDiT - Standard version (from weight_viewer: hash=a1b2c3d4...)
+# Parameters: 6.91B
+register_model_config(
+    None,                                  # hash without shape (optional, for non-strict matching)
+    "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",   # hash with shape (from weight_viewer)
+    ["my_custom_dit"],                     # model name for fetch_module()
+    [MyCustomDiT],                         # model class
+    "official",                           # source format: "official" or "diffusers"
+)
 ```
 
 #### Adding Multiple Variants
@@ -295,32 +293,20 @@ Files: 1
 hash with shape: b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7  # Different hash!
 ```
 
-Add to configuration:
+Register each variant beside the model class:
 
 ```python
-    # MyCustomDiT - Standard version (hash: a1b2c3d4...)
-    (
-        None,
-        "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
-        ["my_custom_dit"],
-        [MyCustomDiT],
-        "official",
-    ),
-    
-    # MyCustomDiT - FP8 version (hash: b2c3d4e5...) 
-    # Note: FP8 quantized weights
-    (
-        None,
-        "b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7",
-        ["my_custom_dit"],
-        [MyCustomDiT],
-        "official",
-    ),
+# MyCustomDiT - Standard version (hash: a1b2c3d4...)
+register_model_config(None, "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6", ["my_custom_dit"], [MyCustomDiT], "official")
+
+# MyCustomDiT - FP8 version (hash: b2c3d4e5...)
+# Note: FP8 quantized weights
+register_model_config(None, "b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7", ["my_custom_dit"], [MyCustomDiT], "official")
 ```
 
 **Tip**: If variants have different tensor shapes (like pruned models), consider using non-strict matching (only using `keys_hash`).
 
-Configuration field description:
+Registration field description:
 
 | Field | Type | Description |
 |------|------|------|
@@ -335,7 +321,7 @@ Configuration field description:
 Create a test script to verify model loading:
 
 ```python
-# tests/test_my_custom_model_loading.py
+# tests/unit/models/test_my_custom_model_loading.py
 import torch
 import pytest
 from telefuser.core.module_manager import ModuleManager
@@ -367,7 +353,7 @@ if __name__ == "__main__":
 Run tests:
 
 ```bash
-pytest tests/test_my_custom_model_loading.py -v
+pytest tests/unit/models/test_my_custom_model_loading.py -v
 ```
 
 ## Using Models in Pipeline Examples
@@ -515,8 +501,8 @@ python tools/viewer/weight_viewer.py /path/to/model.safetensors --export model_i
 ### 2. Check Hash Matching Process
 
 ```python
-from telefuser.utils.model_weight import load_state_dict, hash_state_dict_keys
-from telefuser.core.model_config import model_loader_configs
+from telefuser.core.model_registry import ModelRegistry
+from telefuser.utils.model_weight import hash_state_dict_keys, load_state_dict
 
 sd = load_state_dict("/path/to/model.safetensors")
 hash_with_shape = hash_state_dict_keys(sd, with_shape=True)
@@ -525,9 +511,9 @@ hash_without_shape = hash_state_dict_keys(sd, with_shape=False)
 print(f"Model hash (with shape): {hash_with_shape}")
 print(f"Model hash (without shape): {hash_without_shape}")
 
-# Check if in configuration
+# Check whether the autodiscovered registration matches
 found = False
-for config in model_loader_configs:
+for config in ModelRegistry.instance().get_configs():
     keys_hash, keys_hash_with_shape, model_names, model_classes, resource = config
     if keys_hash_with_shape == hash_with_shape:
         print(f"✓ Found match (strict): {model_names}")
@@ -537,9 +523,9 @@ for config in model_loader_configs:
         found = True
 
 if not found:
-    print("✗ No matching configuration found!")
-    print(f"Add this to model_config.py:")
-    print(f'    (None, "{hash_with_shape}", ["your_model_name"], [YourModelClass], "official"),')
+    print("✗ No matching registration found!")
+    print("Add this beside the model class:")
+    print(f'register_model_config(None, "{hash_with_shape}", ["your_model_name"], [YourModelClass], "official")')
 ```
 
 ### 3. Verify Converter Output
@@ -570,15 +556,15 @@ from telefuser.core.module_manager import ModuleManager
 mm = ModuleManager(device='cpu')
 mm.load_model('/path/to/your/model.safetensors')
 print('✓ Configuration is correct!')
-print(f'Loaded models: {mm.module_name}')
+print(f'Loaded models: {mm.module_names}')
 "
 ```
 
 ## Best Practices
 
-1. **Keep configurations organized**
-   - Group by model type
-   - Keep different variants of same model together
+1. **Keep registrations with their model classes**
+   - Put every `register_model_config()` call in the module that owns the corresponding class
+   - Keep variants of the same checkpoint format together
    - Add comments explaining version differences
 
 2. **Use strict matching when possible**
@@ -589,13 +575,13 @@ print(f'Loaded models: {mm.module_name}')
    ```python
      # Wan2.1 T2V 14B - FP8 per-channel quantized
      # Note: This version has scaled weights for FP8 inference
-     (
+     register_model_config(
          None,
          "4cf556355bc7e9b6545b38f4930f60b1",
          ["wan_video_dit"],
          [WanModel],
          "official",
-     ),
+     )
    ```
 
 4. **Test all variants**
@@ -624,7 +610,7 @@ print(f'Loaded models: {mm.module_name}')
 Refer to the following files for complete implementation:
 
 - Model implementation: `telefuser/models/wan_video_dit.py`
-- Configuration definition: `telefuser/core/model_config.py` (WanModel related configurations)
+- Model registration: `register_model_config()` calls at the end of `telefuser/models/wan_video_dit.py`
 - Usage example: `examples/wan_video/wan21_14b_image_to_video_h100.py`
 
 ## Optimizing Model Inference

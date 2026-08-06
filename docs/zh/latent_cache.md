@@ -67,13 +67,13 @@ for progress_id, timestep in enumerate(timesteps[effective_start_step:]):
     noise_pred = self.predict_noise_with_cfg(...)
     latents = self.scheduler.step(noise_pred, timesteps[absolute_step], latents)
 
-# pipeline 在最后将 payload 一并返回，供 service 层异步写回缓存
+# 在外层 denoise-stage 方法中将 payload 与 latent 一并返回，供 service 层异步写回缓存
 latent_payload = {
     "latent_states_dict": latent_states_dict,
     "saved_steps": saved_steps,
     "final_step": total_steps - 1,
 }
-return latents, latent_payload
+denoise_result = latents, latent_payload
 ```
 
 `parse_latent_data`（`telefuser/pipelines/wan_video/latent_data_utils.py`）会做

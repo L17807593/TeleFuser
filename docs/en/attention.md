@@ -153,9 +153,9 @@ sparse_state.update(numeral_timestep=20, layer_idx=5)
 
 # Check if should use dense
 if sparse_state.should_use_dense():
-    # Use dense attention
+    attention_mode = "dense"
 else:
-    # Use sparse attention
+    attention_mode = "sparse"
 ```
 
 ## Pipeline Support Status

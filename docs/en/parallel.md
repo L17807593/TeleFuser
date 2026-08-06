@@ -267,26 +267,26 @@ start_idx, end_idx = comm.get_stage_indices(num_layers)
 ### PP Forward Implementation
 
 ```python
-def pp_forward(self, x, timestep, context, ...):
+def pp_forward(self, x, timestep, context, latent_shape, **kwargs):
     # First stage: Embedding + first blocks
     if self.is_pp_first_stage:
         x = self.patch_embedding(x)
         x, grid_size = self.patchify(x)
-        x = self.forward_blocks_pp(x, ...)  # Process layers for this stage
+        x = self.forward_blocks_pp(x, timestep, context, **kwargs)
         self.pp_comm.send_latent(x)
         return None
     
     # Middle stages: Receive + Process + Send
     elif not self.is_pp_last_stage:
-        x = self.pp_comm.recv_latent(...)
-        x = self.forward_blocks_pp(x, ...)
+        x = self.pp_comm.recv_latent(shape=latent_shape)
+        x = self.forward_blocks_pp(x, timestep, context, **kwargs)
         self.pp_comm.send_latent(x)
         return None
     
     # Last stage: Receive + Process + Output
     else:
-        x = self.pp_comm.recv_latent(...)
-        x = self.forward_blocks_pp(x, ...)
+        x = self.pp_comm.recv_latent(shape=latent_shape)
+        x = self.forward_blocks_pp(x, timestep, context, **kwargs)
         x = self.head(x)
         return x
 ```
@@ -393,7 +393,7 @@ model = parallelize_module(model, device_mesh, tp_plan)
 
 ### Notes
 
-- SP and TP cannot be enabled simultaneously
+- SP and TP may be enabled together as independent device-mesh dimensions when the selected pipeline supports the combination
 - Need to ensure number of heads is divisible by TP degree
 
 ## Worker Implementations
@@ -612,20 +612,44 @@ strategy = get_attention_strategy(device_mesh)
 
 ### FSDP vs TP Selection
 
-When choosing between FSDP and TP for multi-GPU inference, consider memory and communication conditions:
+FSDP and TP shard model weights differently, but their inference communication has different scaling. FSDP
+all-gathers parameter units; TP reduces activation tensors after tensor-parallel operators. Do not infer the faster
+strategy from model size or sequence length alone.
 
-| Condition | Recommended Strategy | Reason |
-|-----------|---------------------|--------|
-| Single GPU can hold one layer | **FSDP** | TP requires higher communication bandwidth; FSDP has lower communication overhead |
-| Single GPU cannot hold one layer | **TP** | Must use TP to split tensors across GPUs |
-| Multi-node / low bandwidth network | **FSDP** | TP requires high bandwidth low latency GPU interconnect |
-| Single node NVLink/InfiniBand | **TP** | TP is more efficient with high bandwidth interconnect |
+| Condition | Candidate strategy | Reason |
+|-----------|--------------------|--------|
+| The largest FSDP wrapping unit plus activations fits per GPU | **FSDP is feasible** | FSDP must materialize a complete wrapped unit during its all-gather. |
+| A wrapped unit cannot fit per GPU | **TP or PP is required** | Splitting only the stored FSDP shards does not remove the full-unit all-gather peak. |
+| Parameter all-gathers dominate exposed time | **TP** | TP keeps parameter shards resident and communicates activations instead. |
+| Activation reductions dominate exposed time, especially at large `B * S * H` | **FSDP or TP + SP** | FSDP parameter traffic is mostly independent of sequence length; SP reduces the TP-local sequence but adds its own communication. |
+| TP group is inside a fast NVLink/NVSwitch domain | **TP is a strong candidate** | Its many latency-sensitive activation collectives benefit from low-latency, high-bandwidth links. |
 
-**Selection Guidelines**:
-- First evaluate if single GPU memory can hold one layer (including activations)
-- If yes, prefer FSDP as it has lower communication requirements
-- Only consider TP when single GPU memory is insufficient
-- FSDP can be combined with PP, SP and other strategies
+For a first-pass estimate, measure bytes per rank per denoising step. With FSDP degree `f`, full parameter bytes
+`P_u` for each wrapped unit, and `r_u` all-gathers per request:
+
+```text
+V_fsdp ~= sum_u(r_u * P_u * (f - 1) / f)
+```
+
+With TP degree `t`, SP degree `s`, activation element size `e_a`, and one TP collective `j` over an activation of
+shape approximately `[B, S / s, H]`:
+
+```text
+V_tp ~= sum_j(2 * (t - 1) / t * B * (S / s) * H * e_a)
+```
+
+The sum normally includes the row-parallel reductions in every transformer block. Add Ulysses or Ring traffic
+separately; SP reduces the TP-local activation size but is not free. Convert bytes into a decision with measurements
+on the target topology:
+
+```text
+T_comm ~= N_collectives * latency + V_wire / effective_bandwidth
+T_step ~= T_compute + exposed(T_comm after overlap)
+```
+
+Profile p50/p95 step time, raw and exposed communication time, collective count, and per-rank peak HBM for the
+actual model, sequence length, dtype, denoising-step count, and mesh degrees. FSDP can be combined with PP and SP;
+TP and SP may be combined when the selected pipeline implements and validates that mesh.
 
 ### Communication Optimization
 
@@ -649,13 +673,6 @@ RuntimeError: device num 4 and world size 2 not match
 
 **Solution**: Ensure `len(device_ids) == dp * cfg * sp_ring * sp_ulysses * pp * tp`
 
-### SP and TP Conflict
-
-```
-ValueError: Not allowed to enable sequence parallel and tensor parallel together
-```
-
-**Solution**: SP and TP cannot be enabled simultaneously, choose one.
 
 ### Ring Attention Requires LSE
 
