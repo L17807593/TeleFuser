@@ -10,8 +10,9 @@ import gc
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from datetime import timedelta
+from multiprocessing.queues import SimpleQueue
 from queue import Empty
 from typing import TYPE_CHECKING, Any
 
@@ -25,8 +26,13 @@ from telefuser.platforms import current_platform
 from telefuser.utils.logging import logger
 from telefuser.utils.system import PortAllocator
 
+from .tensor_channel import WorkerTensorChannel
+
 if TYPE_CHECKING:
     from telefuser.metrics import StageMetricContext
+
+
+_DISCARD_TENSOR_REFS = "__telefuser_discard_tensor_refs__"
 
 
 def to_device(data: Any, device: str | torch.device) -> Any:
@@ -41,7 +47,7 @@ def to_device(data: Any, device: str | torch.device) -> Any:
             if device == "cpu" and not data.is_shared():
                 data.share_memory_()
             return data
-        tensor = data.clone().to(device)
+        tensor = data.to(device)
         if device == "cpu" and not tensor.is_shared():
             tensor.share_memory_()
         return tensor
@@ -52,10 +58,12 @@ def to_device(data: Any, device: str | torch.device) -> Any:
 def _worker_loop(
     rank: int,
     world_size: int,
-    queue_in: list[mp.Queue],
-    queue_out: mp.Queue,
+    queue_in: list[SimpleQueue],
+    queue_out: SimpleQueue,
     stage: BaseStage,
     master_port: int,
+    tensor_output_channel: WorkerTensorChannel | None = None,
+    tensor_input_channels: tuple[WorkerTensorChannel, ...] = (),
 ) -> None:
     """Worker process main loop.
 
@@ -67,13 +75,12 @@ def _worker_loop(
     args = None
     kwargs = None
     try:
+        parallel_config = stage.model_runtime_config.parallel_config
+        # Avoid host-wide launch pools in every spawned CUDA worker, including
+        # single-rank workers such as the LingBot condition encoder.
+        torch.set_num_threads(parallel_config.worker_intra_op_threads)
         device = stage.device
         if world_size > 1:
-            parallel_config = stage.model_runtime_config.parallel_config
-            # Match torchrun's per-rank default. Letting every spawned worker
-            # inherit the host-wide intra-op pool oversubscribes CPU launch
-            # threads and can leave accelerators idle between eager kernels.
-            torch.set_num_threads(parallel_config.worker_intra_op_threads)
             os.environ["RANK"] = str(rank)
             os.environ["WORLD_SIZE"] = str(world_size)
             os.environ["MASTER_ADDR"] = "localhost"
@@ -108,13 +115,32 @@ def _worker_loop(
 
         while True:
             data = queue_in[rank].get()
-            name, args, kwargs = data
+            if len(data) == 3:
+                name, args, kwargs = data
+                transport_output = False
+            else:
+                name, args, kwargs, transport_output = data
             del data
             if name == "exit":
                 logger.info(f"parallel worker {stage.name} on rank {rank} exits")
                 break
+            if name == _DISCARD_TENSOR_REFS:
+                discarded = 0
+                for channel in tensor_input_channels:
+                    if channel.contains_ref(args):
+                        discarded += channel.discard(args, rank=rank)
+                if world_size > 1:
+                    dist.barrier()
+                if world_size == 1 or rank == 0:
+                    queue_out.put(discarded)
+                continue
             if not hasattr(stage, name):
                 raise AttributeError(f'{stage.__class__.__name__} has no attribute "{name}"')
+            stage_inputs = (args, kwargs)
+            for channel in tensor_input_channels:
+                if channel.contains_ref(stage_inputs):
+                    stage_inputs = channel.receive(stage_inputs, rank=rank, device=device)
+            args, kwargs = stage_inputs
             kwargs = to_device(kwargs, device)
             args = to_device(args, device)
             with torch.no_grad():
@@ -124,6 +150,8 @@ def _worker_loop(
             del kwargs, args
             if getattr(stage, "empty_cache_after_call", True):
                 current_platform.empty_cache()
+            if transport_output and tensor_output_channel is not None and (world_size == 1 or rank == 0):
+                y = tensor_output_channel.send(y)
             # Always output results when world_size=1
             if world_size == 1 or rank == 0:
                 queue_out.put(y)
@@ -142,6 +170,8 @@ def _worker_loop(
         args = None
         kwargs = None
         current_platform.synchronize()
+        for channel in tensor_input_channels:
+            channel.release_local_cuda_ipc()
         gc.collect()
         current_platform.empty_cache()
         current_platform.ipc_collect()
@@ -155,6 +185,10 @@ class ParallelWorker:
     def __init__(
         self,
         stage: BaseStage,
+        *,
+        tensor_output_channel: WorkerTensorChannel | None = None,
+        tensor_output_methods: Collection[str] = (),
+        tensor_input_channels: Collection[WorkerTensorChannel] = (),
     ) -> None:
         parallel_config = stage.model_runtime_config.parallel_config
         parallel_config.validate()
@@ -173,6 +207,17 @@ class ParallelWorker:
         self._failed = False
         self._closed = False
         self._failure_reason: str | None = None
+        self.tensor_output_channel = tensor_output_channel
+        self.tensor_output_methods = frozenset(tensor_output_methods)
+        self.tensor_input_channels = tuple(tensor_input_channels)
+        if self.tensor_output_channel is None and self.tensor_output_methods:
+            raise ValueError("tensor_output_methods require a tensor_output_channel")
+        if self.tensor_output_channel is not None:
+            if not self.tensor_output_methods:
+                raise ValueError("tensor_output_channel requires at least one tensor_output_method")
+            self.tensor_output_channel.bind_producer()
+        for channel in self.tensor_input_channels:
+            channel.bind_consumer(self.world_size)
 
         # Use spawn to start processes regardless of world_size
         current_method = mp.get_start_method(allow_none=True)
@@ -183,8 +228,11 @@ class ParallelWorker:
                 raise RuntimeError("Failed to set start method to spawn:", e)
 
         spawn_ctx = mp.get_context("spawn")
-        self.queue_in: list[mp.Queue] = [spawn_ctx.Queue() for _ in range(self.world_size)]
-        self.queue_out: mp.Queue = spawn_ctx.Queue()
+        # Queue uses a background feeder thread for every process. These messages
+        # only carry small commands and shared-tensor handles, so synchronous
+        # SimpleQueue writes avoid feeder scheduling tails between GPU stages.
+        self.queue_in: list[SimpleQueue] = [spawn_ctx.SimpleQueue() for _ in range(self.world_size)]
+        self.queue_out: SimpleQueue = spawn_ctx.SimpleQueue()
 
         master_port = PortAllocator().get_free_port_in_interval()
         logger.info(f"parallel worker {self.name} with port {master_port}, world_size={self.world_size}")
@@ -198,6 +246,8 @@ class ParallelWorker:
                 self.queue_out,
                 stage,
                 master_port,
+                self.tensor_output_channel,
+                self.tensor_input_channels,
             ),
             nprocs=self.world_size,
             join=False,
@@ -246,7 +296,12 @@ class ParallelWorker:
 
     def _wait_result(self, method_name: str) -> Any:
         try:
-            result = self.queue_out.get(timeout=self.timeout)
+            # SimpleQueue does not expose a timeout argument. Its reader is the
+            # underlying multiprocessing Connection and provides the same bounded
+            # wait without reintroducing a feeder or polling thread.
+            if not self.queue_out._reader.poll(self.timeout):
+                raise Empty
+            result = self.queue_out.get()
         except Empty as exc:
             reason = f"{method_name} timeout after {self.timeout} seconds"
             self._mark_failed(reason)
@@ -289,15 +344,25 @@ class ParallelWorker:
         self._ensure_usable()
         if self.queue_with_cpu:
             data = to_device(data, "cpu")
-        for i, q in enumerate(self.queue_in):
-            data = to_device(data, device=f"{self.device}:{self.device_ids[i]}")
+        for q in self.queue_in:
             q.put(data)
+
+    def discard_tensor_refs(self, value: Any, *, sync: bool = False) -> int | Callable[[], int]:
+        """Release direct-channel tensors that will not be passed to the stage."""
+        self._ensure_usable()
+        self.put_data([_DISCARD_TENSOR_REFS, (value,), {}, False])
+
+        def wait() -> int:
+            return int(self._wait_result(_DISCARD_TENSOR_REFS))
+
+        return wait() if sync else wait
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any | Callable[[], Any]:
         """Submit __call__ task to all workers."""
         self._ensure_usable()
         sync = kwargs.pop("sync", False)
-        data = ["__call__", args, kwargs]
+        transport_output = kwargs.pop("_tensor_transport", "__call__" in self.tensor_output_methods)
+        data = ["__call__", args, kwargs, transport_output]
         self.put_data(data)
 
         def wait() -> Any:
@@ -314,7 +379,8 @@ class ParallelWorker:
         def wrapped_func(*args: Any, **kwargs: Any) -> Any | Callable[[], Any]:
             self._ensure_usable()
             sync = kwargs.pop("sync", False)
-            data = [name, args, kwargs]
+            transport_output = kwargs.pop("_tensor_transport", name in self.tensor_output_methods)
+            data = [name, args, kwargs, transport_output]
             self.put_data(data)
 
             hook = self._metrics_hook

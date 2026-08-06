@@ -15,6 +15,12 @@ from __future__ import annotations
 
 import torch
 
+_tf_apply_rope_neox = None
+try:
+    from tf_kernel import apply_rope_with_cos_sin_cache_inplace as _tf_apply_rope_neox
+except ImportError:
+    pass
+
 
 def _apply_rotary_emb_cuda(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """CUDA-optimized implementation using Triton kernel."""
@@ -101,6 +107,103 @@ def _apply_rotary_emb_native(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tens
         return (x.float() * cos.float() + x_rotated.float() * sin.float()).to(x.dtype)
 
 
+def _apply_rotary_emb_neox_native(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    rotary_dim = cos_sin_cache.shape[-1]
+    half = rotary_dim // 2
+    cosine = cos_sin_cache[..., :half].unsqueeze(-2).to(query.dtype)
+    sine = cos_sin_cache[..., half:].unsqueeze(-2).to(query.dtype)
+
+    def rotate(value: torch.Tensor) -> torch.Tensor:
+        rotary, passthrough = value[..., :rotary_dim], value[..., rotary_dim:]
+        first, second = rotary.chunk(2, dim=-1)
+        rotated = torch.cat((first * cosine - second * sine, second * cosine + first * sine), dim=-1)
+        return torch.cat((rotated, passthrough), dim=-1)
+
+    return rotate(query), rotate(key)
+
+
+def apply_rotary_emb_neox(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply partial NeoX RoPE to Q and K with optional tf-kernel dispatch."""
+    if query.shape != key.shape or query.ndim != 3:
+        raise ValueError("NeoX RoPE requires matching query and key tensors with shape [sequence, heads, dim]")
+    if cos_sin_cache.ndim != 2 or cos_sin_cache.shape[0] != query.shape[0]:
+        raise ValueError("NeoX RoPE cache must have shape [sequence, rotary_dim]")
+    rotary_dim = cos_sin_cache.shape[-1]
+    if rotary_dim <= 0 or rotary_dim % 2 or rotary_dim > query.shape[-1]:
+        raise ValueError("NeoX RoPE rotary_dim must be positive, even, and no larger than the head dimension")
+
+    if not torch.compiler.is_compiling() and query.device.type == "cuda" and _tf_apply_rope_neox is not None:
+        query = query.contiguous()
+        key = key.contiguous()
+        positions = torch.arange(query.shape[0], dtype=torch.long, device=query.device)
+        _tf_apply_rope_neox(
+            positions,
+            query,
+            key,
+            head_size=query.shape[-1],
+            cos_sin_cache=cos_sin_cache.float().contiguous(),
+            is_neox=True,
+        )
+        return query, key
+
+    return _apply_rotary_emb_neox_native(query, key, cos_sin_cache)
+
+
+def apply_qk_norm_rope_neox(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    *,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply Q/K RMSNorm and partial NeoX RoPE with fused eager CUDA dispatch."""
+    use_fused_cuda = (
+        not torch.compiler.is_compiling()
+        and query.device.type == "cuda"
+        and query.dtype == key.dtype == q_weight.dtype == k_weight.dtype == torch.bfloat16
+        and query.shape == key.shape
+        and query.ndim == 3
+        and q_weight.shape == k_weight.shape == (query.shape[-1],)
+        and cos_sin_cache.ndim == 2
+        and cos_sin_cache.shape[0] == query.shape[0]
+        and 0 < cos_sin_cache.shape[-1] <= query.shape[-1]
+        and cos_sin_cache.shape[-1] % 2 == 0
+        and query.stride(-1) == key.stride(-1) == 1
+        and query.stride(-2) == key.stride(-2) == query.shape[-1]
+    )
+    if use_fused_cuda:
+        from telefuser.kernel.triton import qknorm_rope_neox_bf16_
+
+        return qknorm_rope_neox_bf16_(
+            query,
+            key,
+            q_weight.contiguous(),
+            k_weight.contiguous(),
+            cos_sin_cache.contiguous(),
+            eps,
+        )
+
+    def normalize(value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        variance = value.to(torch.float32).pow(2).mean(-1, keepdim=True)
+        return (value * torch.rsqrt(variance + eps)).to(weight.dtype) * weight
+
+    return _apply_rotary_emb_neox_native(
+        normalize(query, q_weight),
+        normalize(key, k_weight),
+        cos_sin_cache,
+    )
+
+
 @torch.compiler.disable
 def apply_rotary_emb(
     x: torch.Tensor,
@@ -135,4 +238,4 @@ def apply_rotary_emb(
     return _apply_rotary_emb_native(x, cos, sin)
 
 
-__all__ = ["apply_rotary_emb"]
+__all__ = ["apply_qk_norm_rope_neox", "apply_rotary_emb", "apply_rotary_emb_neox"]

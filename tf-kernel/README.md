@@ -11,8 +11,9 @@ English | [中文](README_zh.md)
 GEMM, SageAttention, and block-sparse attention kernels. It supports SM80, SM90, and SM100 GPU families.
 
 > [!IMPORTANT]
-> No prebuilt tf-kernel package is currently published. Build and install the extension from source with this
-> directory's Makefile. Direct `pip install .` and `pip install -e .` source builds are intentionally rejected.
+> The project does not publish prebuilt tf-kernel wheels or a source distribution to a public package index. Build
+> and install the extension from source with this directory's Makefile. Direct `pip install .` and
+> `pip install -e .` source builds are intentionally rejected.
 
 ## Requirements
 
@@ -49,6 +50,31 @@ For example:
 ```bash
 make build-sm90 PYTHON=/path/to/venv/bin/python
 ```
+
+## Distribute a Built Wheel
+
+A locally built wheel may be copied to another host or stored in a controlled artifact repository when the source
+commit, tf-kernel version, PyTorch version, PyTorch CUDA version, C++11 ABI, target SM family, CPU architecture, and
+Linux/GLIBC baseline are compatible. The wheel validates the runtime facts that can be checked during import.
+
+Architecture-specific builds currently have the same filename for SM80, SM90, and SM100. Keep them in separate
+artifact paths and install the exact file; do not expose multiple target-SM variants through one simple package index
+because pip cannot select a wheel from the GPU architecture. For example:
+
+```text
+tf-kernel/0.1.0/torch2.11.0-cu128/linux-x86_64/sm90/
+```
+
+Before sharing, run `make test-wheel`, `make test-smoke`, and record `sha256sum dist/*.whl` with the source commit and
+test results. Install the selected artifact into an environment that already has the matching PyTorch build:
+
+```bash
+python -m pip install /path/to/tf_kernel-*.whl --no-deps
+python -m pip check
+```
+
+Do not manually relabel a local `linux_*` wheel as `manylinux`; rebuild it on the intended deployment baseline.
+See the full installation guide for the artifact manifest and target-host verification procedure.
 
 ## Parallel Compilation
 
@@ -109,5 +135,5 @@ make docs PYTHON=/path/to/venv/bin/python
 GPU targets install the wheel into an isolated temporary directory before collection, so tests cannot accidentally
 import `tf_kernel` from the source checkout or another environment.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development and future release procedures. See the
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development and wheel distribution policy. See the
 [full installation and usage guide](../docs/en/tf_kernel.md) for compatibility, API examples, and troubleshooting.

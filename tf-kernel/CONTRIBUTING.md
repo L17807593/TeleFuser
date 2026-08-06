@@ -100,24 +100,29 @@ sudo apt-get install clang-format
 brew install clang-format
 ```
 
-## Future Wheel Publication
+## Wheel Distribution Policy
 
-No prebuilt tf-kernel wheel is currently published. Do not add package-index installation instructions or a
-TeleFuser optional dependency until a compatible artifact is actually available.
+Do not publish prebuilt tf-kernel wheels or a source distribution to PyPI or another public package index. Direct
+source installation is intentionally unsupported, so publishing an sdist would make installers attempt a build path
+that the project rejects. Do not add package-index installation instructions or a TeleFuser optional dependency.
 
-If wheel publication is enabled in the future, produce and validate it manually on an explicitly provisioned
-CUDA/NVCC host:
+Users may build a wheel on an explicitly provisioned CUDA/NVCC host and distribute it directly within a compatible,
+controlled environment. Before sharing an artifact:
 
 ```bash
-make update <version>
 make build-sm90 PYTHON=/path/to/venv/bin/python  # Select the required architecture.
-python -m pip install twine
-python -m twine check dist/*.whl
-python -m twine upload dist/*.whl
+make test-wheel PYTHON=/path/to/venv/bin/python
+make test-smoke PYTHON=/path/to/venv/bin/python
+sha256sum dist/*.whl
 ```
 
-Run the architecture-specific GPU tests before upload. Add end-user installation documentation only after the wheel
-is visible from the supported package index and its Torch/CUDA compatibility has been verified.
+Record the source commit, package version, Python version, PyTorch version, PyTorch CUDA version, C++11 ABI, target SM
+family, CPU architecture, Linux/GLIBC baseline, wheel SHA-256, and test results with the artifact. Keep SM80, SM90,
+and SM100 wheels in separate artifact paths because architecture-specific builds currently produce the same wheel
+filename.
+Do not place multiple target-SM variants of one release in a single simple package index: pip cannot select a wheel
+from the target GPU architecture. Install a shared wheel by exact path or URL with `--no-deps`, then run
+`python -m pip check` and the installation smoke test on the target host.
 
 ## How to Contribute
 

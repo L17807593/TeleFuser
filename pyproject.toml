@@ -5,14 +5,23 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "telefuser"
 dynamic = ["version"] 
-description = "A framework for efficient model inference with multimodal generation models"
+description = "A streaming inference and serving framework for world models and multimodal generation"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 license = "Apache-2.0"
 authors = [
     {name = "TeleAI Team"}
 ]
-keywords = ["multimodal", "diffusion", "transformer", "inference", "serving"]
+keywords = [
+    "multimodal-generation",
+    "world-model",
+    "video-generation",
+    "streaming-inference",
+    "distributed-inference",
+    "diffusion",
+    "serving",
+    "webrtc",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -27,8 +36,8 @@ classifiers = [
 
 
 dependencies = [
-    # Default install follows vLLM-style inference readiness: service runtime
-    # plus the core PyTorch/model/distributed stack needed by standard pipelines.
+    # Default install includes the service runtime plus the core
+    # PyTorch/model/distributed stack needed by standard pipelines.
     "av>=14.0.0,<17.0.0",
     "click",
     "diffusers>=0.36.0",
@@ -80,6 +89,7 @@ dev = [
     "pytest-cov>=4.0.0",
     "pre-commit==4.0.1",
     "scikit-image>=0.19.0",
+    "tomli>=2.0.0; python_version < '3.11'",
     "uv"
 ]
 
@@ -118,6 +128,12 @@ telefuser = "telefuser.entrypoints.cli.main:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["telefuser*"]
+
+[tool.setuptools.package-data]
+"telefuser.kernel.sol_attn" = [
+    "THIRD_PARTY_NOTICES.md",
+    "sm100/LICENSE.flash-attention",
+]
 
 [tool.pytest.ini_options]
 minversion = "7.0"
@@ -195,7 +211,8 @@ exclude = [
     "dist",
     "tf-kernel",
     "benchmarks",
-    "telefuser/_version.py"
+    "telefuser/_version.py",
+    "telefuser/kernel/sol_attn",
 ]
 
 [tool.ruff.lint]

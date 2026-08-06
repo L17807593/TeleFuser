@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import functools
 from abc import ABC
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, Callable, TypeVar, cast
 
 import torch
 
+from telefuser.cache.session_memory import DeviceMemorySnapshot, capture_device_memory_snapshot
 from telefuser.platforms import current_platform
 from telefuser.utils.logging import logger
 
@@ -110,6 +112,25 @@ class BaseStage(ABC):
     def disable_metrics(self) -> None:
         """Disable metrics collection for this stage."""
         self._metrics_hook = None
+
+    def reset_device_memory_peak(self) -> bool:
+        """Reset allocator peaks in the process that owns this stage's CUDA context."""
+        if current_platform.device_type != "cuda" or not torch.cuda.is_available():
+            return False
+        torch.cuda.synchronize(self.device)
+        torch.cuda.reset_peak_memory_stats(self.device)
+        return True
+
+    def device_memory_snapshots(self) -> list[dict[str, int | str]]:
+        """Return one raw device-memory snapshot per distributed stage rank."""
+        if current_platform.device_type != "cuda" or not torch.cuda.is_available():
+            return []
+        snapshot = capture_device_memory_snapshot(self.device)
+        if not torch.distributed.is_initialized():
+            return [asdict(snapshot)]
+        gathered: list[DeviceMemorySnapshot | None] = [None] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(gathered, snapshot)
+        return [asdict(item) for item in gathered if item is not None]
 
     @property
     def metrics_hook(self) -> StageMetricContext | None:

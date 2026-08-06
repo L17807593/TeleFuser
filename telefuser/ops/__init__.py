@@ -10,11 +10,20 @@ All operations support torch.compile via automatic dispatch:
 
 from __future__ import annotations
 
+from .activations import silu_and_mul_reuse_input
 from .base import CustomOp, CustomOpFunction
 from .custom_op import TritonKernelWrapper, register_custom_op
 from .moe import grouped_expert_forward, route_topk
-from .normalization import AdaLayerNormContinuous, LayerNorm, RMSNorm, fused_scale_shift, modulate
-from .rotary import apply_rotary_emb
+from .normalization import (
+    AdaLayerNormContinuous,
+    LayerNorm,
+    RMSNorm,
+    fused_scale_shift,
+    indexed_gate,
+    indexed_scale_shift,
+    modulate,
+)
+from .rotary import apply_qk_norm_rope_neox, apply_rotary_emb
 
 __all__ = [
     # Base classes
@@ -29,8 +38,12 @@ __all__ = [
     "AdaLayerNormContinuous",
     "fused_scale_shift",
     "modulate",
+    "indexed_gate",
+    "indexed_scale_shift",
     "route_topk",
     "grouped_expert_forward",
     # Rotary
     "apply_rotary_emb",
+    "apply_qk_norm_rope_neox",
+    "silu_and_mul_reuse_input",
 ]

@@ -10,6 +10,14 @@ from einops import rearrange, repeat
 from tqdm import tqdm
 
 from telefuser.core.base_model import BaseModel
+from telefuser.distributed.collectives import all_gather_stacked, all_reduce_sum_
+from telefuser.distributed.vae_spatial import (
+    _SpatialParallelConv2d,
+    _gather_height,
+    _spatial_causal_conv3d_forward,
+    _spatial_world_size,
+    _split_height,
+)
 from telefuser.utils.logging import logger
 from telefuser.utils.model_weight import hash_state_dict_keys
 
@@ -113,6 +121,51 @@ class CausalConv3d(nn.Conv3d):
         x = F.pad(x, padding)
         x = x.contiguous(memory_format=torch.channels_last_3d)
         return super().forward(x)
+
+
+class _SpatialParallelCausalConv3d(CausalConv3d):
+    """Causal Conv3d over a height shard with neighboring halo exchange."""
+
+    def __init__(self, source: CausalConv3d) -> None:
+        temporal_padding = source._padding[4] // 2
+        height_padding = source._padding[2]
+        width_padding = source._padding[0]
+        if source.stride[1] != 1:
+            raise ValueError("VAE spatial decode only supports stride-one height convolutions")
+        super().__init__(
+            source.in_channels,
+            source.out_channels,
+            source.kernel_size,
+            stride=source.stride,
+            padding=(temporal_padding, height_padding, width_padding),
+            dilation=source.dilation,
+            groups=source.groups,
+            bias=source.bias is not None,
+            padding_mode=source.padding_mode,
+            device=source.weight.device,
+            dtype=source.weight.dtype,
+        )
+        self.weight = source.weight
+        self.bias = source.bias
+        self._height_halo_size = source.dilation[1] * (source.kernel_size[1] - 1) // 2
+        if height_padding != self._height_halo_size:
+            raise ValueError("VAE spatial Conv3d requires symmetric height padding")
+        self._spatial_padding = (
+            width_padding,
+            width_padding,
+            0,
+            0,
+            2 * temporal_padding,
+            0,
+        )
+        self._halo_send_top: torch.Tensor | None = None
+        self._halo_send_bottom: torch.Tensor | None = None
+        self._halo_recv_top: torch.Tensor | None = None
+        self._halo_recv_bottom: torch.Tensor | None = None
+        self.train(source.training)
+
+    def forward(self, x: torch.Tensor, cache_x: torch.Tensor | None = None) -> torch.Tensor:
+        return _spatial_causal_conv3d_forward(self, x, cache_x)
 
 
 class RMS_norm(nn.Module):
@@ -268,10 +321,13 @@ class AttentionBlock(nn.Module):
         self.norm = RMS_norm(dim)
         self.to_qkv = nn.Conv2d(dim, dim * 3, 1)
         self.proj = nn.Conv2d(dim, dim, 1)
+        self._spatial_parallel = False
 
         nn.init.zeros_(self.proj.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self._spatial_parallel:
+            x = _gather_height(x).contiguous()
         identity = x
         b, c, t, h, w = x.size()
         x = rearrange(x, "b c t h w -> (b t) c h w")
@@ -283,7 +339,8 @@ class AttentionBlock(nn.Module):
 
         x = self.proj(x)
         x = rearrange(x, "(b t) c h w-> b c t h w", t=t)
-        return x + identity
+        x = x + identity
+        return _split_height(x) if self._spatial_parallel else x
 
 
 class Encoder3d(nn.Module):
@@ -414,6 +471,8 @@ class Decoder3d(nn.Module):
         self.num_res_blocks = num_res_blocks
         self.attn_scales = attn_scales
         self.temperal_upsample = temperal_upsample
+        self._spatial_parallel = False
+        self._spatial_upsample_count = 0
 
         dims = [dim * u for u in [dim_mult[-1]] + dim_mult[::-1]]
         dims = [int(d * (1 - pruning_rate)) for d in dims]
@@ -450,8 +509,20 @@ class Decoder3d(nn.Module):
             CausalConv3d(out_dim, 3, 3, padding=1),
         )
 
-    def forward(self, x: torch.Tensor, feat_cache: list | None = None, feat_idx: list | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        feat_cache: list | None = None,
+        feat_idx: list | None = None,
+        input_global_height: int | None = None,
+    ) -> torch.Tensor:
         """Forward pass with list-based feature caching."""
+        expected_height = None
+        if self._spatial_parallel:
+            global_height = x.shape[-2] if input_global_height is None else input_global_height
+            expected_height = global_height * (2**self._spatial_upsample_count)
+            if input_global_height is None:
+                x = _split_height(x)
         if feat_cache is not None and feat_idx is not None:
             idx = feat_idx[0]
             cache_x = x[:, :, -CACHE_T:, :, :].clone()
@@ -498,7 +569,45 @@ class Decoder3d(nn.Module):
                 feat_idx[0] += 1
             else:
                 x = layer(x)
+        if self._spatial_parallel:
+            x = _gather_height(x)
+            x = x[..., :expected_height, :].contiguous()
         return x
+
+
+def _enable_spatial_parallel_decode(vae: WanVideoVAE) -> int:
+    """Replace decoder convolutions with height-sharded equivalents in a worker process."""
+    if _spatial_world_size() <= 1:
+        return 0
+    if getattr(vae, "parallelism", 1) > 1:
+        raise RuntimeError("Wan VAE native decode_parallel and streaming spatial decode are mutually exclusive")
+    decoder = vae.model.decoder
+    decoder._spatial_parallel = True
+    decoder._spatial_upsample_count = sum(
+        isinstance(module, Resample) and module.mode in {"upsample2d", "upsample3d"} for module in decoder.modules()
+    )
+    converted = 0
+
+    def convert(module: nn.Module, inside_resample: bool = False) -> None:
+        nonlocal converted
+        if isinstance(module, AttentionBlock):
+            module._spatial_parallel = True
+        for name, child in list(module.named_children()):
+            if isinstance(child, (_SpatialParallelCausalConv3d, _SpatialParallelConv2d)):
+                continue
+            if isinstance(child, CausalConv3d):
+                setattr(module, name, _SpatialParallelCausalConv3d(child))
+                converted += 1
+                continue
+            child_inside_resample = inside_resample or isinstance(module, Resample)
+            if child_inside_resample and isinstance(child, nn.Conv2d):
+                setattr(module, name, _SpatialParallelConv2d(child))
+                converted += 1
+                continue
+            convert(child, child_inside_resample)
+
+    convert(decoder)
+    return converted
 
 
 class VideoVAE(nn.Module):
@@ -742,7 +851,9 @@ class WanVideoVAE(BaseModel):
         """
         return _convert_conv3d_to_channels_last_3d(self.model)
 
-    def set_parallelism(self, parallelism: int):
+    def set_parallelism(self, parallelism: int) -> None:
+        if parallelism > 1 and getattr(self.model.decoder, "_spatial_parallel", False):
+            raise RuntimeError("Wan VAE native decode_parallel and streaming spatial decode are mutually exclusive")
         self.parallelism = parallelism
 
     # ==================== 2D Spatial Parallel Methods ====================
@@ -964,9 +1075,7 @@ class WanVideoVAE(BaseModel):
         )
 
         # Gather all chunks
-        world_size_total = world_size_h * world_size_w
-        full_encoded = [torch.empty_like(encoded_chunk) for _ in range(world_size_total)]
-        dist.all_gather(full_encoded, encoded_chunk)
+        full_encoded = list(all_gather_stacked(encoded_chunk, world_size=world_size_h * world_size_w).unbind(0))
 
         # Reconstruct full latent
         encoded = self._reconstruct_2d(full_encoded, world_size_h, world_size_w, dim=3)
@@ -1028,9 +1137,7 @@ class WanVideoVAE(BaseModel):
         )
 
         # Gather all chunks
-        world_size_total = world_size_h * world_size_w
-        full_decoded = [torch.empty_like(decoded_chunk) for _ in range(world_size_total)]
-        dist.all_gather(full_decoded, decoded_chunk)
+        full_decoded = list(all_gather_stacked(decoded_chunk, world_size=world_size_h * world_size_w).unbind(0))
 
         # Reconstruct full video
         decoded = self._reconstruct_2d(full_decoded, world_size_h, world_size_w, dim=3)
@@ -1226,8 +1333,7 @@ class WanVideoVAE(BaseModel):
             weight[:, :, :, target_h:target_h_end, target_w:target_w_end] += mask
 
         if self.parallelism > 1:
-            dist.all_reduce(values)
-            dist.all_reduce(weight)
+            all_reduce_sum_((values, weight))
         values = values / weight
         # Move to CPU to reduce VRAM usage (video output is large)
         values = values.cpu().clamp_(-1, 1)
@@ -1290,8 +1396,7 @@ class WanVideoVAE(BaseModel):
             weight[:, :, :, target_h:target_h_end, target_w:target_w_end] += mask
 
         if self.parallelism > 1:
-            dist.all_reduce(values)
-            dist.all_reduce(weight)
+            all_reduce_sum_((values, weight))
         values = values / weight
         return values
 
@@ -1464,6 +1569,7 @@ class WanVideoVAE(BaseModel):
         is_first_clip: bool,
         is_last_clip: bool,
         decode_state: WanVideoVAEStreamingDecodeState | None = None,
+        input_global_height: int | None = None,
     ) -> torch.Tensor:
         """Decode with persistent feature cache for streaming generation.
 
@@ -1513,6 +1619,7 @@ class WanVideoVAE(BaseModel):
         # Decode frame-by-frame with cache
         iter_ = z.shape[2]
         x = self.model.conv2(z)
+        decoder_kwargs = {"input_global_height": input_global_height} if input_global_height is not None else {}
 
         for i in range(iter_):
             feat_idx[0] = 0  # Reset index for each frame
@@ -1521,12 +1628,14 @@ class WanVideoVAE(BaseModel):
                     x[:, :, i : i + 1, :, :],
                     feat_cache=feat_cache,
                     feat_idx=feat_idx,
+                    **decoder_kwargs,
                 )
             else:
                 out_ = self.model.decoder(
                     x[:, :, i : i + 1, :, :],
                     feat_cache=feat_cache,
                     feat_idx=feat_idx,
+                    **decoder_kwargs,
                 )
                 out = torch.cat([out, out_], 2)
 

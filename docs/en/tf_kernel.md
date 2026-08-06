@@ -2,8 +2,9 @@
 
 `tf-kernel` is TeleFuser's optional CUDA extension package. It provides fused elementwise operations, quantized
 GEMM, SageAttention, and block-sparse attention kernels. The package lives in the `tf-kernel/` directory of this
-repository and has its own package metadata and version. No prebuilt package is currently published; local
-installation requires a source build on a provisioned CUDA/NVCC host.
+repository and has its own package metadata and version. The project does not publish prebuilt wheels or a source
+distribution to a public package index. Installation requires a Makefile-driven source build on a provisioned
+CUDA/NVCC host, or an exact wheel artifact produced by such a build for a compatible environment.
 
 TeleFuser can run without `tf-kernel`: the `telefuser.ops` layer keeps native PyTorch or Triton fallbacks where they
 are implemented. Install `tf-kernel` when a pipeline uses one of its optimized CUDA paths.
@@ -55,7 +56,8 @@ make build-auto PYTHON=/path/to/venv/bin/python
 
 The local build is independent of the TeleFuser installation. Make builds a correctly tagged wheel and installs it
 into `PYTHON`. Direct `pip install .` and `pip install -e .` source builds fail with instructions to use Make; pip
-package-index installation is not available.
+package-index installation is not available. Do not publish an sdist as a substitute: installers would attempt the
+direct source-build path that this project intentionally rejects.
 
 Local builds use a `linux_*` platform tag. The container build may use `manylinux_2_28` only after checking every
 shared object's GLIBC symbol versions against that policy.
@@ -87,6 +89,67 @@ build needs network access to obtain pinned CUTLASS, FlashInfer, and other CMake
 `MAX_JOBS` controls the number of concurrent build jobs. `TF_KERNEL_COMPILE_THREADS` controls the internal NVCC
 threads used by each job. Increasing them can reduce build time on a sufficiently provisioned host; their product
 also increases CPU and memory pressure.
+
+## Distribute a locally built wheel
+
+A wheel may be shared by exact file path or URL within a controlled environment. It is compatible only when all of
+the following build and target facts agree:
+
+| Fact | Distribution requirement |
+|------|--------------------------|
+| Source | Same tf-kernel version and source commit |
+| Python | A CPython version accepted by the wheel and package metadata (currently 3.10 or newer) |
+| PyTorch | Same public version recorded at build time |
+| PyTorch CUDA | Same CUDA runtime version recorded at build time |
+| C++ ABI | Same `torch._C._GLIBCXX_USE_CXX11_ABI` value |
+| GPU | The wheel contains the target family: SM80, SM90, or SM100; an `ALL` wheel contains all three |
+| Host | Compatible CPU architecture and wheel platform tag |
+| Linux runtime | Target GLIBC must satisfy the build artifact's baseline |
+
+The import-time loader verifies the PyTorch, PyTorch CUDA, C++11 ABI, and GPU-family facts. It does not make an
+artifact built on a newer Linux distribution portable to an older one.
+
+Architecture-specific SM80, SM90, and SM100 builds currently produce the same wheel filename. Store each target in
+a separate path and retain the surrounding path as part of the artifact identity. Do not place multiple target-SM
+variants of one release in a single simple package index: wheel compatibility tags do not describe the GPU, so pip
+cannot choose the correct variant. A recommended layout is:
+
+```text
+tf-kernel/
+  0.1.0/
+    torch2.11.0-cu128/
+      linux-x86_64-glibc2.28/
+        sm80/
+        sm90/
+        sm100/
+```
+
+Build on the oldest Linux/GLIBC baseline supported by the intended deployment fleet. Do not manually relabel a local
+`linux_*` wheel as `manylinux`; only a container-built artifact that passes the repository's policy check may use the
+`manylinux_2_28` tag.
+
+Before distributing an artifact, run the wheel and target-GPU checks and record its identity:
+
+```bash
+make test-cpu PYTHON=/path/to/venv/bin/python
+make test-wheel PYTHON=/path/to/venv/bin/python
+make test-smoke PYTHON=/path/to/venv/bin/python
+git rev-parse HEAD
+sha256sum dist/*.whl
+```
+
+For a production artifact, also run `make test` on the target GPU family. Store the source commit, package version,
+Python version, PyTorch version, PyTorch CUDA version, C++11 ABI, target SM family, CPU architecture, Linux/GLIBC
+baseline, SHA-256, and test results alongside the wheel.
+
+Install the exact selected artifact into an environment that already contains the matching PyTorch build:
+
+```bash
+python -m pip install /path/to/tf_kernel-*.whl --no-deps
+python -m pip check
+```
+
+Then run the installation verification below on every new target host or deployment image.
 
 ## Verify the installation
 

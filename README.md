@@ -1,6 +1,8 @@
 <div align="center">
-  <img src="assets/telefuser_logo.png" width="80%">
+  <img src="assets/telefuser_logo.png" width="80%" alt="TeleFuser">
 </div>
+
+# TeleFuser: Streaming Inference Framework for World Models and Multimodal Generation
 
 <p align="center">
   <a href="README_zh.md">中文</a> | English
@@ -13,13 +15,27 @@
   <img src="https://img.shields.io/badge/CUDA-12.8%2B-green" alt="CUDA">
 </p>
 
-TeleFuser is a high-performance runtime for world model inference and multimodal generation. It is designed for continuous, low-latency, stateful visual generation workloads such as real-time world models, speech-driven animation, and streaming visual systems.
+TeleFuser is an open-source streaming inference and serving framework for real-time world models and multimodal
+generation. It supports continuous video generation, stateful sessions, bidirectional control, distributed GPU
+inference, FastAPI serving, and LiveKit WebRTC streaming for workloads such as interactive world models,
+speech-driven animation, and streaming visual systems.
+
+See the [world model streaming inference guide](docs/en/world_model_streaming_inference.md) for the execution model,
+runtime path, supported workloads, and reproducible real-time gate.
 
 ## News 📰
 
-- ✨ **2026-07-27**: Unified streaming on LiveKit with room sessions, worker admission, reconnect-friendly browser
-  transport, and support for both server-push and bidirectional pipeline contracts.
-- ✨ **2026-07-22**: **NEW** Added [**LingBot-Video**](examples/lingbot_video/README.md) support for Dense and MoE T2I/T2V/TI2V generation, native four-GPU CFG/SP execution, and in-memory MoE refinement.
+- ✨ **2026-08-05**: Added [**MiniMax H3**](examples/minimax_h3/README.md) T2VA, FL2VA, and Ref2VA joint
+  audio-video generation with standard `telefuser serve` support. On the matched 768p, five-second, 50-step T2VA
+  benchmark after warmup, the resident **4 x H100 80 GB** profile matched pinned local SGLang SP2+TP2 performance
+  while using less GPU memory; see the
+  [reproducible validation and performance notes](examples/minimax_h3/README.md#measured-four-gpu-profile).
+- ✨ **2026-08-03**: Validated LingBot-World v2 target-side real-time generation on **4 x H100 80 GB** at
+  832x480 and 16 FPS. The current 77-frame gate reached **17.14 steady compute FPS**; see the
+  [reproducible benchmark](docs/en/benchmark_aiperf.md#current-four-h100-real-time-gate).
+- ✨ **2026-07-27**: Unified streaming on LiveKit with room sessions, retained multi-session admission, LingBot
+  chunk-boundary time slicing, reconnect-friendly browser transport, and server-push/bidirectional contracts.
+- ✨ **2026-07-22**: Added [**LingBot-Video**](examples/lingbot_video/README.md) support for Dense and MoE T2I/T2V/TI2V generation, native four-GPU CFG/SP execution, and in-memory MoE refinement.
 - ✨ **2026-07-15**: Added [**LingBot-World v2**](https://github.com/Robbyant/lingbot-world-v2) support for offline generation, interactive WebRTC streaming, and multi-GPU inference.
 
 - ✨ **2026-07-06**: Added external **CacheSeek** latent cache integration for service-mode cross-request reuse. Cache hits can skip the first N denoising steps; the Wan2.2 cache-enabled service example snapshots `[5, 10, 15, 20, 25]` by default. See [docs/en/latent_cache.md](docs/en/latent_cache.md).
@@ -62,9 +78,10 @@ For development:
 pip install -e ".[dev]"
 ```
 
-TeleFuser does not require `tf-kernel` to run. No prebuilt tf-kernel package is currently published; the optional
-extension is built from source with the Makefile under `tf-kernel/`. See the [tf-kernel README](tf-kernel/README.md)
-and [installation and usage guide](docs/en/tf_kernel.md) for build, verification, and compatibility details.
+TeleFuser does not require `tf-kernel` to run. The project does not publish prebuilt tf-kernel wheels or a source
+distribution to a public package index. Build the optional extension with the Makefile under `tf-kernel/`; a locally
+built wheel may be distributed only to compatible environments. See the [tf-kernel README](tf-kernel/README.md) and
+[installation and usage guide](docs/en/tf_kernel.md) for build, verification, and artifact compatibility details.
 
 The base installation includes the LiveKit Python SDKs used by `telefuser stream-serve`. A LiveKit Cloud project or
 self-hosted LiveKit Server is operated separately.
@@ -93,6 +110,12 @@ video = pipe(
 
 TeleFuser streams `LingBot-World v2` through LiveKit. LingBot-World v2 uses camera control and its v2 PPL defaults;
 its streaming example caps a session at two minutes.
+
+The validated four-H100 configuration sustains 17.14 target-side compute FPS for the default 77-frame, 832x480
+request, above its 16 FPS playback target. This is a synchronized pipeline-compute metric; model loading, LiveKit
+encoding, network delivery, and client rendering are measured separately. See the
+[LingBot example guide](examples/lingbot/README.md#validated-four-h100-real-time-gate) for the exact command and
+chunk timings.
 
 LingBot streaming uses the actor-based scheduler for both offline and service execution. Encode, DiT, and decode may
 overlap even on the same GPU; move stages only when memory placement requires it. See the
@@ -139,8 +162,13 @@ telefuser stream-serve examples/lingbot/lingbot_world_v2_image_to_video_h100.py 
   --livekit-url ws://127.0.0.1:7880 \
   --livekit-api-key devkey --livekit-api-secret secret \
   --num-workers 1 --worker-gpu-map 0,1,2,3 \
+  --max-sessions-per-worker 2 --control-idle-timeout 10 \
   --port 8088 --skip-validation
 ```
+
+This is one four-GPU model worker and one loaded LingBot service instance, not four replicas. It can retain two
+independent user sessions; the shared LingBot execution lease runs at most one session chunk at a time and yields at
+a chunk boundary after the active controller becomes idle while another session waits.
 
 Terminal 4 — serve the browser controller and proxy its session API:
 
@@ -215,6 +243,7 @@ telefuser/
 | `WanVideo` (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Main video generation family, including async and service examples in [examples/wan_video/README.md](examples/wan_video/README.md) |
 | `HunyuanVideo` | T2V, I2V | Supported via [examples/hunyuan_video/README.md](examples/hunyuan_video/README.md) |
 | `LTX Video` | I2V + Audio | Unified audio-video generation via [examples/ltx_video/README.md](examples/ltx_video/README.md) |
+| `MiniMax H3` | T2VA, FL2VA, Ref2VA + Audio | Local 768p joint audio-video generation via [examples/minimax_h3/README.md](examples/minimax_h3/README.md) |
 | `LongCat-Video` | T2V, I2V, VC | Long-form generation and continuation via [examples/longcat_video/README.md](examples/longcat_video/README.md) |
 | **NEW** `LingBot-Video` | T2I, T2V, TI2V, MoE refiner | Dense/MoE generation with native CFG/SP and an in-memory base-to-refiner path; see [examples/lingbot_video/README.md](examples/lingbot_video/README.md) |
 
@@ -234,6 +263,7 @@ See [examples/README.md](examples/README.md) for the example runner and baseline
 - [docs/en/stream_server.md](docs/en/stream_server.md): LiveKit streaming, session APIs, data topics, and deployment
 - [docs/en/stream_scheduler.md](docs/en/stream_scheduler.md): actor-based stage scheduling, backpressure, lifecycle, metrics, and LingBot placement
 - [docs/en/parallel.md](docs/en/parallel.md): distributed inference architecture
+- [docs/en/communication.md](docs/en/communication.md): collectives, CUDA IPC, synchronization, and transport lifecycle
 - [docs/en/latent_cache.md](docs/en/latent_cache.md): CacheSeek latent cache integration
 - [docs/en/feature_cache.md](docs/en/feature_cache.md): `AdaTaylorCache`
 - [docs/en/model_loading.md](docs/en/model_loading.md): model loading patterns

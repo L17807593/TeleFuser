@@ -1,8 +1,9 @@
 # tf-kernel 安装与使用
 
 `tf-kernel` 是 TeleFuser 的可选 CUDA 扩展包，提供融合逐元素算子、量化 GEMM、SageAttention 和块稀疏
-注意力内核。它位于本仓库的 `tf-kernel/` 目录，拥有独立的包元数据和版本。目前没有发布预编译包；
-本地安装需要在配置好 CUDA/NVCC 的机器上从源码构建。
+注意力内核。它位于本仓库的 `tf-kernel/` 目录，拥有独立的包元数据和版本。项目不向公共包索引发布
+预编译 wheel 或源码分发包。安装时必须在配置好 CUDA/NVCC 的机器上通过 Makefile 从源码构建，或者使用
+该构建流程为兼容环境生成的明确 wheel 制品。
 
 TeleFuser 不安装 `tf-kernel` 也可以运行：对于已经实现回退的算子，`telefuser.ops` 层会保留 PyTorch 原生
 或 Triton 路径。当 Pipeline 需要 `tf-kernel` 提供的优化 CUDA 路径时再安装它。
@@ -51,7 +52,8 @@ make build-auto PYTHON=/path/to/venv/bin/python
 ```
 
 本地构建独立于 TeleFuser 安装。Make 会构建带有正确 tag 的 wheel，并将其安装到 `PYTHON` 指定的解释器。
-直接执行 `pip install .` 或 `pip install -e .` 会失败并提示改用 Make；当前不提供 pip 包索引安装。
+直接执行 `pip install .` 或 `pip install -e .` 会失败并提示改用 Make；不提供 pip 包索引安装。不要用发布
+sdist 代替 wheel，因为安装器会尝试执行本项目主动拒绝的直接源码构建路径。
 
 本地构建使用 `linux_*` platform tag。容器构建只有在检查所有共享库的 GLIBC 符号版本满足策略后，
 才可以使用 `manylinux_2_28` tag。
@@ -82,6 +84,65 @@ CUTLASS、FlashInfer 和其他 CMake 依赖。
 
 `MAX_JOBS` 控制并发编译任务数，`TF_KERNEL_COMPILE_THREADS` 控制每个任务内部使用的 NVCC 线程数。
 在资源充足的机器上提高两者可以缩短编译时间，但它们的乘积也会增加 CPU 和内存压力。
+
+## 分发本地构建的 wheel
+
+可以在受控环境中通过明确的文件路径或 URL 共享 wheel。只有以下构建端和目标端信息全部兼容时，制品
+才可以复用：
+
+| 信息 | 分发要求 |
+|------|----------|
+| 源码 | tf-kernel 版本和源码 commit 相同 |
+| Python | wheel 和包元数据接受的 CPython 版本（当前为 3.10 或更高版本） |
+| PyTorch | 与构建时记录的公共版本相同 |
+| PyTorch CUDA | 与构建时记录的 CUDA runtime 版本相同 |
+| C++ ABI | `torch._C._GLIBCXX_USE_CXX11_ABI` 值相同 |
+| GPU | wheel 包含目标架构族：SM80、SM90 或 SM100；`ALL` wheel 包含三个架构族 |
+| 主机 | CPU 架构和 wheel platform tag 兼容 |
+| Linux runtime | 目标 GLIBC 满足构建制品的基线 |
+
+导入时 loader 会校验 PyTorch、PyTorch CUDA、C++11 ABI 和 GPU 架构族，但它不能让在较新 Linux 发行版
+上构建的制品兼容较旧的发行版。
+
+SM80、SM90 和 SM100 的指定架构构建目前会生成相同的 wheel 文件名。每个目标必须使用独立路径保存，
+并将目录路径视为制品标识的一部分。不要把同一版本的多个目标 SM 变体放进同一个 simple package
+index：wheel 兼容 tag 不描述 GPU，pip 无法选择正确变体。推荐目录结构：
+
+```text
+tf-kernel/
+  0.1.0/
+    torch2.11.0-cu128/
+      linux-x86_64-glibc2.28/
+        sm80/
+        sm90/
+        sm100/
+```
+
+应在部署集群支持的最旧 Linux/GLIBC 基线上构建。不要手工把本地 `linux_*` wheel 改标为 `manylinux`；
+只有容器构建并通过仓库策略检查的制品才能使用 `manylinux_2_28` tag。
+
+分发制品前，应运行 wheel 和目标 GPU 检查并记录制品身份：
+
+```bash
+make test-cpu PYTHON=/path/to/venv/bin/python
+make test-wheel PYTHON=/path/to/venv/bin/python
+make test-smoke PYTHON=/path/to/venv/bin/python
+git rev-parse HEAD
+sha256sum dist/*.whl
+```
+
+生产制品还应在目标 GPU 架构族上运行 `make test`。将源码 commit、包版本、Python 版本、PyTorch 版本、
+PyTorch CUDA 版本、C++11 ABI、目标 SM 架构族、CPU 架构、Linux/GLIBC 基线、SHA-256 和测试结果与 wheel
+一起保存。
+
+在已经安装匹配 PyTorch build 的环境中，通过明确路径安装选定制品：
+
+```bash
+python -m pip install /path/to/tf_kernel-*.whl --no-deps
+python -m pip check
+```
+
+随后应在每台新目标主机或每个部署镜像中执行下文的安装验证。
 
 ## 验证安装
 

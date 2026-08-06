@@ -2,7 +2,8 @@
 
 TeleFuser exposes raw target-side facts; AIPerf owns workload execution, aggregation, resource collection, artifacts,
 GreptimeDB history, and visualization. The checked-in integration covers batch video generation through the
-OpenAI-compatible `/v1/videos` API and LingBot streaming through LiveKit.
+OpenAI-compatible `/v1/videos` API, TeleFuser LingBot streaming through LiveKit, and SGLang LingBot streaming through
+its native realtime WebSocket endpoint.
 
 AIPerf's stream runner and result schema are transport-neutral. The LiveKit adapter is maintained by
 TeleFuser, loads from source at process startup, and produces AIPerf's standard session results. The contract records WebRTC as
@@ -55,10 +56,23 @@ An idle service reports `"livekit_connected":false`; that is expected. Run the b
 bash benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh
 ```
 
-The request contains 59.75 seconds of media, but the configured AIPerf active window is 240 seconds. Allow about four
-minutes for the command to finish. Success is `Stream profile sessions: 1/1 succeeded`; reports are created under
-`artifacts/telefuser_aiperf/stream_lingbot_v2_1min/`. See the canonical README for model file layout, manual Python
-environment selection, history setup, and troubleshooting.
+The request contains 59.75 seconds of media. The 240-second active window is a timeout ceiling; a successful run
+exits after the target completion status and normally takes about 66 seconds after admission. Success is
+`Stream profile sessions: 1/1 succeeded`; reports are created under
+`artifacts/telefuser_aiperf/stream_lingbot_v2_1min/`.
+
+To profile SGLang on the same four-GPU workload instead, start its server and select the SGLang config:
+
+```bash
+bash benchmarks/telefuser_aiperf/scripts/run_sglang_lingbot_world_v2_4gpu.sh
+
+bash benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh \
+  benchmarks/telefuser_aiperf/configs/stream_sglang_lingbot_world_v2_4gpu_1min.json
+```
+
+This launch explicitly uses `--flow-shift 10` for parity with the official model and TeleFuser. SGLang's source
+default is `5`, so runs made with `SGLANG_FLOW_SHIFT=5` describe SGLang's default but are not model-configuration
+parity comparisons. See the benchmark README for model, GPU, port, and executable overrides.
 
 ## Ownership and metric semantics
 
@@ -67,6 +81,7 @@ environment selection, history setup, and troubleshooting.
 | TeleFuser runtime | TeleFuser | Emit synchronized phase, chunk, runtime, cache, and environment facts |
 | Batch target adapter | AIPerf | Convert `/v1/videos` HTTP events into the standard request timeline |
 | LiveKit source adapter | TeleFuser | Convert room, track, status, metrics, and control events into session results |
+| SGLang source adapter | TeleFuser | Convert MessagePack frames, chunk timings, and camera events into session results |
 | Aggregation and history | AIPerf | Apply warmup, percentiles, throughput, artifacts, GreptimeDB, and visualization |
 | Contracts and workloads | TeleFuser | Fix target capabilities, inputs, settings, and reproducible launch commands |
 
@@ -87,36 +102,59 @@ Target facts follow these rules:
 Client delivery, target pipeline residence, target phase time, and resource utilization remain separate dimensions.
 Fields without equivalent semantics remain private or unavailable instead of being forced into a common metric.
 
-## Validated one-minute LingBot-World v2 replay
+## Four-H100 LingBot-World v2 validation
 
-The `stream_lingbot_world_v2_1min.json` workload was validated on 2026-07-28 with four H100 80 GB GPUs, BF16 DiT,
-FP32 VAE, SageAttention SM90, `torch.compile` enabled, FSDP disabled, `chunk_size=4`, and 16 FPS. A 60-second request
-is truncated to 60 complete latent chunks: 957 output frames representing 59.75 seconds of media. LingBot-World v2
-used its fixed `local_attn_size=18` and `sink_size=6` window, so the 240 latent-frame request retained a fixed
-27,144-token KV capacity rather than a duration-sized global KV cache.
+Both runs below used four H100 80 GB GPUs, BF16 DiT, FP32 VAE, FlashAttention-4, disabled FSDP, disabled
+`torch.compile`, `chunk_size=4`, and 16 FPS output. They validate different workloads and code revisions, so their
+results should not be interpreted as a before-and-after performance comparison.
 
-| Measurement | Result |
+### Current four-H100 real-time gate
+
+Commit `540b579` was validated on 2026-08-03 through the direct LingBot pipeline-service path with four H100 80 GB
+GPUs and PyTorch 2.11.0+cu128. The request used 832x480 output, 77 frames, and five four-latent-frame chunks.
+
+| Metric | Result |
 |---|---:|
-| Successful sessions | 1 / 1 |
-| Target chunks / generated frames | 60 / 957 |
-| Client frames received | 947 |
-| Target steady chunks / frames | 59 / 944 |
-| Configured session runtime | 242.255 s |
-| First-frame latency | 6,252.773 ms |
-| Client delivery rate (`stream_fps`) | 9.397 FPS |
-| Weighted steady chunk compute rate | 4.708 FPS |
-| Chunk pipeline residence, mean / p99 | 3.399 / 3.901 s |
+| Generated frames / target chunks | 77 / 5 |
+| Steady chunks after excluding chunk 0 | 4 |
+| Steady compute FPS | **17.1399** |
+| Chunk compute mean / p50 / p90 / max | 0.9335 / 0.9409 / 0.9410 / 1.0058 s |
+| First generated frame from measured session start | 3.2182 s |
 
-The target emitted all 957 frames and the LiveKit client received 947. AIPerf excluded the first target chunk from
-steady-state compute aggregation, leaving 944 generated frames across 59 chunks. The 242-second session runtime is
-the configured 240-second active-window limit plus connection overhead; it is not the generation time of the
-59.75-second media payload.
+This run clears the average target-side 16 FPS compute gate. It does not claim that every chunk clears the one-second
+budget: the maximum was 1.0058 seconds. The synchronized compute interval includes condition handling, DiT,
+clean-KV update, spatial VAE decode, GPU-to-CPU transfer, and frame conversion. It excludes model loading, runtime
+creation, LiveKit pacing/encoding, network delivery, and client rendering.
 
-Chunk pipeline residence spans actor admission through output and includes time shared by overlapping encode, DiT,
-and decode work. It is therefore expected to exceed adjacent delivery intervals; the report's 4.708 weighted
-steady chunk compute FPS must not be read as client stream throughput. The Git-installed AIPerf run exited with code
-0. The replay artifact is
-`artifacts/telefuser_aiperf/stream_lingbot_v2_1min/20260728_083948_fc4344ba/stream_report.html`.
+The exact reproduction command is in the
+[LingBot example guide](https://github.com/Tele-AI/TeleFuser/tree/main/examples/lingbot#validated-four-h100-real-time-gate)
+and uses `tools/validation/benchmark_lingbot_world_v2_direct.py`.
+
+### Current one-minute streaming replay
+
+The one-minute workload was rerun on 2026-08-03 at TeleFuser commit
+`284996dd616cfd44a55523687b7f2a63a281abb9`. It validates sustained target generation, bounded KV-cache capacity,
+and the paced LiveKit delivery path on the current communication-optimized revision.
+
+The run used the `stream_lingbot_world_v2_1min.json` workload and AIPerf 0.11.0 at commit
+`e977ffbb1648510acec431b2a3fbd1a0f7bb8a35`. The 60-second request was truncated to 60 complete latent chunks:
+957 generated frames representing 59.75 seconds of media. With `local_attn_size=18` and `sink_size=6`, the
+240-latent-frame session reported a fixed 28,080-token KV capacity.
+
+| Metric | Result |
+|---|---:|
+| Generated target frames / chunks | 957 / 60 |
+| Steady frames / chunks after excluding chunk 0 | 944 / 59 |
+| Steady target compute time / FPS | 58.2791 s / **16.1979** |
+| Chunk compute mean / p50 / p90 / p99 / max | 0.9878 / 0.9593 / 1.0624 / 1.0932 / 1.1149 s |
+| LiveKit stream FPS / client frames | 13.1967 / 803 |
+| First client frame / session runtime | 6.0682 / 66.8948 s |
+| Runtime creation | 1.4176 s |
+| Artifact | `20260803_095518_62ec043c` |
+
+The target completed all 60 chunks and cleared the average 16 FPS compute gate. It did not keep every chunk below one
+second: p99 was 1.0932 seconds and the maximum was 1.1149 seconds. The lower client frame count belongs to the paced
+delivery measurement and must not be conflated with target generation completeness.
 
 ## Reproducibility
 

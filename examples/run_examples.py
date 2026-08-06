@@ -41,6 +41,7 @@ if _PROJECT_ROOT not in sys.path:
 
 _CONFIG_PATH = Path(__file__).resolve().parent / "example_config.yaml"
 _RESULT_MARKER = "###RESULT###"
+_REGRESSION_ATTN_IMPL = "TORCH_SDPA"
 
 
 def _pipeline_slug(pipeline_key: str) -> str:
@@ -582,6 +583,8 @@ class PipelineScheduler:
                 job.ppl_cfg.ssim_min,
                 job.ppl_cfg.pixel_diff_max,
                 self.update_baseline,
+                require_audio=job.ppl_cfg.require_audio,
+                audio_cosine_min=job.ppl_cfg.audio_cosine_min,
             )
             result.regression_metrics = cmp.get("metrics", {})
             result.note = cmp["message"]
@@ -697,10 +700,14 @@ class PipelineConfig:
     first_image_path: str | None = None
     last_image_path: str | None = None
     input_video_path: str | None = None
+    target_video_length: float | None = None
+    use_run_with_file: bool = False
+    require_audio: bool = False
     ppl_config_overrides: dict = field(default_factory=dict)
     # Regression thresholds
     psnr_min: float = 25.0
     ssim_min: float = 0.85
+    audio_cosine_min: float = 0.95
     pixel_diff_max: float = 0.02
     # Performance thresholds (None = disabled)
     max_elapsed_seconds: float | None = None
@@ -780,6 +787,19 @@ def _patch_ppl_config(module: ModuleType, overrides: dict) -> None:
             config[key] = value
 
 
+def _prepare_sdpa_regression(overrides: dict) -> dict:
+    """Force regression examples onto SDPA without importing optional xformers kernels."""
+    try:
+        from diffusers.utils import import_utils
+
+        # Diffusers checks package metadata, which can mark an incompatible
+        # xformers installation as available and then import it eagerly.
+        import_utils._xformers_available = False
+    except ImportError:
+        pass
+    return {**overrides, "attn_impl": _REGRESSION_ATTN_IMPL}
+
+
 def _extract_click_default(module: ModuleType, param_name: str) -> str | None:
     """Extract a click option's default value from the module's main() command."""
     import click
@@ -849,9 +869,15 @@ def _call_get_pipeline(module: ModuleType, config: dict) -> object:
     return func(**kwargs)
 
 
-def _call_run(module: ModuleType, pipeline: object, config: dict) -> object:
-    """Call run() with arguments matched by signature inspection."""
-    func = module.run
+def _call_run(
+    module: ModuleType,
+    pipeline: object,
+    config: dict,
+    *,
+    entrypoint: str = "run",
+) -> object:
+    """Call an example run entrypoint with arguments matched by signature inspection."""
+    func = getattr(module, entrypoint)
     params = list(inspect.signature(func).parameters.keys())
     kwargs: dict = {"pipeline": pipeline}
 
@@ -993,6 +1019,19 @@ def _save_output(
     if output is None:
         return None, None, None
 
+    if isinstance(output, dict) and isinstance(output.get("output_path"), (str, os.PathLike)):
+        output_path = os.fspath(output["output_path"])
+        if not os.path.isfile(output_path):
+            raise FileNotFoundError(f"Example file entrypoint did not produce {output_path}")
+        if output_type == "video":
+            from telefuser.utils.video import VideoData
+
+            video = VideoData(video_file=output_path)
+            return output_path, len(video), f"{video.width}x{video.height}"
+        if output_type == "image":
+            with Image.open(output_path) as image:
+                return output_path, 1, f"{image.width}x{image.height}"
+
     # Use custom filename or default
     default_name = f"output.{('mp4' if output_type == 'video' else 'png')}"
     output_filename = filename or default_name
@@ -1103,6 +1142,7 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    ppl_config_overrides = _prepare_sdpa_regression(ppl_cfg.ppl_config_overrides)
     runner_config = {
         "gpu_count": ppl_cfg.gpu_count,
         "seed": ppl_cfg.seed,
@@ -1118,20 +1158,22 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
         "first_image_path": ppl_cfg.first_image_path,
         "last_image_path": ppl_cfg.last_image_path,
         "input_video_path": ppl_cfg.input_video_path,
-        "ppl_config_overrides": ppl_cfg.ppl_config_overrides,
+        "target_video_length": ppl_cfg.target_video_length,
+        "ppl_config_overrides": ppl_config_overrides,
         "script": ppl_cfg.script,  # Pass script for filename generation
     }
     # Merge ppl_config_overrides into runner_config for height/width access
-    runner_config.update(ppl_cfg.ppl_config_overrides)
+    runner_config.update(ppl_config_overrides)
 
     pipeline = None
     gpu_mem_peak = 0.0
     start = time.time()
+    temp_dir = os.path.join(output_root, "temp", timestamp)
 
     # Phase 1: Model Loading
     try:
         module = _import_example_module(script_path)
-        _patch_ppl_config(module, ppl_cfg.ppl_config_overrides)
+        _patch_ppl_config(module, ppl_config_overrides)
         pipeline = _call_get_pipeline(module, runner_config)
     except Exception as e:
         tb = traceback.format_exc()
@@ -1154,7 +1196,15 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
                 torch.cuda.synchronize()
                 torch.cuda.reset_peak_memory_stats()
 
-            output = _call_run(module, pipeline, runner_config)
+            if ppl_cfg.use_run_with_file:
+                if not callable(getattr(module, "run_with_file", None)):
+                    raise AttributeError(f"{ppl_cfg.script} does not expose run_with_file()")
+                extension = "mp4" if ppl_cfg.output_type == "video" else "png"
+                os.makedirs(temp_dir, exist_ok=True)
+                runner_config["output_path"] = os.path.join(temp_dir, f"output.{extension}")
+                output = _call_run(module, pipeline, runner_config, entrypoint="run_with_file")
+            else:
+                output = _call_run(module, pipeline, runner_config)
 
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
@@ -1185,7 +1235,6 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
         output_fps = ppl_config.get("target_fps", ppl_config.get("fps", 15))
 
         # First save to temp location to get resolution
-        temp_dir = os.path.join(output_root, "temp", timestamp)
         try:
             temp_path, num_frames, resolution = _save_output(output, temp_dir, ppl_cfg.output_type, fps=output_fps)
         except Exception as e:
@@ -1251,8 +1300,119 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
 # =============================================================================
 
 
-def compute_video_metrics(baseline_path: str, current_path: str) -> dict[str, float]:
-    """Compute PSNR and SSIM between two videos using streaming frame comparison."""
+def _probe_audio_stream(path: str) -> dict[str, int | float] | None:
+    """Return first-audio-stream facts without decoding video frames."""
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=sample_rate,channels,duration:format=duration",
+            "-of",
+            "json",
+            path,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    payload = json.loads(result.stdout)
+    streams = payload.get("streams") or []
+    if not streams:
+        return None
+    stream = streams[0]
+    sample_rate = int(stream.get("sample_rate") or 0)
+    channels = int(stream.get("channels") or 0)
+    duration = float(stream.get("duration") or (payload.get("format") or {}).get("duration") or 0.0)
+    if sample_rate <= 0 or channels <= 0 or duration <= 0:
+        raise ValueError(f"Audio stream metadata is incomplete: {path}")
+    return {"sample_rate": sample_rate, "channels": channels, "duration": duration}
+
+
+def _decode_audio(path: str, *, sample_rate: int, channels: int) -> np.ndarray:
+    """Decode the first audio stream to interleaved float32 PCM."""
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            path,
+            "-map",
+            "0:a:0",
+            "-ar",
+            str(sample_rate),
+            "-ac",
+            str(channels),
+            "-f",
+            "f32le",
+            "-acodec",
+            "pcm_f32le",
+            "pipe:1",
+        ],
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+    return np.frombuffer(result.stdout, dtype="<f4")
+
+
+def _compute_audio_metrics(baseline_path: str, current_path: str, *, required: bool) -> dict[str, float]:
+    baseline_info = _probe_audio_stream(baseline_path)
+    current_info = _probe_audio_stream(current_path)
+    if baseline_info is None and current_info is None and not required:
+        return {}
+    if baseline_info is None:
+        raise ValueError("Baseline video has no audio stream")
+    if current_info is None:
+        raise ValueError("Current video has no audio stream")
+
+    for audio_field in ("sample_rate", "channels"):
+        if baseline_info[audio_field] != current_info[audio_field]:
+            raise ValueError(
+                f"Audio {audio_field} mismatch: baseline={baseline_info[audio_field]}, current={current_info[audio_field]}"
+            )
+    duration_delta = abs(float(baseline_info["duration"]) - float(current_info["duration"]))
+    duration_tolerance = max(0.05, 2048 / int(baseline_info["sample_rate"]))
+    if duration_delta > duration_tolerance:
+        raise ValueError(
+            "Audio duration mismatch: "
+            f"baseline={baseline_info['duration']:.6f}s, current={current_info['duration']:.6f}s"
+        )
+
+    decode_kwargs = {
+        "sample_rate": int(baseline_info["sample_rate"]),
+        "channels": int(baseline_info["channels"]),
+    }
+    baseline_audio = _decode_audio(baseline_path, **decode_kwargs)
+    current_audio = _decode_audio(current_path, **decode_kwargs)
+    sample_tolerance = 2048 * decode_kwargs["channels"]
+    if abs(baseline_audio.size - current_audio.size) > sample_tolerance:
+        raise ValueError(f"Audio sample count mismatch: baseline={baseline_audio.size}, current={current_audio.size}")
+    sample_count = min(baseline_audio.size, current_audio.size)
+    if sample_count == 0:
+        raise ValueError("Audio stream decodes to no samples")
+    baseline_audio = baseline_audio[:sample_count].astype(np.float64, copy=False)
+    current_audio = current_audio[:sample_count].astype(np.float64, copy=False)
+    baseline_norm = float(np.linalg.norm(baseline_audio))
+    current_norm = float(np.linalg.norm(current_audio))
+    if baseline_norm == 0.0 or current_norm == 0.0:
+        raise ValueError("Audio stream decodes to silence")
+    cosine = float(np.dot(baseline_audio, current_audio) / (baseline_norm * current_norm))
+    return {"audio_cosine": cosine, "audio_duration_delta": duration_delta}
+
+
+def compute_video_metrics(
+    baseline_path: str,
+    current_path: str,
+    *,
+    require_audio: bool = False,
+) -> dict[str, float]:
+    """Compute video-frame metrics and optional decoded-audio similarity."""
     from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
     from telefuser.utils.video import VideoData
@@ -1284,7 +1444,10 @@ def compute_video_metrics(baseline_path: str, current_path: str) -> dict[str, fl
 
     del video_true, video_test
 
-    return {"psnr": psnr_sum / n, "ssim": ssim_sum / n}
+    metrics = {"psnr": psnr_sum / n, "ssim": ssim_sum / n}
+    if require_audio:
+        metrics.update(_compute_audio_metrics(baseline_path, current_path, required=True))
+    return metrics
 
 
 def compute_image_diff(baseline_path: str, current_path: str) -> float | None:
@@ -1415,14 +1578,32 @@ def compare_against_baseline(
     ssim_min: float,
     pixel_diff_max: float,
     update_baseline: bool = False,
+    *,
+    require_audio: bool = False,
+    audio_cosine_min: float = 0.95,
 ) -> dict:
     """Compare current output against baseline. Returns dict with passed, metrics, message."""
     baseline_path = _get_baseline_path(output_root, script, gpu_count, output_type)
 
     if baseline_path is None:
         if update_baseline and current_path and os.path.exists(current_path):
-            saved = _update_baseline(output_root, current_path)
-            return {"passed": True, "baseline_exists": False, "metrics": {}, "message": f"Saved as baseline: {saved}"}
+            try:
+                if output_type == "video" and require_audio:
+                    _compute_audio_metrics(current_path, current_path, required=True)
+                saved = _update_baseline(output_root, current_path)
+                return {
+                    "passed": True,
+                    "baseline_exists": False,
+                    "metrics": {},
+                    "message": f"Saved as baseline: {saved}",
+                }
+            except Exception as e:
+                return {
+                    "passed": False,
+                    "baseline_exists": False,
+                    "metrics": {},
+                    "message": f"Invalid baseline: {e}",
+                }
         return {
             "passed": False,
             "baseline_exists": False,
@@ -1435,7 +1616,7 @@ def compare_against_baseline(
 
     try:
         if output_type == "video":
-            m = compute_video_metrics(baseline_path, current_path)
+            m = compute_video_metrics(baseline_path, current_path, require_audio=require_audio)
             psnr, ssim = m.get("psnr"), m.get("ssim")
             if not isinstance(psnr, (int, float)) or not isinstance(ssim, (int, float)):
                 return {
@@ -1444,15 +1625,31 @@ def compare_against_baseline(
                     "metrics": m,
                     "message": "Video comparison produced no PSNR/SSIM metrics",
                 }
+            audio_cosine = m.get("audio_cosine")
+            if require_audio and not isinstance(audio_cosine, (int, float)):
+                return {
+                    "passed": False,
+                    "baseline_exists": True,
+                    "metrics": m,
+                    "message": "Required audio comparison produced no cosine metric",
+                }
             passed = True
             msgs = []
             if psnr is not None and psnr < psnr_min:
                 passed = False
                 msgs.append(f"PSNR {psnr:.2f} < {psnr_min}")
+            if audio_cosine is not None and audio_cosine < audio_cosine_min:
+                passed = False
+                msgs.append(f"audio cosine {audio_cosine:.4f} < {audio_cosine_min:.4f}")
             if ssim is not None and ssim < ssim_min:
                 passed = False
                 msgs.append(f"SSIM {ssim:.4f} < {ssim_min}")
-            msg = "; ".join(msgs) if msgs else f"PSNR={psnr:.2f}, SSIM={ssim:.4f}"
+            if msgs:
+                msg = "; ".join(msgs)
+            else:
+                msg = f"PSNR={psnr:.2f}, SSIM={ssim:.4f}"
+                if audio_cosine is not None:
+                    msg += f", audio cosine={audio_cosine:.4f}"
             return {"passed": passed, "baseline_exists": True, "metrics": m, "message": msg}
         else:
             diff = compute_image_diff(baseline_path, current_path)
@@ -1733,6 +1930,8 @@ def run_pipeline(
             ppl_cfg.ssim_min,
             ppl_cfg.pixel_diff_max,
             update_baseline,
+            require_audio=ppl_cfg.require_audio,
+            audio_cosine_min=ppl_cfg.audio_cosine_min,
         )
         result.regression_metrics = cmp.get("metrics", {})
         result.note = cmp["message"]

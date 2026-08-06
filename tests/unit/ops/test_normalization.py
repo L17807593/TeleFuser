@@ -4,7 +4,124 @@ import pytest
 import torch
 import torch.nn as nn
 
-from telefuser.ops.normalization import AdaLayerNormContinuous, LayerNorm, RMSNorm
+from telefuser.ops.normalization import (
+    AdaLayerNormContinuous,
+    LayerNorm,
+    RMSNorm,
+    _fused_add_layer_norm_scale_shift,
+    _fused_layer_norm_scale_shift,
+    indexed_gate,
+    indexed_scale_shift,
+)
+
+
+def test_fused_layer_norm_scale_shift_matches_native() -> None:
+    x = torch.randn(2, 5, 16)
+    scale = torch.randn(2, 1, 16)
+    shift = torch.randn(2, 1, 16)
+
+    output = _fused_layer_norm_scale_shift(x, scale, shift)
+    expected = torch.nn.functional.layer_norm(x, (16,)) * (1 + scale) + shift
+
+    torch.testing.assert_close(output, expected, atol=5e-5, rtol=1e-5)
+
+
+def test_fused_add_layer_norm_scale_shift_matches_native() -> None:
+    residual = torch.randn(2, 5, 16)
+    x = torch.randn_like(residual)
+    scale = torch.randn(2, 1, 16)
+    shift = torch.randn(2, 1, 16)
+
+    output, residual_out = _fused_add_layer_norm_scale_shift(residual, x, scale, shift)
+    expected_residual = residual + x
+    expected = torch.nn.functional.layer_norm(expected_residual, (16,)) * (1 + scale) + shift
+
+    torch.testing.assert_close(residual_out, expected_residual)
+    torch.testing.assert_close(output, expected, atol=5e-5, rtol=1e-5)
+
+
+def test_indexed_scale_shift_matches_native() -> None:
+    x = torch.randn(7, 16)
+    shift = torch.randn(3, 16)
+    scale = torch.randn(3, 16)
+    indices = torch.tensor([0, 2, 1, 0, 1, 2, 2])
+
+    output = indexed_scale_shift(x, shift, scale, indices)
+    expected = x * (1 + scale.index_select(0, indices)) + shift.index_select(0, indices)
+
+    torch.testing.assert_close(output, expected)
+
+
+def test_indexed_gate_matches_native() -> None:
+    x = torch.randn(7, 16)
+    other = torch.randn_like(x)
+    gate = torch.randn(3, 16)
+    indices = torch.tensor([0, 2, 1, 0, 1, 2, 2])
+
+    output = indexed_gate(x, gate, other, indices)
+    expected = x + gate.index_select(0, indices) * other
+
+    torch.testing.assert_close(output, expected)
+
+
+def test_indexed_modulation_validates_tensor_metadata() -> None:
+    x = torch.randn(4, 8)
+    shift = torch.randn(2, 8)
+    scale = torch.randn(2, 8)
+    indices = torch.tensor([0, 1, 0, 1])
+
+    with pytest.raises(ValueError, match="one entry per input row"):
+        indexed_scale_shift(x, shift, scale, indices[:-1])
+    with pytest.raises(TypeError, match="int32 or int64"):
+        indexed_scale_shift(x, shift, scale, indices.float())
+    with pytest.raises(ValueError, match="same number of rows"):
+        indexed_scale_shift(x, shift, torch.randn(3, 8), indices)
+    with pytest.raises(ValueError, match="hidden dimension"):
+        indexed_scale_shift(x, shift, torch.randn(2, 7), indices)
+    with pytest.raises(ValueError, match="per-row tensors"):
+        indexed_gate(x, shift, torch.randn(3, 8), indices)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton kernel")
+def test_indexed_modulation_masks_out_of_range_indices() -> None:
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    indices = torch.tensor([0, -1, 1, 7], device=device)
+    x = torch.randn(4, 128, device=device, dtype=dtype)
+    shift = torch.randn(2, 128, device=device, dtype=dtype)
+    scale = torch.randn(2, 128, device=device, dtype=dtype)
+    gate = torch.randn(2, 128, device=device, dtype=dtype)
+    other = torch.randn_like(x)
+
+    scale_shift_output = indexed_scale_shift(x.clone(), shift, scale, indices)
+    gate_output = indexed_gate(x.clone(), gate, other, indices)
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(scale_shift_output[[1, 3]], x[[1, 3]], atol=0, rtol=0)
+    torch.testing.assert_close(gate_output[[1, 3]], x[[1, 3]], atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton kernel")
+def test_indexed_modulation_supports_row_strided_parameters() -> None:
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    rows, parameter_rows, hidden_size = 7, 3, 128
+    indices = torch.tensor([0, 2, 1, 0, 1, 2, 2], device=device)
+    parameters = torch.randn(parameter_rows, hidden_size * 3, device=device, dtype=dtype)
+    shift, scale, gate = parameters.chunk(3, dim=-1)
+    assert not shift.is_contiguous()
+    assert shift.stride(-1) == scale.stride(-1) == gate.stride(-1) == 1
+
+    x = torch.randn(rows, hidden_size, device=device, dtype=dtype)
+    other = torch.randn_like(x)
+    expected_scale_shift = x * (1 + scale.index_select(0, indices)) + shift.index_select(0, indices)
+    expected_gate = x + gate.index_select(0, indices) * other
+
+    output_scale_shift = indexed_scale_shift(x.clone(), shift, scale, indices)
+    output_gate = indexed_gate(x.clone(), gate, other, indices)
+
+    torch.testing.assert_close(output_scale_shift, expected_scale_shift, atol=0, rtol=0)
+    torch.testing.assert_close(output_gate, expected_gate, atol=0, rtol=0)
 
 
 class TestRMSNorm:

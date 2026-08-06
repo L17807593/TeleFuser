@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Tiny utility to enable vLLM-style FP8 GEMM (W8A8) for arbitrary PyTorch models.
+Tiny utility to enable tf-kernel FP8 GEMM (W8A8) for arbitrary PyTorch models.
 
 What it does
 - Replaces nn.Linear modules with a drop-in module that:
   - quantizes activations dynamically per forward call
   - quantizes weights lazily on first CUDA forward (and caches them)
-  - dispatches GEMM via vLLM's Fp8LinearOp (cutlass/flashinfer/torch._scaled_mm)
+  - dispatches per-token quantization and scaled GEMM through tf-kernel
 
 Notes
 - CUDA-only fast path; CPU (and unsupported cases) automatically fall back to
   the original nn.Linear.
-- Output of vLLM FP8 GEMM is fp16/bf16. If your input is fp32, you can either
+- Output of tf-kernel FP8 GEMM is fp16/bf16. If your input is fp32, you can either
   keep fp32 (fallback) or enable casting to fp16/bf16 for speed.
 """
 
@@ -23,6 +23,11 @@ from typing import Callable, Literal, Optional
 
 import torch
 import torch.nn as nn
+
+try:
+    import tf_kernel
+except ImportError:
+    tf_kernel = None
 
 
 @dataclass(frozen=True)
@@ -54,12 +59,14 @@ class FP8GemmOptions:
 
 
 class FP8Linear(nn.Module):
-    """Drop-in replacement for nn.Linear that uses vLLM FP8 GEMM when possible."""
+    """Drop-in replacement for nn.Linear that uses tf-kernel FP8 GEMM."""
 
     def __init__(self, linear: nn.Linear, *, options: FP8GemmOptions):
         super().__init__()
         if not isinstance(linear, nn.Linear):
             raise TypeError(f"expected nn.Linear, got {type(linear)}")
+        if tf_kernel is None:
+            raise ImportError("tf-kernel is required to enable FP8 GEMM")
 
         if options.fp16_weight_storage not in ("keep", "cpu_offload", "discard"):
             raise ValueError(
@@ -92,22 +99,7 @@ class FP8Linear(nn.Module):
             if linear.bias is not None:
                 self._fp16_bias_cpu = linear.bias.detach().to(device="cpu", dtype=torch.bfloat16).contiguous()
 
-        # vLLM FP8 GEMM plumbing. We avoid reading vLLM global config, so we
-        # force pad_output=False to keep this usable as a standalone utility.
-        from vllm.model_executor.layers.quantization.utils.quant_utils import (
-            GroupShape,
-        )
-        from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-            Fp8LinearOp,
-            maybe_create_device_identity,
-        )
-
-        maybe_create_device_identity()
-        self._fp8_linear_op = Fp8LinearOp(
-            act_quant_static=False,
-            act_quant_group_shape=GroupShape.PER_TOKEN,
-            pad_output=False,
-        )
+        self._tf_kernel = tf_kernel
 
         # Lazy weight cache (per-device). Register these as non-persistent
         # buffers so module.to()/cpu()/cuda() also migrates the FP8 cache.
@@ -118,11 +110,6 @@ class FP8Linear(nn.Module):
         # Track when weights change (best-effort) in "keep" mode.
         # Users can also call invalidate_weight_cache() explicitly after weight updates.
         self._last_weight_version: Optional[int] = None
-
-        # CUDA-only quant ops live here.
-        from vllm import _custom_ops as ops
-
-        self._ops = ops
 
     @classmethod
     def from_linear(cls, linear: nn.Linear, *, options: FP8GemmOptions) -> "FP8Linear":
@@ -207,9 +194,8 @@ class FP8Linear(nn.Module):
             if self._fp8_weight is not None and self._fp8_weight_scale is not None and cache_device == device:
                 return
 
-        # vLLM convention for CUTLASS: quantize original [N, K] weight, then
-        # pass transpose *view* [K, N] into scaled GEMM kernels, which yields
-        # stride(0)==1 as expected by cutlass_scaled_mm.
+        # Quantize each output row, then pass the transposed [K, N] view to the
+        # scaled GEMM kernel.
         if self.linear is not None:
             w_src = self.linear.weight.detach()
         elif self._fp16_weight_cpu is not None:
@@ -223,7 +209,9 @@ class FP8Linear(nn.Module):
 
         w_n_k = w_src.to(device=device, dtype=torch.bfloat16, non_blocking=True).contiguous()
 
-        qweight_n_k, w_scale = self._ops.scaled_fp8_quant(w_n_k, scale=None)
+        qweight_n_k = torch.empty_like(w_n_k, dtype=torch.float8_e4m3fn)
+        w_scale = torch.empty((w_n_k.shape[0], 1), dtype=torch.float32, device=device)
+        self._tf_kernel.tf_per_token_quant_fp8(w_n_k, qweight_n_k, w_scale)
         self._fp8_weight = qweight_n_k.t()
         self._fp8_weight_scale = w_scale
         self._weight_cache_device = self._cached_fp8_device()
@@ -251,7 +239,7 @@ class FP8Linear(nn.Module):
                 "Use fp16_weight_storage='cpu_offload' (or 'keep') for CPU fallback."
             )
 
-        # vLLM fp8 GEMM only supports fp16/bf16 outputs.
+        # tf-kernel FP8 GEMM only supports fp16/bf16 outputs.
         in_dtype = x.dtype
         if in_dtype not in (torch.float16, torch.bfloat16):
             if not self.options.cast_inputs:
@@ -285,14 +273,20 @@ class FP8Linear(nn.Module):
             if bias.dtype != out_dtype:
                 bias = bias.to(dtype=out_dtype)
 
-        y = self._fp8_linear_op.apply(
-            input=x_fp,
-            weight=self._fp8_weight,  # type: ignore[arg-type]
-            weight_scale=self._fp8_weight_scale,  # type: ignore[arg-type]
-            out_dtype=out_dtype,
-            input_scale=None,  # dynamic activation scaling
-            bias=bias,
+        x_shape = x_fp.shape
+        x_2d = x_fp.reshape(-1, x_shape[-1])
+        qinput = torch.empty_like(x_2d, dtype=torch.float8_e4m3fn)
+        input_scale = torch.empty((x_2d.shape[0], 1), dtype=torch.float32, device=x_fp.device)
+        self._tf_kernel.tf_per_token_quant_fp8(x_2d, qinput, input_scale)
+        y = self._tf_kernel.fp8_scaled_mm(
+            qinput,
+            self._fp8_weight,
+            input_scale,
+            self._fp8_weight_scale,
+            out_dtype,
+            bias,
         )
+        y = y.reshape(*x_shape[:-1], y.shape[-1])
 
         if self.options.cast_inputs and self.options.cast_output_back and y.dtype != in_dtype:
             return y.to(in_dtype)

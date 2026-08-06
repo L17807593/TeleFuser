@@ -1,6 +1,8 @@
 # Parallel Inference Guide
 
 This document provides a detailed introduction to TeleFuser's distributed parallel inference architecture, including principles, configuration methods, and usage examples.
+For tensor dataflow, synchronization, transport ownership, and performance invariants, see the
+[Communication Architecture](communication.md).
 
 ## Overview
 
@@ -46,13 +48,18 @@ device_mesh = create_device_mesh_from_config(config)
 ```
 telefuser/distributed/
 ├── device_mesh.py      # DeviceMesh creation and process group management
+├── collectives.py      # Shared contiguous gather and reduction primitives
 ├── pp_comm.py          # Pipeline parallel P2P communication
 ├── ulysses_comm.py     # Ulysses All-to-All communication primitives
 ├── ring.py             # Ring Attention P2P communication
 ├── parallel_shard.py   # Sequence parallel tensor shard/unshard
+├── vae_spatial.py      # Height-sharded VAE halo exchange
 ├── fsdp.py             # FSDP data parallel
 └── tp_parallelize.py   # Tensor parallel utilities
 ```
+
+Model code owns tensor layout and reconstruction semantics, while reusable collective buffer allocation and reduction
+submission stay in `collectives.py`. Strategy-specific protocols remain in their corresponding modules.
 
 ## Sequence Parallelism
 
@@ -158,6 +165,61 @@ out = out_wait()
 ## Pipeline Parallelism (PP)
 
 Split model layers across multiple GPUs for large model inference.
+
+### Cross-worker tensor channels
+
+Independent `ParallelWorker` groups can connect adjacent stages with a `WorkerTensorChannel`. CPU tensors use
+multiprocessing shared memory. CUDA tensors use two bounded producer-owned IPC slots per stable tensor profile; each
+IPC allocation is opened once and then reused. Pool handles and rank-local offsets travel as private
+`WorkerTensorRef` metadata through the existing control path. Reusable interprocess CUDA events order producer
+staging before consumer copies and order the next slot write after every consumer copy. Consumers record completion
+events before publishing generation acknowledgements; the producer waits on those events in its staging stream
+without device-wide synchronization.
+
+```python
+from telefuser.worker import ParallelWorker, WorkerTensorChannel
+
+latent_channel = WorkerTensorChannel(consumer_world_size=vae_parallel_config.world_size)
+denoise_worker = ParallelWorker(
+    denoise_stage,
+    tensor_output_channel=latent_channel,
+    tensor_output_methods=("denoise",),
+)
+vae_worker = ParallelWorker(vae_stage, tensor_input_channels=(latent_channel,))
+```
+
+Channel setup is not automatic. The pipeline that owns the stage topology must create and retain each channel, pass it
+to both `ParallelWorker` endpoints, and close it after the consumer and producer workers stop. Actor or scheduler
+edges carry only `WorkerTensorRef` metadata; cancellable actor flows must release terminal references through the
+consumer worker. See [Communication Architecture](communication.md#cross-stage-worker-and-actor-dataflow) for the
+complete cross-stage wiring and lifecycle contract.
+
+Set `shard_dim` when consumer ranks operate on disjoint tensor slices. The producer stages the tensor once and each
+rank copies only its slice. LingBot's spatial VAE uses `shard_dim=-2`, so aggregate peer-copy traffic stays at one
+logical latent instead of growing with the VAE world size. Including producer-local staging, the device-copy budget is
+two logical latents. At most eight stable CUDA tensor profiles are pooled per channel; additional dynamic profiles
+fall back to PyTorch CUDA IPC instead of growing retained HBM without bound.
+
+This is a point-to-point, single-producer/single-consumer-group path. Enable it only for outputs whose complete
+consumer set is the connected worker group. Calls that need to inspect a tensor in the parent may pass
+`_tensor_transport=False`. Start both workers before submitting work, stop consumers before producers, then close the channel,
+preserve producer order at the consumer, and treat transported tensors as immutable until the consumer finishes.
+Schedulers that cancel a terminal artifact must call the consumer worker's
+`discard_tensor_refs(ref, sync=True)` in producer order. This releases CPU shared memory or CUDA IPC storage without
+materializing the tensor in the parent. A normal receive also discards older cancelled FIFO entries as a fallback.
+
+Regular worker dispatch also sends shared-memory or CUDA IPC handles to each rank and lets the receiving rank perform
+the final device placement. The parent does not allocate a temporary copy on every target GPU.
+
+Use the local SGLang checkout to run the end-to-end latency gate on the same GPUs and tensor shape:
+
+```bash
+python tools/validation/benchmark_tensor_channel_vs_sglang.py
+```
+
+The comparison includes producer staging, metadata transport, target copy, target synchronization, and slot
+acknowledgement for both implementations. Its default 200-sample gate rejects p50 regressions above 5% and p95
+regressions above the larger of 10% or 0.05 ms, accounting for sub-millisecond multiprocessing scheduling jitter.
 
 ### Principle
 
@@ -399,9 +461,8 @@ pool.
 # Device count must equal product of parallel degrees
 world_size = dp * cfg * sp_ring * sp_ulysses * pp * tp
 
-# SP and TP cannot be enabled simultaneously
-if sp_degree > 1 and tp_degree > 1:
-    raise ValueError("SP and TP are mutually exclusive")
+# SP and TP may be combined as independent mesh dimensions.
+# The selected pipeline must implement and validate the requested combination.
 ```
 
 ## Usage Examples

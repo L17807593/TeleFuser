@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -52,6 +54,49 @@ def test_attention_dispatcher_sdpa_preserves_native_attention_result() -> None:
     assert torch.equal(actual, expected)
 
 
+def test_ulysses_submits_all_qkv_collectives_before_waiting() -> None:
+    module = LingBotVideoAttention(hidden_size=8, num_heads=2, norm_eps=1e-6, qkv_bias=True, out_bias=True)
+    module.set_attention_config(AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA))
+    module.set_ulysses_group(object())
+    hidden_states = torch.randn(1, 3, 8)
+    rotary = torch.ones(3, 2, dtype=torch.complex64)
+    events: list[str] = []
+    submit_index = 0
+
+    def submit(tensor: torch.Tensor, group: object):
+        nonlocal submit_index
+        del group
+        name = ("q", "k", "v")[submit_index]
+        submit_index += 1
+        events.append(f"submit-{name}")
+
+        def wait() -> torch.Tensor:
+            events.append(f"wait-{name}")
+            return tensor
+
+        return wait
+
+    def gather(tensor: torch.Tensor, group: object, *, num_heads: int):
+        del group, num_heads
+        events.append("submit-output")
+
+        def wait() -> torch.Tensor:
+            events.append("wait-output")
+            return tensor
+
+        return wait
+
+    with (
+        patch("telefuser.models.lingbot_video_dit.dist.is_initialized", return_value=True),
+        patch("telefuser.models.lingbot_video_dit.dist.get_world_size", return_value=2),
+        patch("telefuser.models.lingbot_video_dit.ulysses_scatter_heads", side_effect=submit),
+        patch("telefuser.models.lingbot_video_dit.ulysses_gather_heads", side_effect=gather),
+    ):
+        module(hidden_states, rotary)
+
+    assert events == ["submit-q", "submit-k", "submit-v", "wait-q", "wait-k", "wait-v", "submit-output", "wait-output"]
+
+
 def test_transformer_rejects_non_patch_aligned_latent_geometry() -> None:
     model = LingBotVideoTransformer3DModel(
         in_channels=16,
@@ -97,7 +142,7 @@ def test_transformer_packed_batch_matches_independent_samples_with_different_tex
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
 
-def test_transformer_rejects_packed_batch_with_non_sdpa_attention() -> None:
+def test_transformer_rejects_packed_batch_with_unsupported_attention() -> None:
     model = LingBotVideoTransformer3DModel(
         in_channels=2,
         out_channels=2,
@@ -111,7 +156,7 @@ def test_transformer_rejects_packed_batch_with_non_sdpa_attention() -> None:
     ).eval()
     model.set_attention_config(AttentionConfig.dense_attention(AttnImplType.FLASH_ATTN_2))
 
-    with pytest.raises(ValueError, match="packed sequence attention currently requires TORCH_SDPA"):
+    with pytest.raises(ValueError, match="packed sequence attention requires TORCH_SDPA or FLASH_ATTN_4"):
         model(
             torch.randn(2, 2, 1, 2, 2),
             torch.tensor([700.0, 300.0]),

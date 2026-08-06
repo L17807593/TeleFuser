@@ -11,8 +11,8 @@
 注意力内核，支持 SM80、SM90 和 SM100 GPU 架构。
 
 > [!IMPORTANT]
-> 目前没有发布 tf-kernel 预编译包。请使用本目录的 Makefile 从源码构建和安装扩展。项目会主动拒绝
-> `pip install .` 和 `pip install -e .` 直接源码构建。
+> 项目不向公共包索引发布 tf-kernel 预编译 wheel 或源码分发包。请使用本目录的 Makefile 从源码构建和
+> 安装扩展。项目会主动拒绝 `pip install .` 和 `pip install -e .` 直接源码构建。
 
 ## 环境要求
 
@@ -49,6 +49,31 @@ make build-auto PYTHON=/path/to/venv/bin/python
 ```bash
 make build-sm90 PYTHON=/path/to/venv/bin/python
 ```
+
+## 分发已构建的 wheel
+
+源码 commit、tf-kernel 版本、PyTorch 版本、PyTorch CUDA 版本、C++11 ABI、目标 SM 架构族、CPU 架构和
+Linux/GLIBC 基线兼容时，可以将本地构建的 wheel 复制到其他主机，或保存到受控的制品库。wheel 导入时
+会校验能够在运行时检查的兼容性信息。
+
+SM80、SM90 和 SM100 的指定架构构建目前会生成相同的文件名。必须使用不同的制品路径隔离，并安装
+明确选定的文件；不要通过同一个 simple package index 暴露多个目标 SM 变体，因为 pip 无法根据 GPU
+架构选择 wheel。例如：
+
+```text
+tf-kernel/0.1.0/torch2.11.0-cu128/linux-x86_64/sm90/
+```
+
+分发前应运行 `make test-wheel`、`make test-smoke`，并将 `sha256sum dist/*.whl`、源码 commit 和测试结果
+与制品一起保存。在已经安装匹配 PyTorch build 的环境中安装选定制品：
+
+```bash
+python -m pip install /path/to/tf_kernel-*.whl --no-deps
+python -m pip check
+```
+
+不要手工把本地 `linux_*` wheel 改标为 `manylinux`；应在预期部署基线环境上重新构建。完整制品清单和
+目标主机验证流程见安装指南。
 
 ## 并行编译
 
@@ -108,5 +133,5 @@ make docs PYTHON=/path/to/venv/bin/python
 GPU 测试会先把 wheel 安装到隔离的临时目录，再开始收集用例，避免误从源码目录或其他环境导入
 `tf_kernel`。
 
-开发和未来发布流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。兼容性、API 示例和常见问题见
+开发和 wheel 分发策略见 [CONTRIBUTING.md](CONTRIBUTING.md)。兼容性、API 示例和常见问题见
 [完整安装与使用指南](../docs/zh/tf_kernel.md)。

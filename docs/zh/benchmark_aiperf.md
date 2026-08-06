@@ -56,10 +56,18 @@ curl --noproxy '*' --fail --silent --show-error \
 bash benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh
 ```
 
-请求媒体时长为 59.75 秒，但 AIPerf active window 配置为 240 秒，因此命令通常约 4 分钟完成，不要在模型
-停止生成后提前中断。成功输出为 `Stream profile sessions: 1/1 succeeded`，报告写入
-`artifacts/telefuser_aiperf/stream_lingbot_v2_1min/`。模型文件布局、手动选择 Python 环境、历史服务和故障
-排查见上面的 canonical README。
+请求媒体时长为 59.75 秒。240 秒 active window 是超时上限；成功运行会在 target 发出完成状态后退出，
+从准入起通常约 66 秒。成功输出为 `Stream profile sessions: 1/1 succeeded`，报告写入
+`artifacts/telefuser_aiperf/stream_lingbot_v2_1min/`。
+
+使用相同四卡 workload 测试 SGLang 时，先启动服务，再选择 SGLang 配置：
+
+```bash
+bash benchmarks/telefuser_aiperf/scripts/run_sglang_lingbot_world_v2_4gpu.sh
+
+bash benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh \
+  benchmarks/telefuser_aiperf/configs/stream_sglang_lingbot_world_v2_4gpu_1min.json
+```
 
 ## 职责与指标语义
 
@@ -68,6 +76,7 @@ bash benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh
 | TeleFuser runtime | TeleFuser | 输出同步的 phase、chunk、runtime、cache 和环境原始事实 |
 | Batch target adapter | AIPerf | 将 `/v1/videos` HTTP 事件转为标准 request 时间线 |
 | LiveKit 源码 adapter | TeleFuser | 将 room、track、status、metrics 和 control 事件转为 session result |
+| SGLang 源码 adapter | TeleFuser | 将 MessagePack frame、chunk timing 和 camera event 转为 session result |
 | 聚合与历史 | AIPerf | 负责 warmup、percentile、throughput、artifact、GreptimeDB 和展示 |
 | Contract 与 workload | TeleFuser | 固定 target 能力、输入、设置和可复现启动命令 |
 
@@ -88,34 +97,55 @@ Target 原始事实遵守以下规则：
 客户端交付、target pipeline residence、target phase time 和资源利用率保持为不同维度。无法等价的字段保留为
 private 或 unavailable，不强行映射为同一指标。
 
-## LingBot-World v2 一分钟回放实测
+## 四卡 H100 LingBot-World v2 验证
 
-2026-07-28 使用 4 张 H100 80 GB 验证了 `stream_lingbot_world_v2_1min.json`：DiT 为 BF16，VAE 为 FP32，
-启用 SageAttention SM90 和 `torch.compile`，禁用 FSDP，`chunk_size=4`，输出 16 FPS。60 秒请求按完整 latent
-chunk 截断为 60 个 chunk、957 帧，对应 59.75 秒媒体时长。LingBot-World v2 使用固定
-`local_attn_size=18`、`sink_size=6` 窗口，因此 240 latent frame 的请求仍只分配 27,144 token KV 容量，
-不会改为时长规模的全局 KV cache。
+以下两次运行均使用 4 张 H100 80 GB、BF16 DiT、FP32 VAE、FlashAttention-4，关闭 FSDP 和
+`torch.compile`，设置 `chunk_size=4` 并输出 16 FPS。两次运行的 workload 和代码版本不同，不能将结果
+解释为优化前后的性能对比。
+
+### 当前 77 帧实时计算门禁
+
+2026-08-03 使用 PyTorch 2.11.0+cu128，通过 direct LingBot pipeline-service 路径验证了 commit
+`540b579`。请求使用 832x480、77 帧，共生成 5 个、每个包含 4 个 latent frame 的 chunk。
 
 | 指标 | 结果 |
 |---|---:|
-| 成功 session | 1 / 1 |
-| Target chunk / 生成帧 | 60 / 957 |
-| 客户端收到帧数 | 947 |
-| Target 稳态 chunk / 帧 | 59 / 944 |
-| 配置的 session runtime | 242.255 s |
-| 首帧延迟 | 6,252.773 ms |
-| 客户端交付速率（`stream_fps`） | 9.397 FPS |
-| 稳态 chunk 加权计算速率 | 4.708 FPS |
-| Chunk pipeline residence mean / p99 | 3.399 / 3.901 s |
+| 生成帧数 / target chunk | 77 / 5 |
+| 排除 chunk 0 后的 steady chunk | 4 |
+| Steady compute FPS | **17.1399** |
+| Chunk compute mean / p50 / p90 / max | 0.9335 / 0.9409 / 0.9410 / 1.0058 秒 |
+| 从计时 session 开始到首个生成帧 | 3.2182 秒 |
 
-Target 实际生成了全部 957 帧，LiveKit 客户端收到 947 帧。AIPerf 在 target 稳态计算聚合中排除了首个
-chunk，剩余 59 个 chunk 共生成 944 帧。242 秒 session runtime 是 240 秒 active window 上限加连接开销，
-不是 59.75 秒媒体内容的模型生成耗时。
+该运行通过了平均 target-side 16 FPS 计算门禁，但不表示每个 chunk 都低于一秒：最大值为 1.0058 秒。
+设备同步后的 compute 区间包含 condition handling、DiT、clean-KV update、空间 VAE decode、GPU-to-CPU
+传输和 frame conversion；不包含模型加载、runtime creation、LiveKit pacing/encoding、网络交付和客户端渲染。
 
-Chunk pipeline residence 从 actor 准入计到输出，包含相互重叠的 encode、DiT、decode 工作，所以可以大于相邻
-交付间隔；报告中的 4.708 稳态 chunk 加权计算 FPS 不能当作客户端推流吞吐。本次 Git 安装的 AIPerf
-运行退出码为 0。回放报告位于
-`artifacts/telefuser_aiperf/stream_lingbot_v2_1min/20260728_083948_fc4344ba/stream_report.html`。
+复现命令见 [LingBot 示例文档](https://github.com/Tele-AI/TeleFuser/tree/main/examples/lingbot#validated-four-h100-real-time-gate)，
+使用 `tools/validation/benchmark_lingbot_world_v2_direct.py`。
+
+### 当前一分钟流式回放
+
+2026-08-03 在 TeleFuser commit `284996dd616cfd44a55523687b7f2a63a281abb9` 上重新运行了一分钟 workload，
+用于验证当前通信优化版本的持续 target 生成、固定 KV cache 容量和带 pacing 的 LiveKit 交付路径。
+
+运行使用 `stream_lingbot_world_v2_1min.json` workload，以及 commit
+`e977ffbb1648510acec431b2a3fbd1a0f7bb8a35` 对应的 AIPerf 0.11.0。60 秒请求按完整 latent chunk 截断为
+60 个 chunk、957 帧，对应 59.75 秒媒体时长。使用 `local_attn_size=18` 和 `sink_size=6` 时，240 个
+latent frame 的 session 报告固定 KV 容量为 28,080 token。
+
+| 指标 | 结果 |
+|---|---:|
+| Target 生成帧数 / chunk | 957 / 60 |
+| 排除 chunk 0 后的 steady 帧数 / chunk | 944 / 59 |
+| Steady target compute 时间 / FPS | 58.2791 秒 / **16.1979** |
+| Chunk compute mean / p50 / p90 / p99 / max | 0.9878 / 0.9593 / 1.0624 / 1.0932 / 1.1149 秒 |
+| LiveKit stream FPS / 客户端帧数 | 13.1967 / 803 |
+| 客户端首帧 / session runtime | 6.0682 / 66.8948 秒 |
+| Runtime creation | 1.4176 秒 |
+| Artifact | `20260803_095518_62ec043c` |
+
+Target 完成全部 60 个 chunk，平均 compute 通过 16 FPS 门禁，但并非每个 chunk 都低于一秒：p99 为
+1.0932 秒，最大值为 1.1149 秒。客户端帧数较低属于带 pacing 的交付测量，不能与 target 生成完整性混为一谈。
 
 ## 复现要求
 

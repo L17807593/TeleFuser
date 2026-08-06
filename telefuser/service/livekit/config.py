@@ -25,6 +25,10 @@ class LiveKitServeConfig(BaseSettings):
     livekit_api_secret: str = Field(default="", description="LiveKit API secret")
 
     num_workers: int = Field(default=1, ge=1, le=64, description="Number of TeleFuser LiveKit workers")
+    max_sessions_per_worker: int | Literal["auto"] = Field(
+        default="auto",
+        description="Hardware-calculated retained sessions, optionally capped by an integer",
+    )
     worker_gpu_map: str | None = Field(
         default=None,
         description="Semicolon-separated worker GPU groups, for example '0,1;2,3'",
@@ -35,6 +39,11 @@ class LiveKitServeConfig(BaseSettings):
     )
 
     queue_size: int = Field(default=0, ge=0, le=10000, description="Maximum queued sessions")
+    control_idle_timeout: float = Field(
+        default=10.0,
+        gt=0,
+        description="Seconds without control activity before a LingBot execution lease may yield",
+    )
     session_timeout: int = Field(default=1800, ge=1, description="Maximum session lifetime in seconds")
     token_ttl: int = Field(default=3600, ge=1, description="LiveKit token TTL in seconds")
     controller_timeout: int = Field(
@@ -64,6 +73,26 @@ class LiveKitServeConfig(BaseSettings):
             return None
         stripped = value.strip()
         return stripped or None
+
+    @field_validator("max_sessions_per_worker", mode="before")
+    @classmethod
+    def validate_max_sessions_per_worker(cls: type[LiveKitServeConfig], value: object) -> int | str:
+        """Accept ``auto`` or a positive integer capacity ceiling."""
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized == "auto":
+                return normalized
+            try:
+                value = int(normalized)
+            except ValueError as exc:
+                raise ValueError("max_sessions_per_worker must be 'auto' or an integer") from exc
+        if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 64:
+            raise ValueError("max_sessions_per_worker must be 'auto' or an integer in [1, 64]")
+        return value
+
+    def session_capacity_limit(self) -> int | None:
+        """Return the operator ceiling, or ``None`` for hardware auto-sizing."""
+        return self.max_sessions_per_worker if isinstance(self.max_sessions_per_worker, int) else None
 
     def require_livekit_credentials(self) -> None:
         """Raise when the minimum LiveKit connection settings are missing."""

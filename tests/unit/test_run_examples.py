@@ -115,6 +115,31 @@ def test_save_output_writes_tensor_video(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert saved_frames[0].dtype == np.uint8
 
 
+def test_save_output_accepts_file_entrypoint_artifact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    artifact = tmp_path / "joint-audio-video.mp4"
+    artifact.write_bytes(b"artifact")
+
+    class FakeVideoData:
+        width = 1360
+        height = 768
+
+        def __init__(self, video_file: str) -> None:
+            assert video_file == str(artifact)
+
+        def __len__(self) -> int:
+            return 121
+
+    from telefuser.utils import video as video_utils
+
+    monkeypatch.setattr(video_utils, "VideoData", FakeVideoData)
+
+    path, frames, resolution = run_examples._save_output({"output_path": str(artifact)}, str(tmp_path), "video")
+
+    assert path == str(artifact)
+    assert frames == 121
+    assert resolution == "1360x768"
+
+
 def test_call_get_pipeline_forwards_matching_config_overrides() -> None:
     module = ModuleType("pipeline_config_example")
 
@@ -129,6 +154,17 @@ def test_call_get_pipeline_forwards_matching_config_overrides() -> None:
     ) == (4, "sorted", True)
 
 
+def test_prepare_sdpa_regression_forces_sdpa_and_disables_xformers(monkeypatch: pytest.MonkeyPatch) -> None:
+    from diffusers.utils import import_utils
+
+    monkeypatch.setattr(import_utils, "_xformers_available", True)
+
+    overrides = run_examples._prepare_sdpa_regression({"attn_impl": "FLASH_ATTN_4", "compile": True})
+
+    assert overrides == {"attn_impl": "TORCH_SDPA", "compile": True}
+    assert not import_utils._xformers_available
+
+
 def test_call_run_preserves_missing_negative_prompt_default() -> None:
     module = ModuleType("negative_prompt_example")
 
@@ -141,6 +177,24 @@ def test_call_run_preserves_missing_negative_prompt_default() -> None:
     module.run = run
 
     assert run_examples._call_run(module, object(), {"target_video_length": 2}) == (None, 2)
+
+
+def test_call_run_supports_standard_file_entrypoint() -> None:
+    module = ModuleType("file_example")
+
+    def run_with_file(pipeline: object, output_path: str, target_video_length: float) -> dict[str, str]:
+        del pipeline
+        assert target_video_length == 5
+        return {"output_path": output_path}
+
+    module.run_with_file = run_with_file
+
+    assert run_examples._call_run(
+        module,
+        object(),
+        {"output_path": "/tmp/result.mp4", "target_video_length": 5},
+        entrypoint="run_with_file",
+    ) == {"output_path": "/tmp/result.mp4"}
 
 
 def test_video_metrics_rejects_mismatched_frame_counts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -193,7 +247,7 @@ def test_video_comparison_rejects_missing_metrics(
     baseline.write_bytes(b"baseline")
     current.write_bytes(b"current")
     monkeypatch.setattr(run_examples, "_get_baseline_path", lambda *_args: str(baseline))
-    monkeypatch.setattr(run_examples, "compute_video_metrics", lambda *_args: metrics)
+    monkeypatch.setattr(run_examples, "compute_video_metrics", lambda *_args, **_kwargs: metrics)
 
     result = run_examples.compare_against_baseline(
         str(tmp_path), "wan/example.py", 1, str(current), "video", 25.0, 0.85, 0.02
@@ -203,6 +257,71 @@ def test_video_comparison_rejects_missing_metrics(
     assert result["message"] == "Video comparison produced no PSNR/SSIM metrics"
 
 
+def test_required_audio_metrics_compare_stream_contract_and_waveform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream_info = {"sample_rate": 32_000, "channels": 2, "duration": 5.0}
+    waveforms = {
+        "baseline.mp4": np.array([0.5, -0.25, 0.1, -0.2], dtype=np.float32),
+        "current.mp4": np.array([0.49, -0.24, 0.11, -0.19], dtype=np.float32),
+    }
+    monkeypatch.setattr(run_examples, "_probe_audio_stream", lambda _path: stream_info)
+    monkeypatch.setattr(
+        run_examples,
+        "_decode_audio",
+        lambda path, **_kwargs: waveforms[path],
+    )
+
+    metrics = run_examples._compute_audio_metrics("baseline.mp4", "current.mp4", required=True)
+
+    assert metrics["audio_cosine"] > 0.99
+    assert metrics["audio_duration_delta"] == 0.0
+
+
+def test_required_audio_metrics_reject_missing_current_track(monkeypatch: pytest.MonkeyPatch) -> None:
+    baseline_info = {"sample_rate": 32_000, "channels": 2, "duration": 5.0}
+    monkeypatch.setattr(
+        run_examples,
+        "_probe_audio_stream",
+        lambda path: baseline_info if path == "baseline.mp4" else None,
+    )
+
+    with pytest.raises(ValueError, match="Current video has no audio stream"):
+        run_examples._compute_audio_metrics("baseline.mp4", "current.mp4", required=True)
+
+
+def test_video_comparison_enforces_required_audio_cosine(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    baseline = tmp_path / "baseline.mp4"
+    current = tmp_path / "current.mp4"
+    baseline.write_bytes(b"baseline")
+    current.write_bytes(b"current")
+    monkeypatch.setattr(run_examples, "_get_baseline_path", lambda *_args: str(baseline))
+    monkeypatch.setattr(
+        run_examples,
+        "compute_video_metrics",
+        lambda *_args, **_kwargs: {"psnr": 30.0, "ssim": 0.95, "audio_cosine": 0.5},
+    )
+
+    result = run_examples.compare_against_baseline(
+        str(tmp_path),
+        "minimax_h3/example.py",
+        4,
+        str(current),
+        "video",
+        25.0,
+        0.85,
+        0.02,
+        require_audio=True,
+        audio_cosine_min=0.95,
+    )
+
+    assert not result["passed"]
+    assert "audio cosine 0.5000 < 0.9500" in result["message"]
+
+
 def test_video_comparison_rejects_unavailable_dependencies(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     baseline = tmp_path / "baseline.mp4"
     current = tmp_path / "current.mp4"
@@ -210,7 +329,7 @@ def test_video_comparison_rejects_unavailable_dependencies(monkeypatch: pytest.M
     current.write_bytes(b"current")
     monkeypatch.setattr(run_examples, "_get_baseline_path", lambda *_args: str(baseline))
 
-    def raise_missing_dependency(*_args: object) -> dict[str, float]:
+    def raise_missing_dependency(*_args: object, **_kwargs: object) -> dict[str, float]:
         raise ModuleNotFoundError("skimage")
 
     monkeypatch.setattr(run_examples, "compute_video_metrics", raise_missing_dependency)

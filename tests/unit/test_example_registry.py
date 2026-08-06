@@ -14,6 +14,8 @@ SERVICE_PARITY_EXAMPLES = {
     "wan_video/wan22_14b_image_to_video_distill_h100.py",
     "lingbot_video/lingbot_video_dense_1_3b.py",
     "lingbot_video/lingbot_video_moe_30b.py",
+    "minimax_h3/minimax_h3_fl2va_h100.py",
+    "minimax_h3/minimax_h3_ref2va_h100.py",
 }
 
 
@@ -50,6 +52,21 @@ def test_example_regression_registry_has_runnable_entrypoints() -> None:
         symbols = _module_symbols(script_path)
         assert "get_pipeline" in symbols, f"{name} is missing get_pipeline()"
         assert "run" in symbols, f"{name} is missing run()"
+        if pipeline.use_run_with_file:
+            assert "run_with_file" in symbols, f"{name} is missing configured run_with_file()"
+
+
+def test_minimax_h3_four_gpu_regression_contract() -> None:
+    pipeline = load_config().pipelines["minimax_h3_t2va_4gpu"]
+
+    assert pipeline.script == "minimax_h3/minimax_h3_fl2va_h100.py"
+    assert pipeline.gpu_count == 4
+    assert pipeline.seed == 0
+    assert pipeline.resolution == "768p"
+    assert pipeline.target_video_length == 5
+    assert pipeline.use_run_with_file is True
+    assert pipeline.require_audio is True
+    assert pipeline.ppl_config_overrides["num_inference_steps"] == 50
 
 
 def test_all_declared_service_examples_have_cpu_parity_coverage() -> None:

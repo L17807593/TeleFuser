@@ -1,8 +1,15 @@
+---
+title: TeleFuser 世界模型与多模态生成流式推理框架
+description: >-
+  TeleFuser 是开源的世界模型与多模态生成流式推理和服务框架，支持实时视频生成、有状态会话、
+  多 GPU 分布式推理及 WebRTC 交互。
+---
+
 <section class="tf-hero" markdown>
 
 # TeleFuser
 
-一个面向世界模型推理和多模态生成的**高性能运行时**，覆盖长时运行流水线、分布式执行和生产服务接口。
+一个面向实时世界模型和多模态生成的开源**流式推理与服务框架**，覆盖连续流水线、多 GPU 分布式执行和生产服务接口。
 
 <div class="tf-badge-row" markdown>
 <span class="tf-badge">PyTorch 2.6+</span>
@@ -18,7 +25,7 @@
 
 <div class="feature-grid" markdown>
 <div class="feature-card" markdown>
-**世界模型运行时**
+**[世界模型运行时](world_model_streaming_inference.md)**
 
 连续执行、有状态会话和双向控制循环。
 </div>
@@ -65,6 +72,7 @@ AdaTaylorCache 和运行时缓存控制，面向重复生成工作负载。
 | WanVideo (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | 视频生成和编辑 |
 | HunyuanVideo | T2V, I2V | 视频生成 |
 | LTX Video | I2V + Audio | 视频生成 + 音频 |
+| MiniMax H3 | T2VA, FL2VA, Ref2VA + Audio | 本地 768p 音视频联合生成 |
 | FlashVSR | VSR | 视频超分辨率 |
 | LiveAct | S2V | 语音转视频 |
 | LongCat-Video | T2V, I2V | 长视频生成 |
@@ -98,12 +106,13 @@ telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.p
 
 <div class="tf-link-grid">
 <a href="service/"><strong>服务指南</strong><span>批量服务、任务 API 和 SDK。</span></a>
-<a href="stream_server/"><strong>流式服务</strong><span>LiveKit session、媒体、data topic 和双向控制。</span></a>
+<a href="stream_server/"><strong>流式服务</strong><span>LiveKit session、常驻容量、LingBot 时分复用和双向控制。</span></a>
 <a href="stream_scheduler/"><strong>流式调度器</strong><span>Actor 所有权、有界数据流、生命周期、指标和 GPU 卡位。</span></a>
 <a href="benchmark_aiperf/"><strong>AIPerf 基准测试</strong><span>Batch 视频与 LingBot LiveKit 测试流程。</span></a>
 <a href="configuration/"><strong>配置</strong><span>运行时、注意力、量化和卸载配置。</span></a>
 <a href="tf_kernel/"><strong>TF-Kernel</strong><span>安装、编译、验证和使用可选 CUDA 扩展。</span></a>
 <a href="parallel/"><strong>并行推理</strong><span>分布式处理策略。</span></a>
+<a href="communication/"><strong>通信架构</strong><span>NCCL collective、CUDA IPC、顺序与效率设计。</span></a>
 <a href="adding_new_model/"><strong>新增模型</strong><span>集成新的模型架构和阶段。</span></a>
 <a href="profiler/"><strong>性能分析</strong><span>性能分析工具。</span></a>
 </div>

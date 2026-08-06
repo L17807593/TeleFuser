@@ -5,7 +5,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -13,7 +13,14 @@ import numpy as np
 import torch
 from PIL import Image
 
+from telefuser.cache.session_memory import (
+    SessionCapacityPlan,
+    SessionMemoryBudget,
+    calculate_session_capacity,
+    capture_device_memory_snapshot,
+)
 from telefuser.core.base_pipeline import BasePipeline
+from telefuser.core.base_stage import BaseStage
 from telefuser.core.config import ModelRuntimeConfig, ParallelConfig
 from telefuser.core.module_manager import ModuleManager
 from telefuser.models.lingbot_world_fast_dit import LingBotWorldFastDiT
@@ -21,6 +28,7 @@ from telefuser.models.t5_tokenizer import HuggingfaceTokenizer
 from telefuser.utils.logging import logger
 from telefuser.utils.profiler import ProfilingContext4Debug
 from telefuser.worker.parallel_worker import ParallelWorker
+from telefuser.worker.tensor_channel import WorkerTensorChannel
 
 from .control import (
     LingBotWorldFastControlBuilder,
@@ -46,6 +54,66 @@ if TYPE_CHECKING:
 def _default_vae_stage_runtime_config() -> ModelRuntimeConfig:
     """Create an independent default runtime configuration for one VAE stage."""
     return ModelRuntimeConfig(torch_dtype=torch.float32, parallel_config=ParallelConfig(device_ids=[0]))
+
+
+class _CoLocatedVAEDecodeWorker:
+    """Map VAE decode calls onto a denoising ParallelWorker."""
+
+    uses_local_latent_handoff = True
+
+    def __init__(self, worker: ParallelWorker) -> None:
+        self._worker = worker
+        self.name = f"Co-located VAE decode on {worker.name}"
+        self._output_buffers: dict[int, torch.Tensor] = {}
+
+    def reset_device_memory_peak(self) -> bool:
+        return self._worker.reset_vae_decode_device_memory_peak(sync=True)
+
+    def device_memory_snapshots(self) -> list[dict[str, int | str]]:
+        return self._worker.vae_decode_device_memory_snapshots(sync=True)
+
+    def estimate_session_cache_bytes(self) -> int:
+        return self._worker.estimate_vae_decode_session_cache_bytes(sync=True)
+
+    def observed_session_cache_bytes(self) -> int:
+        return self._worker.observed_vae_decode_session_cache_bytes(sync=True)
+
+    def configure_cache_pool(self, capacity: int) -> object:
+        return self._worker.configure_vae_decode_cache_pool(capacity, sync=True)
+
+    def initialize_cache(self, cache_handle: int, *, sync: bool = False) -> object:
+        self._output_buffers.pop(cache_handle, None)
+        return self._worker.initialize_vae_decode_cache(cache_handle, sync=sync)
+
+    def decode_chunk(self, cache_handle: int, *args: object, **kwargs: object) -> object:
+        result = self._worker.decode_chunk(cache_handle, *args, **kwargs)
+
+        def resolve(value: object) -> object:
+            output, profile = value if isinstance(value, tuple) else (value, None)
+            if output is None or isinstance(output, torch.Tensor) and not output.numel():
+                output = self._output_buffers.get(cache_handle)
+                if output is None:
+                    raise RuntimeError(f"Co-located VAE output buffer {cache_handle} was not registered")
+            elif isinstance(output, torch.Tensor):
+                self._output_buffers[cache_handle] = output
+            else:
+                raise TypeError(f"Co-located VAE decode returned {type(output).__name__}, expected Tensor")
+            return (output, profile) if isinstance(value, tuple) else output
+
+        return (lambda: resolve(result())) if callable(result) else resolve(result)
+
+    def release_cache(self, cache_handle: int, *, sync: bool = False) -> object:
+        result = self._worker.release_vae_decode_cache(cache_handle, sync=sync)
+        if callable(result):
+
+            def wait() -> object:
+                released = result()
+                self._output_buffers.pop(cache_handle, None)
+                return released
+
+            return wait
+        self._output_buffers.pop(cache_handle, None)
+        return result
 
 
 @dataclass
@@ -74,11 +142,146 @@ class LingBotWorldFastPipeline(BasePipeline):
         self.width_division_factor = 16
         self._next_cache_handle = 0
         self._cache_handle_lock = threading.Lock()
+        self._observed_parent_prompt_bytes = 0
         self._streaming_runtime: LingBotWorldFastStreamingRuntime | None = None
         self._streaming_runtime_lock = threading.Lock()
 
     def _get_stages(self) -> list:
         return [self.denoise_stage] if hasattr(self, "denoise_stage") else []
+
+    @staticmethod
+    def _call_stage(stage: BaseStage | ParallelWorker, method: str, *args: object) -> object:
+        callback = getattr(stage, method)
+        if isinstance(stage, ParallelWorker):
+            return callback(*args, sync=True)
+        return callback(*args)
+
+    def reset_stage_memory_peaks(self) -> None:
+        """Reset peaks inside every process that owns a pipeline CUDA context."""
+        stages = (
+            getattr(self, "denoise_stage", None),
+            getattr(self, "vae_encode_worker", None),
+            getattr(self, "vae_decode_worker", None),
+        )
+        for stage in stages:
+            if stage is not None:
+                self._call_stage(stage, "reset_device_memory_peak")
+        if torch.cuda.is_available():
+            parent_devices = {torch.device(self.device), getattr(self, "text_device", torch.device(self.device))}
+            for device in parent_devices:
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+                    torch.cuda.reset_peak_memory_stats(device)
+
+    def stage_memory_snapshots(self) -> list[dict[str, int | str]]:
+        """Collect allocator facts from the actual CUDA stage processes."""
+        snapshots: list[dict[str, int | str]] = []
+        stages = (
+            ("denoise", getattr(self, "denoise_stage", None)),
+            ("vae_encode", getattr(self, "vae_encode_worker", None)),
+            ("vae_decode", getattr(self, "vae_decode_worker", None)),
+        )
+        for role, stage in stages:
+            if stage is None:
+                continue
+            stage_snapshots = self._call_stage(stage, "device_memory_snapshots")
+            for snapshot in stage_snapshots:
+                snapshots.append({**snapshot, "role": role})
+        if torch.cuda.is_available():
+            session_device = torch.device(self.device)
+            parent_devices = {session_device, getattr(self, "text_device", session_device)}
+            for device in parent_devices:
+                if device.type == "cuda":
+                    role = "pipeline_session" if device == session_device else "pipeline"
+                    snapshots.append({**asdict(capture_device_memory_snapshot(device)), "role": role})
+
+        unique: dict[tuple[int, int], dict[str, int | str]] = {}
+        for snapshot in snapshots:
+            key = (int(snapshot["device_index"]), int(snapshot["process_id"]))
+            current = unique.get(key)
+            if current is None or current.get("role") != "denoise":
+                unique[key] = snapshot
+        return list(unique.values())
+
+    def configure_session_cache_pool(
+        self,
+        *,
+        configured_limit: int | None,
+        kv_size: int,
+        max_sequence_length: int,
+    ) -> dict[str, object]:
+        """Compute retained-session capacity and allocate fixed DiT cache slots."""
+        persistent_bytes = int(
+            self._call_stage(
+                self.denoise_stage,
+                "estimate_session_cache_bytes",
+                1,
+                kv_size,
+                max_sequence_length,
+            )
+        )
+        snapshots = self.stage_memory_snapshots()
+        persistent_bytes_by_role = {
+            "pipeline_session": int(getattr(self, "_observed_parent_prompt_bytes", 0)),
+            "vae_encode": int(self._call_stage(self.vae_encode_worker, "estimate_session_cache_bytes")),
+            "vae_decode": int(self._call_stage(self.vae_decode_worker, "estimate_session_cache_bytes")),
+        }
+        observed_vae_cache_bytes = {
+            "vae_encode": int(self._call_stage(self.vae_encode_worker, "observed_session_cache_bytes")),
+            "vae_decode": int(self._call_stage(self.vae_decode_worker, "observed_session_cache_bytes")),
+        }
+        role_budgets = {
+            "denoise": SessionMemoryBudget(
+                persistent_bytes_per_session=persistent_bytes,
+                replaced_warmup_transient_bytes=persistent_bytes,
+            ),
+            "pipeline_session": SessionMemoryBudget(
+                persistent_bytes_per_session=persistent_bytes_by_role["pipeline_session"],
+                replaced_warmup_transient_bytes=persistent_bytes_by_role["pipeline_session"],
+            ),
+            "vae_encode": SessionMemoryBudget(persistent_bytes_per_session=persistent_bytes_by_role["vae_encode"]),
+            "vae_decode": SessionMemoryBudget(persistent_bytes_per_session=persistent_bytes_by_role["vae_decode"]),
+        }
+        plan: SessionCapacityPlan = calculate_session_capacity(
+            snapshots,
+            role_budgets=role_budgets,
+            configured_limit=configured_limit,
+        )
+        pool_profile = self._call_stage(
+            self.denoise_stage,
+            "configure_cache_pool",
+            plan.effective_capacity,
+            1,
+            kv_size,
+            max_sequence_length,
+        )
+        vae_pool_profiles = {
+            "vae_encode": asdict(
+                self._call_stage(
+                    self.vae_encode_worker,
+                    "configure_cache_pool",
+                    plan.effective_capacity,
+                )
+            ),
+            "vae_decode": asdict(
+                self._call_stage(
+                    self.vae_decode_worker,
+                    "configure_cache_pool",
+                    plan.effective_capacity,
+                )
+            ),
+        }
+        return {
+            **plan.to_dict(),
+            "kv_size": kv_size,
+            "max_sequence_length": max_sequence_length,
+            "persistent_bytes_per_rank": persistent_bytes,
+            "observed_vae_cache_bytes": observed_vae_cache_bytes,
+            "persistent_bytes_by_role": persistent_bytes_by_role,
+            "pool": asdict(pool_profile),
+            "vae_pools": vae_pool_profiles,
+            "snapshots": snapshots,
+        }
 
     @staticmethod
     def _notify_progress(
@@ -120,22 +323,36 @@ class LingBotWorldFastPipeline(BasePipeline):
         self.tokenizer = HuggingfaceTokenizer(tokenizer_path, 512, "whitespace")
         vae_encode_config = config.vae_encode_config
         vae_decode_config = config.vae_decode_config
-        self._validate_vae_stage_runtime_config(vae_encode_config)
-        self._validate_vae_stage_runtime_config(vae_decode_config)
+        self._validate_vae_stage_runtime_config(vae_encode_config, allow_parallel=False)
+        self._validate_vae_stage_runtime_config(vae_decode_config, allow_parallel=True)
         self.vae_encode_device = self._runtime_device(vae_encode_config)
         self.vae_decode_device = self._runtime_device(vae_decode_config)
         self.vae_encode_torch_dtype = vae_encode_config.torch_dtype
         self.vae_device = self.vae_decode_device
+        dit_runtime_config = config.dit_config
+        self._worker_tensor_channels: list[WorkerTensorChannel] = []
+        condition_channel = None
+        if dit_runtime_config.parallel_config.world_size > 1:
+            condition_channel = WorkerTensorChannel(
+                dit_runtime_config.parallel_config.world_size,
+                timeout=max(
+                    vae_encode_config.parallel_config.timeout,
+                    dit_runtime_config.parallel_config.timeout,
+                ),
+            )
+            self._worker_tensor_channels.append(condition_channel)
         vae_encode_stage = LingBotWorldFastVAEEncodeStage(
             "lingbot_world_fast_vae_encode", module_manager, vae_encode_config
         )
         vae_decode_stage = LingBotWorldFastVAEDecodeStage(
             "lingbot_world_fast_vae_decode", module_manager, vae_decode_config
         )
-        self.vae_encode_worker = ParallelWorker(vae_encode_stage)
-        self.vae_decode_worker = ParallelWorker(vae_decode_stage)
+        self.vae_encode_worker = ParallelWorker(
+            vae_encode_stage,
+            tensor_output_channel=condition_channel,
+            tensor_output_methods=("encode_condition_chunk",) if condition_channel is not None else (),
+        )
 
-        dit_runtime_config = config.dit_config
         dit_device = "cpu" if dit_runtime_config.parallel_config.world_size > 1 else self.device
         self.dit = module_manager.fetch_module("lingbot_world_fast_dit")
         if self.dit is None:
@@ -148,16 +365,56 @@ class LingBotWorldFastPipeline(BasePipeline):
         self.dit.set_causal_attention_window(config.local_attn_size, config.sink_size)
 
         denoise_stage = LingBotWorldFastDenoisingStage("lingbot_world_fast_denoise", module_manager, dit_runtime_config)
-        self.denoise_stage = (
-            ParallelWorker(denoise_stage) if dit_runtime_config.parallel_config.world_size > 1 else denoise_stage
+        colocate_vae_decode = (
+            dit_runtime_config.parallel_config.world_size > 1
+            and dit_runtime_config.parallel_config.device_ids == vae_decode_config.parallel_config.device_ids
+            and dit_runtime_config.parallel_config.world_size == vae_decode_config.parallel_config.world_size
         )
+        if colocate_vae_decode:
+            denoise_stage.attach_vae_decode_stage(vae_decode_stage)
+        direct_vae_handoff = dit_runtime_config.parallel_config.world_size > 1 and not colocate_vae_decode
+        latent_channel = None
+        if direct_vae_handoff:
+            latent_channel = WorkerTensorChannel(
+                vae_decode_config.parallel_config.world_size,
+                timeout=max(
+                    dit_runtime_config.parallel_config.timeout,
+                    vae_decode_config.parallel_config.timeout,
+                ),
+                shard_dim=-2 if vae_decode_config.parallel_config.world_size > 1 else None,
+            )
+            self._worker_tensor_channels.append(latent_channel)
+        self.denoise_stage = (
+            ParallelWorker(
+                denoise_stage,
+                tensor_output_channel=latent_channel,
+                tensor_output_methods=("denoise_and_update_cache",) if latent_channel is not None else (),
+                tensor_input_channels=(condition_channel,) if condition_channel is not None else (),
+            )
+            if dit_runtime_config.parallel_config.world_size > 1
+            else denoise_stage
+        )
+        self.vae_decode_worker = (
+            _CoLocatedVAEDecodeWorker(self.denoise_stage)
+            if colocate_vae_decode
+            else ParallelWorker(
+                vae_decode_stage,
+                tensor_input_channels=(latent_channel,) if latent_channel is not None else (),
+            )
+        )
+        self.uses_direct_condition_handoff = condition_channel is not None
+        self.uses_direct_vae_handoff = direct_vae_handoff
 
     @staticmethod
-    def _validate_vae_stage_runtime_config(runtime_config: ModelRuntimeConfig) -> None:
-        """Restrict the VAE stage to one configured GPU until VAE model parallelism exists."""
+    def _validate_vae_stage_runtime_config(
+        runtime_config: ModelRuntimeConfig,
+        *,
+        allow_parallel: bool = False,
+    ) -> None:
+        """Validate a VAE stage, allowing height-sharded decode workers only."""
         runtime_config.parallel_config.validate()
-        if runtime_config.parallel_config.world_size != 1:
-            raise ValueError("LingBot VAE stage currently requires exactly one GPU")
+        if not allow_parallel and runtime_config.parallel_config.world_size != 1:
+            raise ValueError("LingBot VAE encode stage currently requires exactly one GPU")
 
     @staticmethod
     def _resolve_self_kv_size(
@@ -179,7 +436,13 @@ class LingBotWorldFastPipeline(BasePipeline):
         prompt_emb = self.text_encoder(ids, mask)
         for i, v in enumerate(seq_lens):
             prompt_emb[i, v:] = 0
-        return prompt_emb.to(self.device)
+        prompt_emb = prompt_emb.to(self.device)
+        if prompt_emb.device.type == "cuda":
+            self._observed_parent_prompt_bytes = max(
+                getattr(self, "_observed_parent_prompt_bytes", 0),
+                prompt_emb.untyped_storage().nbytes(),
+            )
+        return prompt_emb
 
     @staticmethod
     def _best_output_size(w: int, h: int, expected_area: int, dw: int = 16, dh: int = 16) -> tuple[int, int]:
@@ -338,14 +601,32 @@ class LingBotWorldFastPipeline(BasePipeline):
         encode_dtype = getattr(self, "vae_encode_torch_dtype", self.config.vae_encode_config.torch_dtype)
         return tensor.to("cpu", dtype=encode_dtype)
 
-    def _initialize_vae_session(self, session: LingBotWorldFastGenerationSession) -> None:
-        """Register session-owned VAE caches in the dedicated worker."""
+    def _initialize_vae_session(self, session: LingBotWorldFastGenerationSession) -> dict[str, object]:
+        """Register VAE caches and export the session image latent once."""
         if session.cache_handle is None or session.condition_image is None:
             raise RuntimeError("VAE session initialization requires an image and cache handle")
-        self.vae_encode_worker.initialize_cache(
+        encoder_initialized = self.vae_encode_worker.initialize_cache(
             cache_handle=session.cache_handle, condition_image=session.condition_image, sync=True
         )
-        self.vae_decode_worker.initialize_cache(cache_handle=session.cache_handle, sync=True)
+        if not encoder_initialized:
+            raise RuntimeError("LingBot retained-session cache capacity is exhausted at VAE encode")
+        decoder_initialized = self.vae_decode_worker.initialize_cache(cache_handle=session.cache_handle, sync=True)
+        if not decoder_initialized:
+            raise RuntimeError("LingBot retained-session cache capacity is exhausted at VAE decode")
+        condition = self.vae_encode_worker.encode_condition_chunk(
+            cache_handle=session.cache_handle,
+            chunk_index=0,
+            chunk_count=session.chunk_count,
+            chunk_size=session.chunk_size,
+            height=session.height,
+            width=session.width,
+            output_dtype=self.torch_dtype,
+            sync=True,
+        )
+        if not isinstance(condition, dict):
+            raise TypeError("LingBot VAE condition initialization must return a mapping")
+        session.condition_image = None
+        return condition
 
     def _release_vae_session_cache(self, session: LingBotWorldFastGenerationSession) -> bool:
         if not hasattr(self, "vae_encode_worker") or not hasattr(self, "vae_decode_worker"):
@@ -394,12 +675,17 @@ class LingBotWorldFastPipeline(BasePipeline):
             self._streaming_runtime = None
         if streaming_runtime is not None:
             streaming_runtime.close()
+        vae_decode_worker = getattr(self, "vae_decode_worker", None)
+        if isinstance(vae_decode_worker, ParallelWorker):
+            vae_decode_worker.close()
         denoise_stage = getattr(self, "denoise_stage", None)
         if isinstance(denoise_stage, ParallelWorker):
             denoise_stage.close()
-        for vae_worker in (getattr(self, "vae_encode_worker", None), getattr(self, "vae_decode_worker", None)):
-            if isinstance(vae_worker, ParallelWorker):
-                vae_worker.close()
+        vae_encode_worker = getattr(self, "vae_encode_worker", None)
+        if isinstance(vae_encode_worker, ParallelWorker):
+            vae_encode_worker.close()
+        for channel in getattr(self, "_worker_tensor_channels", ()):
+            channel.close()
 
     def _get_streaming_runtime(self) -> LingBotWorldFastStreamingRuntime:
         """Return the one actor graph owned by this pipeline instance."""
@@ -510,7 +796,7 @@ class LingBotWorldFastPipeline(BasePipeline):
             cache_handle=cache_handle,
         )
         try:
-            self._initialize_vae_session(session)
+            image_condition = self._initialize_vae_session(session)
             initialize_cache_kwargs = dict(
                 cache_handle=cache_handle,
                 batch_size=1,
@@ -520,15 +806,19 @@ class LingBotWorldFastPipeline(BasePipeline):
                 generator_state=denoise_generator.get_state().tolist(),
                 noise_generator_state=noise_generator.get_state().tolist(),
                 noise_shape=(1, 16, session_config.chunk_size, lat_h, lat_w),
+                prompt_emb=prompt_emb,
+                image_condition=image_condition,
                 timestep_indices=getattr(self.config, "timestep_indices", (0, 179, 358, 679)),
             )
             if isinstance(self.denoise_stage, ParallelWorker):
-                self.denoise_stage.initialize_cache(**initialize_cache_kwargs, sync=True)
+                denoise_initialized = self.denoise_stage.initialize_cache(**initialize_cache_kwargs, sync=True)
             else:
-                self.denoise_stage.initialize_cache(**initialize_cache_kwargs)
+                denoise_initialized = self.denoise_stage.initialize_cache(**initialize_cache_kwargs)
+            if not denoise_initialized:
+                raise RuntimeError("LingBot retained-session cache capacity is exhausted at denoise")
         except Exception:
-            self._release_session_cache(session)
             self._release_vae_session_cache(session)
+            self._release_session_cache(session)
             raise
         if session_config.world_kv_binding is not None:
             session.world_kv_binding = session_config.world_kv_binding

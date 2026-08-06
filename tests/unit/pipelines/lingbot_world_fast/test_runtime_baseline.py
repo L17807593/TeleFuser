@@ -37,6 +37,11 @@ def _build_runtime_pipeline() -> LingBotWorldFastPipeline:
     )
     pipeline.denoise_stage = MagicMock()
     pipeline.vae_encode_worker = MagicMock()
+    pipeline.vae_encode_worker.encode_condition_chunk.return_value = {
+        "chunk_index": 0,
+        "chunk_size": 3,
+        "latent_condition": torch.zeros(16, 3, 2, 2),
+    }
     pipeline.vae_decode_worker = MagicMock()
     pipeline._next_cache_handle = 0
     pipeline.encode_prompt = MagicMock(return_value=torch.zeros(1, 4, 8))
@@ -168,7 +173,7 @@ def test_aligned_81_frame_runtime_has_seven_complete_latent_chunks() -> None:
     assert runtime.latent_f == 21
     assert runtime.chunk_count == 7
     assert not hasattr(runtime, "noise_generator")
-    assert runtime.condition_image is not None
+    assert runtime.condition_image is None
     assert not hasattr(runtime, "noise_chunks")
     assert not hasattr(runtime, "condition_chunks")
     assert runtime.cache_handle == 0
@@ -208,6 +213,43 @@ def test_cache_initialization_failure_triggers_global_cleanup() -> None:
             )
         )
 
+    pipeline.denoise_stage.release_cache.assert_called_once_with(0)
+
+
+def test_vae_capacity_rejection_rolls_back_partial_initialization() -> None:
+    pipeline = _build_runtime_pipeline()
+    pipeline.vae_decode_worker.initialize_cache.return_value = False
+
+    with pytest.raises(RuntimeError, match="capacity is exhausted at VAE decode"):
+        pipeline._create_initialized_session(
+            LingBotWorldFastSessionConfig(
+                prompt="baseline",
+                image=Image.new("RGB", (16, 16)),
+                frame_num=9,
+            )
+        )
+
+    pipeline.vae_encode_worker.release_cache.assert_called_once_with(0, sync=True)
+    pipeline.vae_decode_worker.release_cache.assert_called_once_with(0, sync=True)
+    pipeline.denoise_stage.release_cache.assert_called_once_with(0)
+    pipeline.denoise_stage.initialize_cache.assert_not_called()
+
+
+def test_denoise_capacity_rejection_rolls_back_vae_initialization() -> None:
+    pipeline = _build_runtime_pipeline()
+    pipeline.denoise_stage.initialize_cache.return_value = False
+
+    with pytest.raises(RuntimeError, match="capacity is exhausted at denoise"):
+        pipeline._create_initialized_session(
+            LingBotWorldFastSessionConfig(
+                prompt="baseline",
+                image=Image.new("RGB", (16, 16)),
+                frame_num=9,
+            )
+        )
+
+    pipeline.vae_encode_worker.release_cache.assert_called_once_with(0, sync=True)
+    pipeline.vae_decode_worker.release_cache.assert_called_once_with(0, sync=True)
     pipeline.denoise_stage.release_cache.assert_called_once_with(0)
 
 
@@ -262,6 +304,25 @@ def test_denoising_generator_state_advances_between_chunks() -> None:
 
     torch.testing.assert_close(first, repeated)
     assert not torch.equal(first, second)
+
+
+def test_i2v_model_input_writer_reuses_storage_and_preserves_condition() -> None:
+    latent = torch.zeros(1, 2, 3, 2, 2, dtype=torch.float32)
+    condition = torch.arange(36, dtype=torch.float32).reshape(1, 3, 3, 2, 2)
+    write = LingBotWorldFastDenoisingStage._build_i2v_model_input_writer(
+        latent,
+        condition,
+        torch.bfloat16,
+    )
+
+    first = write(torch.ones_like(latent))
+    storage_pointer = first.data_ptr()
+    second = write(torch.full_like(latent, 2.0))
+
+    assert second.data_ptr() == storage_pointer
+    assert second.dtype == torch.bfloat16
+    torch.testing.assert_close(second[:, :2].float(), torch.full_like(latent, 2.0))
+    torch.testing.assert_close(second[:, 2:].float(), condition)
 
 
 def test_runtime_truncates_non_aligned_latent_frame_count() -> None:

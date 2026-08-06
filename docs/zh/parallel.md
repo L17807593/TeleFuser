@@ -1,6 +1,7 @@
 # 并行推理指南
 
 本文档详细介绍 TeleFuser 的分布式并行推理架构，包括原理介绍、配置方法和使用示例。
+Tensor 数据流、同步协议、transport 职责和性能约束见[通信架构](communication.md)。
 
 ## 概述
 
@@ -46,13 +47,18 @@ device_mesh = create_device_mesh_from_config(config)
 ```
 telefuser/distributed/
 ├── device_mesh.py      # DeviceMesh 创建和进程组管理
+├── collectives.py      # 共享的连续 gather 与 reduction 原语
 ├── pp_comm.py          # 流水线并行 P2P 通信
 ├── ulysses_comm.py     # Ulysses All-to-All 通信原语
 ├── ring.py             # Ring Attention P2P 通信
 ├── parallel_shard.py   # 序列并行张量分片/反分片
+├── vae_spatial.py      # 按高度分片的 VAE halo 交换
 ├── fsdp.py             # FSDP 数据并行
 └── tp_parallelize.py   # 张量并行工具
 ```
+
+模型代码只负责张量布局和重建语义；可复用的 collective buffer 分配与 reduction 提交统一放在
+`collectives.py`，策略专用协议仍保留在各自模块中。
 
 ## 序列并行
 
@@ -158,6 +164,59 @@ out = out_wait()
 ## 流水线并行 (PP)
 
 将模型层分割到多个 GPU，实现大模型推理。
+
+### 跨 Worker Tensor 通道
+
+相邻 stage 如果属于不同 `ParallelWorker` group，可以使用 `WorkerTensorChannel` 连接。CPU tensor 使用
+multiprocessing shared memory；CUDA tensor 对每个稳定 tensor profile 使用两个有界的 producer-owned IPC
+slot，每个 IPC allocation 只打开一次并持续复用。Pool handle 与各 rank 的 offset 作为私有
+`WorkerTensorRef` 元数据沿现有控制路径传输。双向复用的跨进程 CUDA event 既保证 producer staging 完成后
+consumer 才 copy，也保证所有 consumer copy 完成后 producer 才覆盖 slot。Consumer 先记录 completion
+event 再发布 generation ACK，producer staging stream 等待这些 event；整个过程不需要 device-wide
+synchronization。
+
+```python
+from telefuser.worker import ParallelWorker, WorkerTensorChannel
+
+latent_channel = WorkerTensorChannel(consumer_world_size=vae_parallel_config.world_size)
+denoise_worker = ParallelWorker(
+    denoise_stage,
+    tensor_output_channel=latent_channel,
+    tensor_output_methods=("denoise",),
+)
+vae_worker = ParallelWorker(vae_stage, tensor_input_channels=(latent_channel,))
+```
+
+Channel 不会自动创建。拥有 stage 拓扑的 pipeline 必须创建并持有每条 channel，把它传给两端的
+`ParallelWorker`，并在 consumer 和 producer worker 停止后关闭。Actor 或 scheduler edge 只携带
+`WorkerTensorRef` metadata；支持取消的 actor 流程必须通过 consumer worker 释放末端 reference。完整的跨
+stage wiring 与生命周期 contract 参见
+[通信架构](communication.md#跨-stage-的-worker-与-actor-数据流)。
+
+当 consumer rank 只处理互不重叠的 tensor slice 时可设置 `shard_dim`。Producer 只 staging 一次，各 rank 仅
+copy 自己的 slice。LingBot 空间并行 VAE 使用 `shard_dim=-2`，因此跨卡 peer-copy 聚合通信量保持为一个
+logical latent，而不会随 VAE world size 放大；计入 producer 本地 staging 后，设备搬运预算为两个 logical
+latent。每个 channel 最多池化八种稳定 CUDA tensor profile；更多动态 profile 会回退到 PyTorch CUDA IPC，
+避免 retained HBM 无界增长。
+
+该路径是单 producer、单 consumer group 的点对点 FIFO。只有 tensor 的完整 consumer 集合就是所连接的 worker
+group 时才能启用。需要在主进程读取 tensor 的调用可以传入 `_tensor_transport=False`。Consumer 必须保持
+producer 顺序；关闭时先停止 consumer、再停止 producer，最后关闭 channel。Scheduler 取消末端 artifact 时，必须按 producer
+顺序调用 consumer worker 的 `discard_tensor_refs(ref, sync=True)`。该操作不会在父进程物化 tensor，并会
+立即释放 CPU shared memory 或 CUDA IPC storage；正常 receive 仍会兜底丢弃更早的已取消 FIFO entry。
+
+常规 worker 派发同样只向各 rank 发送 shared-memory 或 CUDA IPC handle，最终 device placement 由接收 rank
+完成；主进程不再为每张目标 GPU 分配临时副本。
+
+可使用本地 SGLang checkout 在相同 GPU 和 tensor shape 上运行端到端延迟门禁：
+
+```bash
+python tools/validation/benchmark_tensor_channel_vs_sglang.py
+```
+
+该比较同时计入两种实现的 producer staging、元数据传输、target copy、target 同步与 slot ACK。默认门禁使用
+200 个样本：p50 不得比 SGLang 高 5% 以上；p95 上限取 10% 与 0.05 ms 中较宽者，以覆盖亚毫秒级
+multiprocessing 调度抖动。
 
 ### 原理
 
@@ -397,9 +456,8 @@ stage 包含大量 CPU 计算时才需要提高该值；它不会修改父进程
 # 设备数必须等于各并行度乘积
 world_size = dp * cfg * sp_ring * sp_ulysses * pp * tp
 
-# SP 和 TP 不能同时启用
-if sp_degree > 1 and tp_degree > 1:
-    raise ValueError("SP and TP are mutually exclusive")
+# SP 和 TP 可以作为独立的 mesh 维度组合。
+# 所选 pipeline 必须实现并校验请求的组合。
 ```
 
 ## 使用示例

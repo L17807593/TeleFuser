@@ -45,15 +45,11 @@ telefuser serve \
     --port 8000 \
     --parallelism 1
 
-# LiveKit-backed world-model streaming
-# Set TF_MODEL_ZOO_PATH and PPL_CONFIG["parallelism"] in
-# examples/lingbot/lingbot_world_fast_image_to_video_h100.py
-telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
+# LiveKit-backed server-push streaming; start LiveKit Server separately
+telefuser stream-serve examples/stream_server/stream_video_replay.py \
     --livekit-url ws://127.0.0.1:7880 \
     --livekit-api-key devkey \
     --livekit-api-secret secret \
-    --num-workers 1 \
-    --worker-gpu-map 0,1,2,3 \
     -p 8088 \
     --skip-validation
 ```
@@ -93,9 +89,10 @@ Use for real-time world models, interactive generation, speech-driven animation,
 - LiveKit server-push tracks for progressive video/audio output
 - LiveKit bidirectional sessions for interactive control loops
 - Stateful sessions with continuous chunk generation
-- Worker admission, controller/viewer roles, and reconnect handling
+- Worker admission, controller/viewer roles, and LiveKit transport reconnects
 
-See the [Stream Server Guide](stream_server.md) for full streaming documentation.
+See the [Stream Server Guide](stream_server.md) for the runtime topology, room roles, retained capacity, execution
+lease, GPU placement, lifecycle, and complete local stack.
 
 ---
 
@@ -308,6 +305,8 @@ The request-response service is intentionally local and single-process by defaul
 - `telefuser stream-serve` exposes LiveKit session routes under `/v1/stream/*` and service routes under
   `/v1/service/*`. Media and reliable control messages travel through the configured LiveKit deployment. It does
   not expose task, file-download, OpenAI-compatible request-response, or direct SDP routes.
+- Stream runtime ownership, room topology, capacity, and replica boundaries are defined in the
+  [Stream Server Guide](stream_server.md); they are intentionally not shared with the request-response runtime.
 
 ### Artifact Storage and Cleanup
 

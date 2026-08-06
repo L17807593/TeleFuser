@@ -22,6 +22,64 @@ Set the model root before running the example:
 export TF_MODEL_ZOO_PATH=/path/to/model_zoo
 ```
 
+## Validated H100 Development Environment
+
+The four-H100 LingBot-World v2 AIPerf test used the following environment. TeleFuser supports broader
+versions through its normal dependency ranges, but performance results in this README should be reproduced with
+these versions before attributing a difference to code changes.
+
+| Component | Validated value |
+| --- | --- |
+| GPU | 4 x NVIDIA H100 80 GB HBM3 (SM90) |
+| NVIDIA driver | `590.48.01` |
+| Python | `3.11.13` |
+| PyTorch | `2.11.0+cu130` |
+| PyTorch CUDA runtime | `13.0` |
+| FlashAttention 4 | `flash-attn-4==4.0.0b19` |
+| CUTLASS DSL | `nvidia-cutlass-dsl==4.6.0` |
+| CUDA Python | `cuda-python==13.3.1` |
+
+Create an isolated Python 3.11 environment and install the CUDA 13.0 PyTorch build from the wheel index used by
+your deployment. Install PyTorch before TeleFuser so optional CUDA packages resolve against the intended ABI:
+
+```bash
+python3.11 -m venv .venv-lingbot
+source .venv-lingbot/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+
+# Install torch==2.11.0+cu130 from your CUDA 13.0 PyTorch wheel index first.
+python -m pip install -e ".[dev]"
+python -m pip install \
+  "flash-attn-4[cu13]==4.0.0b19" \
+  "nvidia-cutlass-dsl==4.6.0" \
+  "cuda-python==13.3.1"
+```
+
+The `cu13` extra installs FA4's CUDA 13 dependency variant. For a CUDA 12.8 PyTorch environment, install
+`flash-attn-4==4.0.0b19` without that extra and use matching CUDA 12.x dependencies; do not mix cu128 and cu130
+interpreters in one distributed run.
+
+Verify both the package versions and TeleFuser's runtime backend selection before benchmarking:
+
+```bash
+python - <<'PY'
+import importlib.metadata as metadata
+
+import torch
+
+from telefuser.ops.attention.backends import FLASH_ATTN_4_AVAILABLE
+
+print("PyTorch:", torch.__version__)
+print("PyTorch CUDA:", torch.version.cuda)
+print("GPU:", torch.cuda.get_device_name(0))
+print("flash-attn-4:", metadata.version("flash-attn-4"))
+print("nvidia-cutlass-dsl:", metadata.version("nvidia-cutlass-dsl"))
+print("cuda-python:", metadata.version("cuda-python"))
+print("TeleFuser FA4 available:", FLASH_ATTN_4_AVAILABLE)
+assert FLASH_ATTN_4_AVAILABLE
+PY
+```
+
 ## Feature Support
 
 | Feature | Support |
@@ -32,7 +90,7 @@ export TF_MODEL_ZOO_PATH=/path/to/model_zoo
 | Single-GPU inference | ✔️ |
 | Ulysses Sequence Parallel | ✔️ |
 | FSDP | Configurable through PPL_CONFIG |
-| H100 Sage Attention | ✔️ |
+| H100 optimized attention | v2: FA4, then FA3/SageAttention; v1: SageAttention |
 
 ## Files
 
@@ -57,8 +115,8 @@ Default configuration:
 
 Offline generation and stream-server entry point for camera-controlled v2. The default is 77 frames at 16 FPS: 20 latent frames, exactly five
 complete chunks of four. With complete chunk streaming, 81 output frames cannot be represented by `chunk_size=4`.
-The v2 checkpoint only supports camera control and uses its PPL-configured SageAttention SM90 backend, local attention, sink size,
-and timesteps.
+The v2 checkpoint only supports camera control. Its H100 example prefers FlashAttention 4, then falls back to FA3
+and SageAttention SM90, while retaining the PPL-configured local attention, sink size, and timesteps.
 
 ```bash
 python examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
@@ -66,6 +124,43 @@ python examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
     --model_root "${TF_MODEL_ZOO_PATH}/Wan2.2-I2V-A14B" \
     --v2_model_root "${TF_MODEL_ZOO_PATH}/lingbot/lingbot-world-v2-14b-causal-fast/transformers"
 ```
+
+### Validated Four-H100 Real-Time Gate
+
+Commit `540b579` was validated on 2026-08-03 with four H100 80 GB GPUs, PyTorch 2.11.0+cu128,
+FlashAttention-4, BF16 DiT, FP32 VAE, disabled FSDP, and disabled `torch.compile`. The default 832x480
+request generated all 77 frames in five chunks at a 16 FPS playback target.
+
+| Metric | Result |
+| --- | ---: |
+| Steady compute FPS | **17.14** |
+| Steady chunk mean / p50 / p90 | 0.9335 / 0.9409 / 0.9410 s |
+| Slowest steady chunk | 1.0058 s |
+| Generated frames / chunks | 77 / 5 |
+
+The steady summary excludes chunk 0 and covers four 16-frame chunks. `compute_seconds` synchronizes all target CUDA
+devices and includes condition handling, DiT, clean-KV update, spatial VAE decode, GPU-to-CPU transfer, and frame
+conversion. It excludes model loading, runtime creation, LiveKit pacing/encoding, network delivery, and client
+rendering. The average therefore clears the 16 FPS target-side real-time gate, while the slowest chunk exceeds its
+one-second budget by 5.8 ms; treat this as a validated configuration, not a guarantee for other hardware, resolutions,
+durations, concurrent sessions, or transport conditions.
+
+Reproduce the measured direct pipeline-service path without LiveKit or codec time:
+
+```bash
+TF_MODEL_ZOO_PATH=/path/to/model_zoo \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+python tools/validation/benchmark_lingbot_world_v2_direct.py \
+    --pipeline examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
+    --image examples/data/lingbot_world_fast/image.jpg \
+    --control-trace benchmarks/telefuser_aiperf/data/stream_lingbot_controls.json \
+    --output work_dirs/lingbot_world_v2_4gpu_77frames.json \
+    --gpu-num 4 --frame-num 77 --fps 16 --chunk-size 4
+```
+
+The offline CLI was also validated to produce an H.264 832x480 video containing all 77 frames. Use the
+[AIPerf benchmark guide](../../docs/en/benchmark_aiperf.md) for the one-minute workload, client delivery metrics,
+and comparisons that require identical environments.
 
 ## Usage
 
@@ -160,10 +255,34 @@ python examples/lingbot/lingbot_world_fast_image_to_video_h100.py --help
 
 ## Real-Time Streaming
 
-The same examples expose both offline generation and a stream-server `get_service()` entry point. Configure the
-service topology with `stream-serve --worker-gpu-map`; the size of the assigned GPU group is passed to
-`get_service(gpu_num=...)`. Use `CUDA_VISIBLE_DEVICES` to select the physical devices. Do not use `torchrun` because
-TeleFuser creates workers internally.
+The same examples expose offline generation and a stream-server `get_service()` entry point. Use
+`CUDA_VISIBLE_DEVICES` to select physical devices; the logical group size from `--worker-gpu-map` is passed to
+`get_service(gpu_num=...)`. The map does not change GPU visibility. Do not use `torchrun` because TeleFuser creates
+workers internally. The runnable coturn, LiveKit, TeleFuser, browser, and VS Code forwarding workflow is maintained in
+the [stream examples README](../stream_server/README.md).
+
+Each admitted LingBot room owns independent pipeline-session state, but every session shares one service instance and
+one model-execution lease:
+
+```mermaid
+flowchart LR
+    R1[LiveKit room A] --> S1[Pipeline session A]
+    R2[LiveKit room B] --> S2[Pipeline session B]
+    S1 --> L[One LingBot execution lease]
+    S2 --> L
+    L --> O[StreamingPipelineOrchestrator]
+    O --> E[VAE encode actor]
+    O --> D[DiT actor]
+    O --> V[VAE decode actor or co-located decoder]
+```
+
+By default, stream-server calculates `max_sessions_per_worker` after warmup and preallocates fixed DiT KV slots.
+Passing `max_sessions_per_worker=2` caps that calculated value at two isolated session states; it does not create a
+second model replica. Only one
+session submits a model chunk at a time. With a waiter present, a holder that has no valid control activity for
+`control_idle_timeout` yields after its current chunk, while its cache and retained slot remain allocated. The
+browser sends a one-second `control_state` heartbeat while a key remains held. Use separate service processes and
+external routing for additional replicas.
 
 ### Scheduler and Stage Placement
 
@@ -173,30 +292,24 @@ fixed placement for the following total GPU counts:
 | Total GPUs | DiT GPUs | VAE encode GPU | VAE decode GPU |
 | --- | --- | --- | --- |
 | 2 | `0-1` | `0` | `1` |
-| 4 | `0-3` | `0` | `1` |
+| 4 | `0-3` | `0` | `0-3`, co-located with DiT |
 | 5 | `0-3` | `4` | `4` |
 | 6 | `0-4` | `5` | `5` |
 
-For other counts, the examples retain the PPL-configured VAE devices and assign all visible GPUs to DiT. Direct
-`LingBotWorldFastPipelineConfig` users may set `vae_encode_config`, `vae_decode_config`, and `dit_config` independently.
+For four GPUs, VAE decode is height-sharded across the same process group as DiT. When the distributed decode and DiT
+placements match exactly, the pipeline automatically co-locates them to avoid duplicate CUDA contexts and process
+switching. For other counts, the examples retain the PPL-configured VAE devices and assign all visible GPUs to DiT.
+Direct `LingBotWorldFastPipelineConfig` users may set `vae_encode_config`, `vae_decode_config`, and `dit_config`
+independently; non-matching placements continue to use independent workers.
 
-### H100 Compile Benchmark
+The reference image is VAE-encoded once per session into at most 16 latent frames. For distributed DiT, the encode
+worker sends that base latent once to every DiT rank through CUDA IPC/P2P; each rank retains it and builds later
+four-frame condition slices and masks locally. Subsequent chunks therefore carry condition metadata rather than
+repeating VAE-to-CPU-to-DiT transfers. The retained bytes are included in session-capacity accounting.
 
-The v2 example was measured at 480p (832x464 internal size), 77 output frames, five latent chunks of four frames,
-BF16 DiT, FP32 VAE, SageAttention SM90, `torch.compile` enabled, and FSDP disabled. Each value is the mean from a
-second session after a complete warmup session. Pure DiT measures synchronous `denoise_and_update_cache`; chunk
-period is the mean interval between decoded chunk outputs while encode, DiT, and decode overlap.
-
-| Total H100 GPUs | Pure DiT seconds/chunk | Overlapped chunk period seconds/chunk |
-| --- | --- | --- |
-| 2 | 1.587 | 2.096 |
-| 4 | 0.911 | 1.615 |
-
-The scheduler does not infer a resource group from overlapping device IDs, so VAE encode, DiT, and VAE decode may
-overlap on a shared GPU.
-
-See the [streaming scheduler guide](../../docs/en/stream_scheduler.md) for
-architecture, metric definitions, and lifecycle guarantees.
+The scheduler does not infer a resource group from overlapping device IDs. VAE encode remains independent, while an
+exactly matching distributed DiT/VAE-decode placement uses the pipeline's explicit co-location path. See the
+[streaming scheduler guide](../../docs/en/stream_scheduler.md) for lifecycle guarantees.
 
 ### Tested GPU and Duration Limits
 
@@ -214,97 +327,19 @@ The four-GPU 20-second test used FSDP and Ulysses degree 4. Peak memory was appr
 41.6 GiB on GPUs 1-3. These are tested values, not universal limits; other resolutions and concurrent GPU users
 change the available capacity.
 
-LingBot-World v2 instead uses the fixed `local_attn_size=18`, `sink_size=6` sliding window configured by its
-example. A four-H100, one-minute AIPerf replay on 2026-07-28 resolved to 60 complete chunks, 957 output frames, and
-59.75 seconds of media. Its runtime metadata reported 240 latent frames but a fixed 27,144-token KV capacity.
-
-| One-minute v2 measurement | Result |
-| --- | ---: |
-| Successful sessions | 1 / 1 |
-| Target chunks / generated frames | 60 / 957 |
-| Client frames / steady frames | 946 / 944 |
-| Output cadence mean / p50 / p95 | 1.666 / 1.661 / 1.865 s |
-| First / middle / last 20-chunk mean | 1.694 / 1.646 / 1.658 s |
-| Session runtime | 104.031 s |
-
-During initial WebRTC track startup, the client received 2 of the first chunk's 13 frames and then received all
-`59 * 16 = 944` steady frames. Similar cadence in the first, middle, and last thirds confirms that the fixed attention
-window avoided duration-driven degradation in this run. It did not reach real time: each chunk represents 1.0 second
-of media, while p95 cadence was 1.865 seconds. See the
-[AIPerf benchmark guide](../../docs/en/benchmark_aiperf.md) for the workload,
-metric boundary, artifact path, and the observed client cleanup issue.
-
-### LiveKit Transport
-
-LiveKit provides room lifecycle, signaling, reconnects, adaptive media transport, and reliable control messages.
-The Python clients are base TeleFuser dependencies; install the LiveKit Server and your platform's `coturn` package
-separately for local development:
-
-```bash
-curl -sSL https://get.livekit.io | bash
-```
-
-The checked-in browser page forces TCP TURN relay. Start its matching development coturn service in terminal 1:
-
-```bash
-turnserver -n -m 1 \
-    --listening-ip=127.0.0.1 --relay-ip=127.0.0.1 \
-    --listening-port=3478 --min-port=49160 --max-port=49200 \
-    --user=livekit-demo:livekit-demo-password --realm=livekit.local \
-    --fingerprint --lt-cred-mech --no-tls --no-dtls --no-cli \
-    --allow-loopback-peers
-```
-
-Start LiveKit in terminal 2:
-
-```bash
-livekit-server --dev
-```
-
-Start the four-GPU LingBot worker and its session API in terminal 3:
-
-```bash
-TF_MODEL_ZOO_PATH=/path/to/model_zoo \
-CUDA_VISIBLE_DEVICES=0,1,2,3 \
-telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
-    --livekit-url ws://127.0.0.1:7880 \
-    --livekit-api-key devkey \
-    --livekit-api-secret secret \
-    --num-workers 1 \
-    --worker-gpu-map 0,1,2,3 \
-    --port 8088 \
-    --skip-validation
-```
-
-For the fixed-window v2 model, replace the pipeline path in that command with
-`examples/lingbot/lingbot_world_v2_image_to_video_h100.py`; the LiveKit and worker options stay the same.
-
-Then start the bundled browser demo in terminal 4:
-
-```bash
-python examples/stream_server/livekit_bidirectional_demo.py \
-    --server-url http://127.0.0.1:8088 \
-    --port 8092 \
-    --no-open
-```
-
-The demo proxies the TeleFuser session API, so VS Code Remote SSH needs TCP forwarding for demo port `8092`, LiveKit
-signaling port `7880`, and TURN listener `3478`; `8088` does not need forwarding. Open `http://127.0.0.1:8092`,
-select an initial image, and click **Start**. See the [Stream Server guide](../../docs/en/stream_server.md) for the API
-contract, control topics, shutdown order, troubleshooting, and production deployment notes.
-
-The current runtime supports exactly one `in-process` worker. One admitted LiveKit room owns one model pipeline
-instance until the session is closed or expires. Use separate service processes for additional workers until
-process-worker mode is implemented.
-
-Select the initial image in the browser before connecting; it is included in the session request. Real-time camera
-poses come from LiveKit control messages. The LingBot-World v2 service uses the bundled `intrinsics.npy` and its `832x480`
-calibration size by default, matching the offline example. A request can override that calibration. Other LingBot
-services with neither configured nor request-provided intrinsics center the principal point on the selected image and
-use its width as both focal lengths. Requests with calibrated intrinsics should also send `intrinsics_width` and
-`intrinsics_height` so the service can transform them from calibration pixels to output pixels.
+LingBot-World v2 instead uses a fixed `local_attn_size=18`, `sink_size=6` sliding window, so its cache capacity does
+not grow with the one-minute request. The complete four-H100 validation generated 957 frames in 60 chunks at
+832x480 without duration-driven cache growth. See the
+[benchmark guide](../../docs/en/benchmark_aiperf.md) for delivery results and metric boundaries.
 
 ### Camera Controls
+
+Select the initial image before connecting; it is included in the session request. Real-time camera poses arrive as
+LiveKit control messages. LingBot-World v2 uses the bundled `intrinsics.npy` and its `832x480` calibration size by
+default, matching the offline example. A request can override it. Services with no configured or request-provided
+intrinsics center the principal point on the selected image and use its width as both focal lengths. Calibrated
+requests should also send `intrinsics_width` and `intrinsics_height` so the service can transform calibration pixels
+to output pixels.
 
 The page has separate translation and rotation pads:
 

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from telefuser.service.security.security_validator import SecurityLevel
 
 from .config import LiveKitServeConfig
+from .multi_session_worker import MultiSessionLiveKitWorker as LiveKitWorker
 from .pipeline_adapter import LiveKitPipelineAdapter
 from .scheduler import LiveKitScheduler, SchedulerAdmission
 from .schemas import (
@@ -20,7 +21,6 @@ from .schemas import (
 )
 from .session_registry import TERMINAL_SESSION_STATUSES, SessionRecord, SessionRegistry
 from .token_service import LiveKitTokenService
-from .worker import LiveKitWorker
 from .worker_pool import InProcessLiveKitWorkerPool, WorkerPool
 
 
@@ -55,6 +55,7 @@ class LiveKitServeRuntime:
             num_workers=config.num_workers,
             gpu_groups=config.worker_gpu_groups(),
             queue_size=config.queue_size,
+            max_sessions_per_worker=config.session_capacity_limit() or 1,
         )
         self.token_service = token_service or LiveKitTokenService(
             api_key=config.livekit_api_key,
@@ -68,6 +69,7 @@ class LiveKitServeRuntime:
         self._closing = False
         self._closed = False
         self._finished_sessions: set[str] = set()
+        self._worker_capacity_profiles: dict[str, dict[str, object]] = {}
         self._lock = threading.RLock()
 
     @property
@@ -97,6 +99,7 @@ class LiveKitServeRuntime:
         room_name = f"tf-world-{session_id}"
         session_config = dict(request.config)
         session_config["session_id"] = session_id
+        session_config["control_idle_timeout"] = self.config.control_idle_timeout
         if request.prompt is not None:
             session_config["prompt"] = request.prompt
         if request.image_path is not None:
@@ -167,6 +170,12 @@ class LiveKitServeRuntime:
         """Apply a worker lifecycle callback to scheduler state."""
         self.scheduler.update_worker_status(worker_id, status)
 
+    def on_worker_capacity(self, worker_id: str, capacity: int, profile: dict[str, object] | None = None) -> None:
+        """Apply worker-local hardware capacity before the runtime becomes ready."""
+        self.scheduler.update_worker_capacity(worker_id, capacity)
+        if profile is not None:
+            self._worker_capacity_profiles[worker_id] = dict(profile)
+
     def on_session_status(self, session_id: str, status: SessionStatus, error: str | None = None) -> None:
         """Apply a worker-reported public session state."""
         if self.registry.require(session_id).status not in TERMINAL_SESSION_STATUSES:
@@ -191,26 +200,32 @@ class LiveKitServeRuntime:
             status = "unhealthy"
         elif workers_failed:
             status = "degraded"
-        running_statuses = {"joining_room", "starting_pipeline", "running", "draining"}
+        connected_statuses = {"starting_pipeline", "running", "draining"}
         return LiveKitHealthResponse(
             status=status,
-            livekit_connected=any(worker.status in running_statuses for worker in self.scheduler.workers()),
+            livekit_connected=any(worker.status in connected_statuses for worker in self.scheduler.workers()),
             **snapshot,
         )
 
     def metadata(self) -> dict:
         """Return runtime metadata for `/v1/service/metadata`."""
         health = self.health()
-        return {
+        metadata = {
             "service_type": "stream",
             "transport": "livekit",
             "pipeline_file": self.pipeline_file,
             "livekit_url": self.config.livekit_url,
             "num_workers": self.config.num_workers,
+            "max_sessions_per_worker": min(worker.session_capacity for worker in self.scheduler.workers()),
+            "configured_max_sessions_per_worker": self.config.max_sessions_per_worker,
+            "control_idle_timeout": self.config.control_idle_timeout,
             "worker_mode": self.config.worker_mode,
             "queue_size": self.config.queue_size,
             **health.model_dump(),
         }
+        if self._worker_capacity_profiles:
+            metadata["session_capacity"] = dict(self._worker_capacity_profiles)
+        return metadata
 
     async def aclose(self) -> None:
         """Stop runtime-owned background resources."""
@@ -265,12 +280,9 @@ class LiveKitServeRuntime:
             return record
 
     def _start_queued_session(self, admission: SchedulerAdmission) -> None:
-        if admission.worker_id is None:
+        if admission.worker_id is None or admission.session_id is None:
             return
-        worker_state = next(worker for worker in self.scheduler.workers() if worker.worker_id == admission.worker_id)
-        if worker_state.session_id is None:
-            return
-        session_id = worker_state.session_id
+        session_id = admission.session_id
         try:
             record = self.registry.assign_worker(session_id, admission.worker_id)
             self.worker_pool.start_session(record)

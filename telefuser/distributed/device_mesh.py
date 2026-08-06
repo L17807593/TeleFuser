@@ -87,16 +87,9 @@ def _validate_parallel_config(parallel_config: ParallelConfig) -> None:
     """Validate parallel configuration constraints.
 
     Raises:
-        ValueError: If SP and TP are both enabled, or if world_size doesn't match expected value.
+        ValueError: If world_size doesn't match the configured parallel degrees.
     """
     sp_degree = parallel_config.sp_ulysses_degree * parallel_config.sp_ring_degree
-
-    # SP and TP are mutually exclusive
-    if sp_degree > 1 and parallel_config.tp_degree > 1:
-        raise ValueError(
-            f"Not allowed to enable sequence parallel and tensor parallel together. "
-            f"sp_degree={sp_degree}, tp_degree={parallel_config.tp_degree}"
-        )
 
     # Verify world_size matches expected total
     expected_world_size = (

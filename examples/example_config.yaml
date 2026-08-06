@@ -102,6 +102,23 @@ pipelines:
       attn_impl: TORCH_SDPA
 
   # ============================================================
+  # minimax_h3 — Joint Audio-Video Generation
+  # ============================================================
+
+  minimax_h3_t2va_4gpu:
+    script: minimax_h3/minimax_h3_fl2va_h100.py
+    gpu_count: 4
+    output_type: video
+    timeout_seconds: 1800
+    seed: 0
+    resolution: "768p"
+    target_video_length: 5
+    use_run_with_file: true
+    require_audio: true
+    ppl_config_overrides:
+      num_inference_steps: 50
+
+  # ============================================================
   # lingbot_world_fast - Image to Video
   # ============================================================
 

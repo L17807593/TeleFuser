@@ -46,3 +46,7 @@ class LiveKitPipelineAdapter:
 
     def close_session(self, session_id: str) -> None:
         self.stream_service.close_session(session_id)
+
+    def configure_session_capacity(self, max_sessions: int | None) -> dict[str, object] | None:
+        """Configure and return the loaded pipeline's optional capacity profile."""
+        return self.stream_service.configure_session_capacity(max_sessions)

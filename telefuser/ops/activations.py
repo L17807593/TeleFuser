@@ -55,11 +55,26 @@ def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     Returns:
         Gated output: silu(x1) * x2
     """
-    if _has_tf_kernel:
+    if _has_tf_kernel and x.device.type == "cuda":
         return _tf_silu_and_mul(x)
     # Fallback to PyTorch
     gate, val = x.chunk(2, dim=-1)
     return F.silu(gate) * val
+
+
+def silu_and_mul_reuse_input(x: torch.Tensor) -> torch.Tensor:
+    """Apply H3-compatible rounded SiLU gating while reusing disposable BF16 input."""
+    if (
+        x.is_cuda
+        and x.dtype == torch.bfloat16
+        and x.is_contiguous()
+        and x.shape[-1] % 16 == 0
+        and not torch.compiler.is_compiling()
+    ):
+        from telefuser.kernel.triton import silu_and_mul_bf16_input_inplace_
+
+        return silu_and_mul_bf16_input_inplace_(x)
+    return silu_and_mul(x)
 
 
 def gelu_and_mul(x: torch.Tensor) -> torch.Tensor:
@@ -74,7 +89,7 @@ def gelu_and_mul(x: torch.Tensor) -> torch.Tensor:
     Returns:
         Gated output: gelu(x1) * x2
     """
-    if _has_tf_kernel:
+    if _has_tf_kernel and x.device.type == "cuda":
         return _tf_gelu_and_mul(x)
     # Fallback to PyTorch
     gate, val = x.chunk(2, dim=-1)

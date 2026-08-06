@@ -328,8 +328,7 @@ output = fp8_linear(x)
 ```
 
 **Backend Support**:
-- Prioritizes `tf_kernel` for best performance
-- Falls back to `vLLM` FP8 kernels
+- Requires `tf_kernel` for per-token quantization and scaled FP8 GEMM
 
 ### Model Quantization Tools
 

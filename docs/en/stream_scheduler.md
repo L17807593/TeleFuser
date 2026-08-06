@@ -13,14 +13,13 @@ stage groups; the streaming scheduler owns bounded, per-session dataflow and per
 
 The scheduler executes a directed acyclic graph of typed artifacts:
 
-```text
-external input
-     |
-     v
-  encode -- condition --> denoise -- latent --> decode -- frames --> output
-                            ^
-                            |
-                         control
+```mermaid
+flowchart LR
+    I[External input] --> E[Encode actor]
+    E -->|condition| D[Denoise actor]
+    C[Control] --> D
+    D -->|latent| V[Decode actor]
+    V -->|frames| O[Output]
 ```
 
 Each logical stage is represented by one long-lived actor. Independent actors may run concurrently even when their
@@ -45,27 +44,63 @@ Edges and outputs have explicit capacities. When a downstream stage cannot accep
 backpressure rather than retaining unbounded tensors. Pipeline implementations must therefore treat submission as
 admission-controlled, not as an unbounded queue.
 
+## Relationship to stream-service scheduling
+
+The [Stream Server Guide](stream_server.md) owns room, admission, and user-facing lifecycle semantics. This guide
+starts after a pipeline session has been admitted. Three schedulers operate at different boundaries and must not be
+treated as one queue:
+
+```mermaid
+flowchart TB
+    H[HTTP session request] --> A[Retained-session admission]
+    A -->|admitted pipeline session| L[LingBot execution lease]
+    L -->|one whole chunk| O[StreamingPipelineOrchestrator]
+    O --> E[Encode actor]
+    O --> D[Denoise actor]
+    O --> V[Decode actor]
+
+    Q1[HTTP admission FIFO] -. waits before .-> A
+    Q2[Execution-lease FIFO] -. waits before .-> L
+    Q3[Bounded artifact edges] -. backpressure inside .-> O
+```
+
+| Boundary | Owner | Purpose |
+| --- | --- | --- |
+| Retained-session admission | LiveKit runtime | Assign an HTTP session to capacity on a model worker, or place it in the bounded HTTP admission queue. |
+| Cross-session model execution | LingBot service instance | Grant one execution lease so only one retained LingBot session submits a whole chunk at a time. |
+| Intra-pipeline dataflow | `StreamingPipelineOrchestrator` | Schedule encode, denoise, and decode stage work with bounded artifacts and per-session ordering. |
+
+`max_sessions_per_worker` changes only the first boundary. It does not change service-instance count, execution
+leases, or graph-edge capacities. The second boundary is a LingBot service policy, not a generic orchestrator
+feature: its lease surrounds one session chunk, while the orchestrator may still overlap independent stages within
+that chunk. Other `BidirectionalService` implementations define their own cross-session policy.
+
 ## LingBot Condition Prefetch
 
-LingBot condition encoding is independent of the corresponding control input. The session therefore keeps a fixed
-lookahead of two conditions so VAE encode can overlap with earlier denoise and decode work:
+LingBot encodes the bounded reference-image prefix once while initializing the session. A generic
+`WorkerTensorChannel` distributes that base latent directly from the VAE encode worker to every DiT rank, where it
+remains resident in the session cache. Later condition artifacts contain only `chunk_index` and `chunk_size`; each
+rank slices the resident latent, repeats its tail when necessary, and constructs the first-frame mask locally.
+
+The session keeps a fixed lookahead of two condition metadata artifacts independently of control admission:
 
 - Session startup admits `condition[0]` and `condition[1]` when bounded ingress has capacity.
 - After denoise completes for chunk `i`, the session refills the window, normally with `condition[i+2]`.
 - `next_condition_index` and `next_control_index` maintain
   `0 <= next_condition_index - next_control_index <= 2`.
-- If backpressure prevented prefetch, the next control and its missing encode request are admitted atomically.
+- If backpressure prevented prefetch, the next control and its missing condition request are admitted atomically.
 
 Conditions and controls still join by session and sequence ID before denoise. The optimization changes scheduling,
 not model computation or causal cache ownership. `latency_anchor_artifact="control"` ensures condition-only
 prefetch does not start the control-to-output timer.
 
-This model-specific policy sits above the generic scheduler; edge capacities continue to bound retained tensors and
-session cleanup still runs through the owning actors.
+This model-specific policy sits above the generic scheduler. Edge capacities bound in-flight metadata while retained
+session capacity includes the resident condition latent, and cleanup still runs through the owning actors.
 
 ## Actor Ownership and Session Lifecycle
 
-A state-owning worker has exactly one actor owner for its entire lifetime. In particular, one `ParallelWorker` must
+A state-owning stage worker has exactly one actor owner for its entire lifetime. This pipeline-level stage worker is
+not the stream-server model worker that owns retained-session capacity. In particular, one `ParallelWorker` must
 not be invoked directly by a session facade or shared by multiple stage actors. This preserves result ordering and
 ensures that cache mutation and release occur in one well-defined execution context.
 
@@ -85,13 +120,20 @@ never transfer actor-owned stage state between workers.
 `StreamingResourceGroupSpec` represents an explicit shared concurrency constraint. A stage participates only when
 its `StreamingStageSpec.resource_group` names a group declared by `StreamingPipelineSpec.resource_groups`.
 
-Do not infer a resource group from `device_id` or `ParallelConfig.device_ids`. For LingBot, VAE encode, DiT, and VAE
-decode are independent actors and may overlap on the same GPU. If a placement exceeds memory capacity, move stages to
-different devices or define a deliberate deployment constraint; do not add an implicit global mutex.
+Do not infer a resource group from `device_id` or `ParallelConfig.device_ids`. LingBot VAE encode remains an
+independent actor. When distributed DiT and VAE decode use exactly the same device list and world size, the pipeline
+explicitly co-locates the decoder in the DiT worker group to reuse CUDA contexts; non-matching placements remain
+independent actors. If a placement exceeds memory capacity, move stages to different devices or define a deliberate
+deployment constraint; do not add an implicit global mutex.
 
 LingBot uses independent `vae_encode_config` and `vae_decode_config`. Each VAE
 stage receives its own complete `ModelRuntimeConfig`; there is no shared VAE
 placement fallback.
+
+When distributed DiT and VAE decode use different worker groups, LingBot connects their latent edge with a generic
+`WorkerTensorChannel`. The denoising worker sends CUDA IPC handles directly to the decode ranks and returns only
+validated tensor metadata to the scheduler. The parent process therefore retains bounded artifact ownership and
+ordering without materializing the latent or allocating copies on the decode GPUs.
 
 ## Observability and Real-Time Operation
 

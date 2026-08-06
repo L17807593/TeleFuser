@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-# Skip if vllm or tf_kernel not available
+# Keep the module import optional for CPU-only test environments.
 try:
     from telefuser.ops.quantized_linear import (
         LinearFP8,
@@ -43,6 +43,15 @@ class TestLinearFP8Initialization:
         layer = LinearFP8(original, torch.float8_e4m3fn)
 
         assert torch.allclose(layer.weight_scale, torch.zeros(64, 1))
+
+    def test_forward_requires_tf_kernel(self):
+        """Test that missing tf-kernel produces an actionable error."""
+        original = nn.Linear(32, 64)
+        layer = LinearFP8(original, torch.float8_e4m3fn)
+
+        with patch("telefuser.ops.quantized_linear.tf_kernel", None):
+            with pytest.raises(RuntimeError, match="install tf-kernel"):
+                layer(torch.randn(2, 32))
 
 
 class TestConvertParamsToBuffers:

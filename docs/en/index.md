@@ -1,9 +1,16 @@
+---
+title: "TeleFuser: World Model Streaming and Multimodal Inference"
+description: >-
+  TeleFuser is an open-source streaming inference and serving framework for real-time world models,
+  multimodal generation, and distributed video generation.
+---
+
 <section class="tf-hero" markdown>
 
 # TeleFuser
 
-A **high-performance runtime** for world model inference and multimodal generation, built for long-running
-pipelines, distributed execution, and production service interfaces.
+An open-source **streaming inference and serving framework** for real-time world models and multimodal generation,
+built for continuous pipelines, distributed GPU execution, and production service interfaces.
 
 <div class="tf-badge-row" markdown>
 <span class="tf-badge">PyTorch 2.6+</span>
@@ -19,7 +26,7 @@ pipelines, distributed execution, and production service interfaces.
 
 <div class="feature-grid" markdown>
 <div class="feature-card" markdown>
-**World Model Runtime**
+**[World Model Runtime](world_model_streaming_inference.md)**
 
 Continuous execution, stateful sessions, and bidirectional control loops.
 </div>
@@ -66,6 +73,7 @@ Reusable stages, model configs, schedulers, and pipeline orchestration.
 | WanVideo (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Video generation and editing |
 | HunyuanVideo | T2V, I2V | Video generation |
 | LTX Video | I2V + Audio | Video generation with audio |
+| MiniMax H3 | T2VA, FL2VA, Ref2VA + Audio | Local 768p joint audio-video generation |
 | FlashVSR | VSR | Video super-resolution |
 | LiveAct | S2V | Speech-to-video |
 | LongCat-Video | T2V, I2V | Long video generation |
@@ -99,12 +107,13 @@ telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.p
 
 <div class="tf-link-grid">
 <a href="service/"><strong>Service Guide</strong><span>Batch serving, task APIs, and SDK.</span></a>
-<a href="stream_server/"><strong>Stream Server</strong><span>LiveKit sessions, media, data topics, and bidirectional control.</span></a>
+<a href="stream_server/"><strong>Stream Server</strong><span>LiveKit sessions, retained capacity, LingBot time slicing, and bidirectional control.</span></a>
 <a href="stream_scheduler/"><strong>Stream Scheduler</strong><span>Actor ownership, bounded dataflow, lifecycle, metrics, and GPU placement.</span></a>
 <a href="benchmark_aiperf/"><strong>AIPerf Benchmark</strong><span>Batch video and LingBot LiveKit workflows.</span></a>
 <a href="configuration/"><strong>Configuration</strong><span>Runtime, attention, quantization, and offload settings.</span></a>
 <a href="tf_kernel/"><strong>TF-Kernel</strong><span>Install, build, verify, and use the optional CUDA extension.</span></a>
 <a href="parallel/"><strong>Parallel Inference</strong><span>Distributed processing strategies.</span></a>
+<a href="communication/"><strong>Communication Architecture</strong><span>NCCL collectives, CUDA IPC, ordering, and efficiency.</span></a>
 <a href="adding_new_model/"><strong>Adding New Model</strong><span>Integrate new model architectures and stages.</span></a>
 <a href="profiler/"><strong>Profiler</strong><span>Performance analysis tools.</span></a>
 </div>

@@ -15,7 +15,21 @@ import torch.nn.functional as F
 
 from .base import CustomOp
 
-KernelName = Literal["norm_infer", "layer_norm_fn", "fused_scale_shift"]
+_compiled_rmsnorm: Callable | None = None
+try:
+    from tf_kernel import rmsnorm as _compiled_rmsnorm
+except ImportError:
+    pass
+
+KernelName = Literal[
+    "norm_infer",
+    "layer_norm_fn",
+    "fused_scale_shift",
+    "fused_layernorm_scale_shift",
+    "fused_add_layernorm_scale_shift",
+    "indexed_gate_bf16_",
+    "indexed_scale_shift_bf16_",
+]
 
 
 @functools.lru_cache(maxsize=None)
@@ -33,6 +47,22 @@ def _get_triton_kernel(name: KernelName) -> Callable:
         from telefuser.kernel.triton import fused_scale_shift
 
         return fused_scale_shift
+    elif name == "fused_layernorm_scale_shift":
+        from telefuser.kernel.triton import fused_layernorm_scale_shift
+
+        return fused_layernorm_scale_shift
+    elif name == "fused_add_layernorm_scale_shift":
+        from telefuser.kernel.triton import fused_add_layernorm_scale_shift
+
+        return fused_add_layernorm_scale_shift
+    elif name == "indexed_gate_bf16_":
+        from telefuser.kernel.triton import indexed_gate_bf16_
+
+        return indexed_gate_bf16_
+    elif name == "indexed_scale_shift_bf16_":
+        from telefuser.kernel.triton import indexed_scale_shift_bf16_
+
+        return indexed_scale_shift_bf16_
     raise ValueError(f"Unknown kernel: {name}")
 
 
@@ -88,6 +118,18 @@ class RMSNorm(CustomOp):
             assert self.weight is not None
             # Ensure input is contiguous for Triton kernel
             hidden_states = hidden_states.contiguous()
+            if (
+                _compiled_rmsnorm is not None
+                and hidden_states.dtype in (torch.float16, torch.bfloat16)
+                and self.weight.dtype == hidden_states.dtype
+            ):
+                shape = hidden_states.shape
+                normalized = _compiled_rmsnorm(
+                    hidden_states.view(-1, shape[-1]),
+                    self.weight,
+                    self.eps,
+                )
+                return normalized.view(shape)
             norm_infer = _get_triton_kernel("norm_infer")
             # weight is nn.Parameter - always contiguous by PyTorch convention
             return norm_infer(hidden_states, self.weight, None, self.eps, is_rms_norm=True)
@@ -265,10 +307,121 @@ def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch
     return fused_scale_shift(x, scale, shift, scale_constant=1.0)
 
 
+def _validate_indexed_modulation_inputs(
+    x: torch.Tensor,
+    indices: torch.Tensor,
+    *,
+    row_parameters: tuple[torch.Tensor, ...],
+    per_row_tensors: tuple[torch.Tensor, ...] = (),
+) -> None:
+    if x.ndim != 2:
+        raise ValueError("indexed modulation input must be a two-dimensional tensor")
+    if indices.ndim != 1 or indices.numel() != x.shape[0]:
+        raise ValueError("indexed modulation indices must contain one entry per input row")
+    if indices.dtype not in {torch.int32, torch.int64}:
+        raise TypeError("indexed modulation indices must use int32 or int64")
+    tensors = (*row_parameters, *per_row_tensors, indices)
+    if any(tensor.device != x.device for tensor in tensors):
+        raise ValueError("indexed modulation tensors must be on the same device")
+    if any(parameter.ndim != 2 or parameter.shape[1] != x.shape[1] for parameter in row_parameters):
+        raise ValueError("indexed modulation parameter tensors must match the input hidden dimension")
+    if any(parameter.shape[0] == 0 for parameter in row_parameters):
+        raise ValueError("indexed modulation parameter tensors must contain at least one row")
+    parameter_rows = row_parameters[0].shape[0]
+    if any(parameter.shape[0] != parameter_rows for parameter in row_parameters[1:]):
+        raise ValueError("indexed modulation parameter tensors must contain the same number of rows")
+    if any(tensor.shape != x.shape for tensor in per_row_tensors):
+        raise ValueError("indexed modulation per-row tensors must match the input shape")
+
+
+def indexed_scale_shift(
+    x: torch.Tensor,
+    shift: torch.Tensor,
+    scale: torch.Tensor,
+    indices: torch.Tensor,
+) -> torch.Tensor:
+    """Apply row-indexed scale and shift, reusing disposable CUDA BF16 input."""
+    _validate_indexed_modulation_inputs(x, indices, row_parameters=(shift, scale))
+    if (
+        not torch.compiler.is_compiling()
+        and x.device.type == "cuda"
+        and x.dtype == shift.dtype == scale.dtype == torch.bfloat16
+        and x.ndim == shift.ndim == scale.ndim == 2
+        and indices.ndim == 1
+        and x.is_contiguous()
+        and shift.stride(-1) == 1
+        and scale.stride(-1) == 1
+    ):
+        kernel = _get_triton_kernel("indexed_scale_shift_bf16_")
+        return kernel(x, shift, scale, indices.contiguous())
+    return x * (1 + scale.index_select(0, indices)) + shift.index_select(0, indices)
+
+
+def indexed_gate(
+    x: torch.Tensor,
+    gate: torch.Tensor,
+    other: torch.Tensor,
+    indices: torch.Tensor,
+) -> torch.Tensor:
+    """Apply a row-indexed gated residual, reusing disposable CUDA BF16 input."""
+    _validate_indexed_modulation_inputs(x, indices, row_parameters=(gate,), per_row_tensors=(other,))
+    if (
+        not torch.compiler.is_compiling()
+        and x.device.type == "cuda"
+        and x.dtype == gate.dtype == other.dtype == torch.bfloat16
+        and x.ndim == gate.ndim == other.ndim == 2
+        and indices.ndim == 1
+        and x.is_contiguous()
+        and gate.stride(-1) == 1
+        and other.is_contiguous()
+    ):
+        kernel = _get_triton_kernel("indexed_gate_bf16_")
+        return kernel(x, gate, other, indices.contiguous())
+    return x + gate.index_select(0, indices) * other
+
+
+def _fused_layer_norm_scale_shift(
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    *,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Fuse LayerNorm and adaptive modulation while preserving the input dtype."""
+    if torch.compiler.is_compiling() or x.device.type != "cuda":
+        normalized = F.layer_norm(x, (x.shape[-1],), weight, bias, eps)
+        return (normalized * (1 + scale) + shift).to(dtype=x.dtype)
+    kernel = _get_triton_kernel("fused_layernorm_scale_shift")
+    return kernel(x.contiguous(), weight, bias, scale, shift, eps)
+
+
+def _fused_add_layer_norm_scale_shift(
+    residual: torch.Tensor,
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    *,
+    weight: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    eps: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fuse residual add, LayerNorm, and adaptive modulation."""
+    if torch.compiler.is_compiling() or x.device.type != "cuda":
+        residual_out = (residual + x).to(dtype=residual.dtype)
+        normalized = F.layer_norm(residual_out, (residual_out.shape[-1],), weight, bias, eps)
+        return (normalized * (1 + scale) + shift).to(dtype=residual.dtype), residual_out
+    kernel = _get_triton_kernel("fused_add_layernorm_scale_shift")
+    return kernel(residual.contiguous(), x.contiguous(), weight, bias, scale, shift, eps)
+
+
 __all__ = [
     "RMSNorm",
     "LayerNorm",
     "AdaLayerNormContinuous",
     "fused_scale_shift",
     "modulate",
+    "indexed_gate",
+    "indexed_scale_shift",
 ]

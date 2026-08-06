@@ -328,8 +328,7 @@ output = fp8_linear(x)
 ```
 
 **后端支持**：
-- 优先使用 `tf_kernel`（最佳性能）
-- 回退到 `vLLM` 的 FP8 内核
+- 使用 `tf_kernel` 执行逐 token 量化和 scaled FP8 GEMM
 
 ### 模型量化工具
 

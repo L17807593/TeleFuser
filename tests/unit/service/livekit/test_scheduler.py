@@ -52,3 +52,12 @@ def test_scheduler_health_counts_failed_workers() -> None:
         "workers_failed": 1,
         "queued_sessions": 0,
     }
+
+
+def test_scheduler_updates_worker_capacity_before_admission() -> None:
+    scheduler = LiveKitScheduler(num_workers=1, max_sessions_per_worker=1)
+
+    worker = scheduler.update_worker_capacity("worker-0", 3)
+
+    assert worker.session_capacity == 3
+    assert scheduler.workers()[0].session_capacity == 3

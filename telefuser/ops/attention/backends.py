@@ -23,19 +23,23 @@ SDPA_AVAILABLE = False
 SAGE_ATTN_AVAILABLE = False
 SPARGE_ATTN_AVAILABLE = False
 FLASHINFER_AVAILABLE = False
+SOL_ATTN_AVAILABLE = False
 
 # Backend function references (populated on successful import)
 flash_attn2: Callable | None = None
 flash_attn3: Callable | None = None
 flash_attn4: Callable | None = None
+flash_attn4_varlen: Callable | None = None
 sageattention: object | None = None
 spas_sage2_attn_meansim_cuda: Callable | None = None
 flashinfer: object | None = None
+sol_attn: Callable | None = None
 
 
 def _try_import_flash_attn() -> None:
     """Import Flash Attention 2/3/4."""
-    global FLASH_ATTN_4_AVAILABLE, FLASH_ATTN_3_AVAILABLE, FLASH_ATTN_2_AVAILABLE, flash_attn4, flash_attn3, flash_attn2
+    global FLASH_ATTN_4_AVAILABLE, FLASH_ATTN_3_AVAILABLE, FLASH_ATTN_2_AVAILABLE
+    global flash_attn4, flash_attn4_varlen, flash_attn3, flash_attn2
 
     if importlib.util.find_spec("flash_attn") is None:
         return
@@ -47,6 +51,12 @@ def _try_import_flash_attn() -> None:
         flash_attn4 = flash_attn4_impl
         FLASH_ATTN_4_AVAILABLE = True
         logger.debug("Flash Attention 4 available")
+        try:
+            from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_impl
+
+            flash_attn4_varlen = flash_attn4_varlen_impl
+        except (ModuleNotFoundError, ImportError):
+            logger.debug("Flash Attention 4 varlen interface unavailable")
     except (ModuleNotFoundError, ImportError):
         pass
 
@@ -131,12 +141,33 @@ def _try_import_flashinfer() -> None:
         pass
 
 
+def _try_import_sol_attn() -> None:
+    """Import TeleFuser's built-in Sol-Attn kernel."""
+    global SOL_ATTN_AVAILABLE, sol_attn
+
+    SOL_ATTN_AVAILABLE = False
+    sol_attn = None
+    module_name = "telefuser.kernel.sol_attn"
+    try:
+        if importlib.util.find_spec(module_name) is None:
+            return
+        candidate = getattr(importlib.import_module(module_name), "sol_attn", None)
+    except (ModuleNotFoundError, ImportError, RuntimeError) as error:
+        logger.debug("Built-in Sol-Attn backend unavailable: %s", error)
+        return
+    if callable(candidate):
+        sol_attn = candidate
+        SOL_ATTN_AVAILABLE = True
+        logger.debug("Built-in Sol-Attn kernel available")
+
+
 # Initialize all backends
 _try_import_flash_attn()
 _try_import_sdpa()
 _try_import_sage_attn()
 _try_import_sparge_attn()
 _try_import_flashinfer()
+_try_import_sol_attn()
 
 
 def supports_return_lse(attn_impl: str) -> bool:
@@ -202,11 +233,14 @@ __all__ = [
     "SAGE_ATTN_AVAILABLE",
     "SPARGE_ATTN_AVAILABLE",
     "FLASHINFER_AVAILABLE",
+    "SOL_ATTN_AVAILABLE",
     "flash_attn2",
     "flash_attn3",
     "flash_attn4",
+    "flash_attn4_varlen",
     "sageattention",
     "flashinfer",
+    "sol_attn",
     "supports_return_lse",
     "get_lse_fallback_impl",
     "sdpa_attn_cudnn",

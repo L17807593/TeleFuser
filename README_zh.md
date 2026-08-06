@@ -1,6 +1,8 @@
 <div align="center">
-  <img src="assets/telefuser_logo.png" width="80%">
+  <img src="assets/telefuser_logo.png" width="80%" alt="TeleFuser">
 </div>
+
+# TeleFuser：面向世界模型与多模态生成的流式推理框架
 
 <p align="center">
   中文 | <a href="README.md">English</a>
@@ -13,13 +15,26 @@
   <img src="https://img.shields.io/badge/CUDA-12.8%2B-green" alt="CUDA">
 </p>
 
-TeleFuser 是一个面向世界模型推理与多模态生成的高性能运行时框架。它重点服务于实时世界模型、语音驱动动画、流式视觉生成等连续、低时延、有状态的视觉生成任务。
+TeleFuser 是一个开源的多模态生成与世界模型流式推理和服务框架，支持连续视频生成、有状态会话、双向交互、
+多 GPU 分布式推理、FastAPI 服务和 LiveKit WebRTC 流式传输，面向实时世界模型、语音驱动动画和流式
+视觉生成等连续、低时延任务。
+
+世界模型流式推理的执行模型、运行链路、支持任务和可复现实时门禁见
+[世界模型流式推理指南](docs/zh/world_model_streaming_inference.md)。
 
 ## News 📰
 
+- ✨ **2026-08-05**：新增 [**MiniMax H3**](examples/minimax_h3/README.md) T2VA、FL2VA 和 Ref2VA 联合
+  音视频生成，并支持标准 `telefuser serve` 服务模式。在相同的 768p、5 秒、50 步 T2VA 请求和一次预热
+  条件下，常驻 **4 张 H100 80 GB** 配置的性能与固定版本的本地 SGLang SP2+TP2 对齐，同时使用更少
+  GPU 显存。复现条件和性能分析见
+  [MiniMax H3 示例文档](examples/minimax_h3/README.md#measured-four-gpu-profile)。
+- ✨ **2026-08-03**：LingBot-World v2 已在 **4 张 H100 80 GB** 上通过 832x480、16 FPS 的目标侧实时生成
+  验证。当前 77 帧门禁达到 **17.14 steady compute FPS**，复现方法见
+  [基准文档](docs/zh/benchmark_aiperf.md#当前-77-帧实时计算门禁)。
 - ✨ **2026-07-27**：统一使用 LiveKit 流式后端，支持 room 会话、worker 准入、浏览器自动重连，以及
   server-push 和 bidirectional 两种 pipeline contract。
-- ✨ **2026-07-22**：**NEW** 新增 [**LingBot-Video**](examples/lingbot_video/README.md) 支持，覆盖 Dense/MoE T2I、T2V、TI2V、原生四卡 CFG/SP 推理与内存直传 MoE refiner。
+- ✨ **2026-07-22**：新增 [**LingBot-Video**](examples/lingbot_video/README.md) 支持，覆盖 Dense/MoE T2I、T2V、TI2V、原生四卡 CFG/SP 推理与内存直传 MoE refiner。
 - ✨ **2026-07-15**：新增 [**LingBot-World v2**](https://github.com/Robbyant/lingbot-world-v2) 支持，支持离线生成、交互式 WebRTC 流和多卡推理。
 
 - ✨ **2026-07-06**：新增外部 **CacheSeek** latent cache 集成，支持服务模式下跨请求复用；命中后可跳过前 N 步去噪。Wan2.2 服务示例默认快照 `[5, 10, 15, 20, 25]`。配置和安装方式见 [docs/zh/latent_cache.md](docs/zh/latent_cache.md)。
@@ -93,6 +108,10 @@ video = pipe(
 
 TeleFuser 通过 LiveKit 传输 `LingBot-World v2`。LingBot-World v2 使用相机控制和 v2 PPL 默认值；其流式
 示例将单个会话上限设为两分钟。
+
+已验证的四卡 H100 配置在默认 77 帧、832x480 请求上达到 17.14 target-side compute FPS，高于 16 FPS
+播放目标。该数值是设备同步后的 pipeline 计算指标；模型加载、LiveKit 编码、网络交付和客户端渲染需单独
+衡量。精确命令和逐 chunk 结果见 [LingBot 示例文档](examples/lingbot/README.md#validated-four-h100-real-time-gate)。
 
 LingBot 的离线与服务执行共用 actor scheduler。即使位于同一张 GPU，encode、DiT 和 decode 也可以重叠；
 仅在显存放置需要时移动 Stage。详见[流式调度器指南](docs/zh/stream_scheduler.md)。
@@ -213,6 +232,7 @@ telefuser/
 | `WanVideo` (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | 主力视频生成家族，含异步和服务示例，见 [examples/wan_video/README.md](examples/wan_video/README.md) |
 | `HunyuanVideo` | T2V, I2V | 见 [examples/hunyuan_video/README.md](examples/hunyuan_video/README.md) |
 | `LTX Video` | I2V + Audio | 统一音视频生成，见 [examples/ltx_video/README.md](examples/ltx_video/README.md) |
+| `MiniMax H3` | T2VA, FL2VA, Ref2VA + Audio | 本地 768p 联合音视频生成，见 [examples/minimax_h3/README.md](examples/minimax_h3/README.md) |
 | `LongCat-Video` | T2V, I2V, VC | 长视频生成与续写，见 [examples/longcat_video/README.md](examples/longcat_video/README.md) |
 | **NEW** `LingBot-Video` | T2I, T2V, TI2V, MoE refiner | 支持原生 CFG/SP 的 Dense/MoE 生成与内存直传 base-to-refiner，见 [examples/lingbot_video/README.md](examples/lingbot_video/README.md) |
 
@@ -232,6 +252,7 @@ telefuser/
 - [docs/zh/stream_server.md](docs/zh/stream_server.md)：LiveKit 流服务、session API、data topic 和部署
 - [docs/zh/stream_scheduler.md](docs/zh/stream_scheduler.md)：基于 actor 的 Stage 调度、backpressure、生命周期、指标和 LingBot 卡位
 - [docs/zh/parallel.md](docs/zh/parallel.md)：分布式推理架构
+- [docs/zh/communication.md](docs/zh/communication.md)：collective、CUDA IPC、同步与传输生命周期
 - [docs/zh/latent_cache.md](docs/zh/latent_cache.md)：CacheSeek latent cache 集成
 - [docs/zh/feature_cache.md](docs/zh/feature_cache.md)：`AdaTaylorCache`
 - [docs/zh/model_loading.md](docs/zh/model_loading.md)：模型加载方式

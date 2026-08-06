@@ -45,15 +45,11 @@ telefuser serve \
     --port 8000 \
     --parallelism 1
 
-# LiveKit-backed 世界模型流服务
-# 在 examples/lingbot/lingbot_world_fast_image_to_video_h100.py 中设置
-# TF_MODEL_ZOO_PATH 和 PPL_CONFIG["parallelism"]
-telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.py \
+# LiveKit-backed server-push 流服务；LiveKit Server 需要单独启动
+telefuser stream-serve examples/stream_server/stream_video_replay.py \
     --livekit-url ws://127.0.0.1:7880 \
     --livekit-api-key devkey \
     --livekit-api-secret secret \
-    --num-workers 1 \
-    --worker-gpu-map 0,1,2,3 \
     -p 8088 \
     --skip-validation
 ```
@@ -93,9 +89,10 @@ TeleFuser 提供两种服务命令，针对不同工作负载类型优化：
 - LiveKit server-push track：渐进式视频/音频输出
 - LiveKit bidirectional session：交互式控制循环
 - 有状态会话，连续 chunk 生成
-- Worker 准入、controller/viewer 角色和重连处理
+- Worker 准入、controller/viewer 角色和 LiveKit 传输层重连
 
-完整流式文档请参阅[流式服务指南](stream_server.md)。
+Runtime 拓扑、room 角色、常驻容量、execution lease、GPU 放置、生命周期和完整本地链路见
+[流式服务指南](stream_server.md)。
 
 ---
 
@@ -306,6 +303,8 @@ TELEFUSER_RATE_LIMIT_REQUESTS_PER_MINUTE=100
 - `telefuser serve` 只暴露请求-响应路由：`/v1/tasks/*`、`/v1/files/*`、`/v1/images/*`、`/v1/videos/*` 和 `/v1/service/*`。
 - `telefuser stream-serve` 暴露 `/v1/stream/*` 下的 LiveKit session 路由和 `/v1/service/*`。媒体与可靠
   control 消息经配置的 LiveKit 部署传输；它不暴露 task、file-download、OpenAI 兼容请求-响应或直接 SDP 路由。
+- 流式 runtime 的所有权、room 拓扑、容量和副本边界由[流式服务指南](stream_server.md)定义，不与请求-响应
+  runtime 共享。
 
 ### Artifact 存储与清理
 

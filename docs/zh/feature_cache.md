@@ -231,8 +231,13 @@ python examples/wan_video/wan21_1_3b_text_to_video_ada_taylor_cache.py \
 | HunyuanVideo I2V | `examples/hunyuan_video/hunyuan_video_i2v_cache_calibrate.py` | HunyuanVideo-I2V |
 | Qwen-Image T2I | `examples/qwen_image/qwen_image_cache_calibrate.py` | Qwen-Image |
 | Qwen-Image Edit | `examples/qwen_image/qwen_image_edit_plus_cache_calibrate.py` | Qwen-Image-Edit-Plus |
+| MiniMax H3 FL2VA | `examples/minimax_h3/minimax_h3_cache_calibrate.py` | MiniMax-H3-Base |
 
 **Wan2.2 I2V 注意事项：** Wan2.2 使用双分支架构（dit_high + dit_low）。校准脚本在两个分支之间共享一个校准器，以便在单个 JSON 文件中捕获完整的去噪过程。
+
+**MiniMax H3 注意事项：** H3 只有一条联合音视频分支。校准器使用音频 token 的残差统计，并将同一条
+曲线写入通用 CFG 兼容 JSON 的两个字段。请在单卡上完成校准；生成的参数可用于 FL2VA 的单卡、双卡和
+四卡配置。
 
 ---
 
