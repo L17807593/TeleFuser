@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gc
 import os
+import signal
 import threading
 import time
 from collections.abc import Callable, Collection
@@ -72,8 +73,12 @@ def _worker_loop(
     from telefuser.utils.profiler import mark_as_worker_process
 
     mark_as_worker_process()
+    previous_sigint_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
     args = None
     kwargs = None
+    stage_inputs = None
+    y = None
+    clean_shutdown = False
     try:
         parallel_config = stage.model_runtime_config.parallel_config
         # Avoid host-wide launch pools in every spawned CUDA worker, including
@@ -123,6 +128,7 @@ def _worker_loop(
             del data
             if name == "exit":
                 logger.info(f"parallel worker {stage.name} on rank {rank} exits")
+                clean_shutdown = True
                 break
             if name == _DISCARD_TENSOR_REFS:
                 discarded = 0
@@ -169,14 +175,19 @@ def _worker_loop(
     finally:
         args = None
         kwargs = None
+        stage_inputs = None
+        y = None
         current_platform.synchronize()
-        for channel in tensor_input_channels:
-            channel.release_local_cuda_ipc()
+        if clean_shutdown and world_size > 1:
+            from telefuser.distributed.ulysses_comm import _close_cuda_ipc_groups
+
+            _close_cuda_ipc_groups()
         gc.collect()
         current_platform.empty_cache()
         current_platform.ipc_collect()
         if world_size > 1:
             dist.destroy_process_group()
+        signal.signal(signal.SIGINT, previous_sigint_handler)
 
 
 class ParallelWorker:

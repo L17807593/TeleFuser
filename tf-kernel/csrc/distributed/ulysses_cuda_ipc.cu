@@ -188,13 +188,15 @@ void ulysses_stream_barrier(
         "cuStreamWriteValue64");
   }
   const auto local_base = reinterpret_cast<CUdeviceptr>(local_barrier.data_ptr<int64_t>());
+  // Epochs reuse one slot per peer. GEQ remains satisfied if a faster peer has
+  // already published the next epoch before this stream evaluates its wait.
   for (int64_t peer = 0; peer < world_size; ++peer) {
     check_driver(
         cuStreamWaitValue64(
             driver_stream,
             local_base + peer * sizeof(uint64_t),
             static_cast<uint64_t>(epoch),
-            CU_STREAM_WAIT_VALUE_EQ),
+            CU_STREAM_WAIT_VALUE_GEQ),
         "cuStreamWaitValue64");
   }
 }

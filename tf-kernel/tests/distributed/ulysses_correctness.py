@@ -36,6 +36,7 @@ def main() -> None:
     torch.cuda.set_device(local_rank)
     dist.init_process_group("nccl", device_id=torch.device("cuda", local_rank))
     rank = dist.get_rank()
+    world_size = dist.get_world_size()
     shape = (2, 12, 8, 16)
 
     group = CudaIpcUlyssesGroup(dist.group.WORLD)
@@ -81,6 +82,28 @@ def main() -> None:
         assert [output.data_ptr() for output in outputs] == pointers
         for output, offset in zip(outputs, (80, 96, 112), strict=True):
             torch.testing.assert_close(output, _expected_scatter(rank, shape, dtype, offset), rtol=0, atol=0)
+
+    assert len(group._targets) <= 12
+
+    stress_dtype = torch.bfloat16
+    stress_input = _input(rank, shape, stress_dtype)
+    latest_outputs: list[torch.Tensor] = []
+    latest_offsets: tuple[int, int, int] = (0, 0, 0)
+    for step in range(64):
+        base_offset = (step % 8) * 3
+        latest_offsets = (base_offset + 1, base_offset + 2, base_offset + 3)
+        handles = [
+            group.all_to_all_single_4d_async(stress_input + latest_offsets[0], mode=0, tag="stress-q", barrier=False),
+            group.all_to_all_single_4d_async(stress_input + latest_offsets[1], mode=0, tag="stress-k", barrier=False),
+            group.all_to_all_single_4d_async(stress_input + latest_offsets[2], mode=0, tag="stress-v"),
+        ]
+        latest_outputs = [handle.wait() for handle in handles]
+        if rank == step % world_size:
+            torch.cuda._sleep(5_000_000)
+
+    for output, offset in zip(latest_outputs, latest_offsets, strict=True):
+        torch.testing.assert_close(output, _expected_scatter(rank, shape, stress_dtype, offset), rtol=0, atol=0)
+    assert len(group._targets) <= 12
 
     torch.cuda.synchronize()
     dist.barrier()

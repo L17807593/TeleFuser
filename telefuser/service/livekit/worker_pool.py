@@ -10,6 +10,8 @@ from telefuser.utils.logging import logger
 from .session_registry import SessionRecord
 from .worker import LiveKitWorker
 
+_SESSION_STOP_GRACE_SECONDS = 8.0
+
 
 class WorkerPool(Protocol):
     """Worker-pool operations used by the API runtime."""
@@ -59,6 +61,16 @@ class InProcessLiveKitWorkerPool:
             return
         for worker in self._workers.values():
             await worker.stop_session(session_id)
+
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=_SESSION_STOP_GRACE_SECONDS)
+            return
+        except TimeoutError:
+            logger.warning(
+                f"LiveKit session did not stop within {_SESSION_STOP_GRACE_SECONDS:g}s; "
+                f"cancelling runner: session={session_id}"
+            )
+
         if not task.done():
             task.cancel()
         try:

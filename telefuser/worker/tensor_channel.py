@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from multiprocessing.queues import SimpleQueue
+from multiprocessing.util import Finalize
 from typing import Any
 
 import torch
@@ -65,7 +66,7 @@ class _CudaIpcSlot:
 class _CudaIpcPool:
     profile_index: int
     storage: torch.Tensor
-    handle: tuple[Any, ...]
+    handles: tuple[tuple[Any, ...], ...]
     slots: list[_CudaIpcSlot]
     next_slot_id: int = 0
 
@@ -114,6 +115,7 @@ class WorkerTensorChannel:
         self._cuda_consumer_completion_events: dict[tuple[int, int], torch.cuda.Event] = {}
         self._cuda_completion_handles: dict[tuple[int, int, int], bytes] = {}
         self._cuda_producer_completion_events: dict[tuple[int, int, int, int], torch.cuda.Event] = {}
+        self._cuda_ipc_finalizer: Finalize | None = None
         self._next_transfer_id = 0
         self._producer_bound = False
         self._consumer_bound = False
@@ -271,6 +273,7 @@ class WorkerTensorChannel:
         return tuple(rank_shape)
 
     def _create_cuda_pool(self, ref: WorkerTensorRef, tensor: torch.Tensor) -> _CudaIpcPool:
+        self._ensure_local_cuda_ipc_finalizer()
         with torch.cuda.device(tensor.device):
             storage = torch.empty(
                 (self.cuda_ipc_slots, *tensor.shape),
@@ -292,7 +295,7 @@ class WorkerTensorChannel:
         pool = _CudaIpcPool(
             profile_index=len(self._cuda_pools),
             storage=storage,
-            handle=storage.untyped_storage()._share_cuda_(),
+            handles=tuple(storage.untyped_storage()._share_cuda_() for _ in range(self.consumer_world_size)),
             slots=slots,
         )
         key = (ref.tensor_index, ref.shape, tensor.dtype, str(tensor.device))
@@ -374,14 +377,14 @@ class WorkerTensorChannel:
                 ref=ref,
                 profile_index=pool.profile_index,
                 slot_id=slot_id,
-                handle=pool.handle,
+                handle=handle,
                 ready_event_handle=slot.ready_event_handle,
                 byte_offset=view.storage_offset() * view.element_size(),
                 shape=tuple(view.shape),
                 stride=tuple(view.stride()),
                 dtype=view.dtype,
             )
-            for view in rank_views
+            for view, handle in zip(rank_views, pool.handles, strict=True)
         )
 
     def _wait_for_cuda_slot_reuse(
@@ -446,6 +449,7 @@ class WorkerTensorChannel:
         rank: int,
         target: torch.device,
     ) -> torch.Tensor:
+        self._ensure_local_cuda_ipc_finalizer()
         source = torch.device(payload.ref.source_device)
         rebuild_device = target if target.type == "cuda" else source
         if rebuild_device.index is None:
@@ -486,13 +490,45 @@ class WorkerTensorChannel:
             generation if copied else -generation
         )
 
+    @staticmethod
+    def _clear_local_cuda_ipc_state(*state: dict[Any, Any]) -> None:
+        for cache in state:
+            cache.clear()
+
+    def _ensure_local_cuda_ipc_finalizer(self) -> None:
+        finalizer = self._cuda_ipc_finalizer
+        if finalizer is not None and finalizer.still_active():
+            return
+        state = (
+            self._cuda_pools,
+            self._cuda_consumer_completion_events,
+            self._cuda_completion_handles,
+            self._cuda_producer_completion_events,
+            self._cuda_event_cache,
+            self._cuda_storage_cache,
+        )
+        self._cuda_ipc_finalizer = Finalize(
+            self,
+            WorkerTensorChannel._clear_local_cuda_ipc_state,
+            args=state,
+            exitpriority=10,
+        )
+
     def release_local_cuda_ipc(self) -> None:
-        """Release process-local CUDA IPC mappings after pending work is synchronized."""
-        self._cuda_consumer_completion_events.clear()
-        self._cuda_completion_handles.clear()
-        self._cuda_producer_completion_events.clear()
-        self._cuda_event_cache.clear()
-        self._cuda_storage_cache.clear()
+        """Release process-local CUDA IPC state owned by this channel."""
+        finalizer = self._cuda_ipc_finalizer
+        if finalizer is not None and finalizer.still_active():
+            finalizer()
+        else:
+            self._clear_local_cuda_ipc_state(
+                self._cuda_pools,
+                self._cuda_consumer_completion_events,
+                self._cuda_completion_handles,
+                self._cuda_producer_completion_events,
+                self._cuda_event_cache,
+                self._cuda_storage_cache,
+            )
+        self._cuda_ipc_finalizer = None
 
     def discard(self, value: Any, *, rank: int) -> int:
         """Consume and release referenced tensors without materializing a device copy."""
