@@ -355,13 +355,29 @@ encoding, DiT, video/audio decode, host materialization, and orchestration; it e
 and MP4 encoding. Wall time surrounds the same `run()` call. Full-device memory is sampled from `nvidia-smi`
 every 100 ms during the measured request.
 
+The measurements use PyTorch 2.11.0, CUDA 12.8, NCCL 2.28.9, and the source-built SM90 `tf-kernel` wheel from this
+checkout. Reproduce the three rows from the repository root:
+
+```bash
+python -m tools.validation.benchmark_minimax_h3_four_gpu \
+  --attention FLASH_ATTN_4 \
+  --output /tmp/minimax_h3_flash.json
+python -m tools.validation.benchmark_minimax_h3_four_gpu \
+  --attention SAGE_ATTN_2_8_8_SM90 \
+  --output /tmp/minimax_h3_sage.json
+python -m tools.validation.benchmark_minimax_h3_four_gpu \
+  --attention FLASH_ATTN_4 \
+  --feature-cache \
+  --output /tmp/minimax_h3_flash_cache.json
+```
+
 | Attention | Feature cache | Computed / skipped DiT calls | Pipeline time | Wall time | DiT time | Pipeline speedup | Peak memory GPU 0 / 1 / 2 / 3 |
 |---|---|---:|---:|---:|---:|---:|---:|
-| FlashAttention 4 | Disabled | 49 / 0 | 79.10 s | 79.36 s | 76.48 s | 1.00x | 52.90 / 51.65 / 51.49 / 51.66 GiB |
-| SageAttention 2_8_8 SM90 | Disabled | 49 / 0 | 75.96 s | 76.30 s | 73.37 s | 1.04x | 51.49 / 50.11 / 50.10 / 50.04 GiB |
-| FlashAttention 4 | AdaTaylorCache | 26 / 23 | 43.53 s | 43.94 s | 40.87 s | 1.82x | 53.00 / 51.40 / 51.22 / 51.22 GiB |
+| FlashAttention 4 | Disabled | 49 / 0 | 77.32 s | 77.63 s | 74.64 s | 1.00x | 51.48 / 50.28 / 50.30 / 50.28 GiB |
+| SageAttention 2_8_8 SM90 | Disabled | 49 / 0 | 72.41 s | 72.72 s | 69.85 s | 1.07x | 51.42 / 50.20 / 50.24 / 50.24 GiB |
+| FlashAttention 4 | AdaTaylorCache | 26 / 23 | 42.39 s | 42.68 s | 39.82 s | 1.82x | 52.73 / 52.09 / 51.56 / 51.54 GiB |
 
-Sage SM90 reduces pipeline latency by 3.98% and DiT latency by 4.07%. It is approximate and remains an H100 opt-in:
+Sage SM90 reduces pipeline latency by 6.34% and DiT latency by 6.43%. It is approximate and remains an H100 opt-in:
 
 ```bash
 python -m examples.minimax_h3.minimax_h3_fl2va_h100 \
@@ -375,9 +391,15 @@ Against the FlashAttention 4 output from the same seed, the Sage run measured vi
 0.7683, and audio cosine similarity 0.98505. Review generated quality for the target workload before selecting it in
 production; FlashAttention 4 remains the default.
 
-AdaTaylorCache reduces steady-state pipeline latency by 45.0% and increases maximum single-GPU occupancy by
-0.10 GiB (0.2%) in these measurements. Against the previously matched uncached MP4, PSNR is 26.91, SSIM is 0.8619,
+AdaTaylorCache reduces steady-state pipeline latency by 45.2% and increases maximum single-GPU occupancy by
+1.25 GiB (2.4%) in these measurements. Against the previously matched uncached MP4, PSNR is 26.91, SSIM is 0.8619,
 audio cosine similarity is 0.9562, and audio duration is unchanged. The earlier matched local SGLang SP2+TP2 parity
 run measured 79.37 seconds and 67.8 GiB on GPU 0 under the same request shape.
+
+With the source-built tf-kernel available, MiniMax H3 uses the direct CUDA IPC Copy Engine Ulysses scatter. The
+fused-QKV projection is passed as a strided V view first; Q/K normalization and RoPE then overlap that transfer,
+followed by tagged Q/K transfers and one shared GPU-memory handshake. The three destination buffers are cached per
+Ulysses group, so this avoids a QKV packing copy and repeated target allocation. If the optional backend is
+unavailable, the same calls fall back to NCCL.
 
 These numbers describe this request and environment, not a general performance or quality guarantee.

@@ -268,6 +268,9 @@ endif()
 set(SOURCES
     "csrc/common_extension.cc"
 
+    # Distributed communication
+    "csrc/distributed/ulysses_cuda_ipc.cu"
+
     # Elementwise operations
     "csrc/elementwise/activation.cu"
     "csrc/elementwise/cast.cu"

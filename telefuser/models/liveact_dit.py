@@ -372,13 +372,13 @@ class WanSelfAttention(nn.Module):
 
         # QKV projection [B, S/N, H, D]
         q = self.norm_q(self.q(x)).view(b, s, n, d)
+        q_wait = ulysses_scatter_heads(q, self.ulysses_group, tag="q", barrier=False)
         k = self.norm_k(self.k(x)).view(b, s, n, d)
+        k_wait = ulysses_scatter_heads(k, self.ulysses_group, tag="k", barrier=False)
         v = self.v(x).view(b, s, n, d)
 
         # Ulysses scatter heads: [B, S/N, H, D] -> [B, S, H/N, D]
-        q_wait = ulysses_scatter_heads(q, self.ulysses_group)
-        k_wait = ulysses_scatter_heads(k, self.ulysses_group)
-        v_wait = ulysses_scatter_heads(v, self.ulysses_group)
+        v_wait = ulysses_scatter_heads(v, self.ulysses_group, tag="v")
         q = q_wait()
         k = k_wait()
         v = v_wait()

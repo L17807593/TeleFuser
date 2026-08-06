@@ -26,7 +26,7 @@ from telefuser.distributed.device_mesh import (
     get_ulysses_world_size,
 )
 from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequence_parallel_unshard
-from telefuser.distributed.ulysses_comm import ulysses_gather_heads_destination_major, ulysses_scatter_qkv
+from telefuser.distributed.ulysses_comm import ulysses_gather_heads_destination_major, ulysses_scatter_heads
 from telefuser.feature_cache import AdaTaylorCacheCalibrator, NoOpCache
 from telefuser.ops import RMSNorm, apply_qk_norm_rope_neox, indexed_gate, indexed_scale_shift, silu_and_mul_reuse_input
 from telefuser.ops.attention import attention
@@ -468,6 +468,10 @@ class MiniMaxH3Attention(nn.Module):
         sequence, _ = hidden.shape
         qkv = self.qkv_proj(hidden).reshape(sequence, 3, self.num_heads, self.head_dim)
         query, key, value = qkv.unbind(dim=1)
+        group = self.ulysses_group
+        use_ulysses = group is not None and dist.get_world_size(group) > 1
+        if use_ulysses:
+            value_wait = ulysses_scatter_heads(value.unsqueeze(0), group, tag="v", barrier=False)
         if rope_cos_sin_cache is not None:
             query, key = apply_qk_norm_rope_neox(
                 query,
@@ -483,10 +487,12 @@ class MiniMaxH3Attention(nn.Module):
         query = query.unsqueeze(0)
         key = key.unsqueeze(0)
         value = value.unsqueeze(0)
-        group = self.ulysses_group
-        use_ulysses = group is not None and dist.get_world_size(group) > 1
         if use_ulysses:
-            query, key, value = ulysses_scatter_qkv(query, key, value, group)()
+            query_wait = ulysses_scatter_heads(query, group, tag="q", barrier=False)
+            key_wait = ulysses_scatter_heads(key, group, tag="k")
+            query = query_wait()
+            key = key_wait()
+            value = value_wait()
         if attention_config is not None and attention_config.attn_impl == AttnImplType.SAGE_ATTN_2_8_8_SM90:
             total_tokens = query.shape[1]
             live_tokens = self._sage_live_tokens(sequence_lengths, total_tokens)

@@ -159,6 +159,68 @@ def test_sage_attention_runs_h3_live_prefix_and_zeros_alignment_padding() -> Non
     assert torch.count_nonzero(output[61:]) == 0
 
 
+def test_ulysses_overlaps_strided_value_scatter_with_qk_preprocessing() -> None:
+    module = MiniMaxH3Attention(_small_config()).eval()
+    module.ulysses_group = MagicMock()
+    hidden = torch.randn(8, 32, dtype=torch.bfloat16)
+    events: list[tuple[object, ...]] = []
+    q_norm = module.q_norm.forward
+    k_norm = module.k_norm.forward
+
+    def scatter(
+        tensor: torch.Tensor,
+        _group: object,
+        *,
+        tag: str,
+        barrier: bool = True,
+    ) -> object:
+        events.append(("submit", tag, barrier, tensor.is_contiguous()))
+
+        def wait() -> torch.Tensor:
+            events.append(("wait", tag))
+            return tensor
+
+        return wait
+
+    def record_q_norm(tensor: torch.Tensor) -> torch.Tensor:
+        events.append(("norm", "q"))
+        return q_norm(tensor)
+
+    def record_k_norm(tensor: torch.Tensor) -> torch.Tensor:
+        events.append(("norm", "k"))
+        return k_norm(tensor)
+
+    with (
+        patch("telefuser.models.minimax_h3_dit.dist.get_world_size", return_value=2),
+        patch("telefuser.models.minimax_h3_dit.ulysses_scatter_heads", side_effect=scatter),
+        patch(
+            "telefuser.models.minimax_h3_dit.ulysses_gather_heads_destination_major",
+            side_effect=lambda tensor, *_args, **_kwargs: lambda: tensor,
+        ),
+        patch("telefuser.models.minimax_h3_dit.attention", side_effect=lambda query, *_args, **_kwargs: query),
+        patch.object(module.q_norm, "forward", side_effect=record_q_norm),
+        patch.object(module.k_norm, "forward", side_effect=record_k_norm),
+    ):
+        output = module(
+            hidden,
+            sequence_lengths=[8],
+            rope_cos_sin_cache=None,
+            attention_config=AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA),
+        )
+
+    assert output.shape == hidden.shape
+    assert events == [
+        ("submit", "v", False, False),
+        ("norm", "q"),
+        ("norm", "k"),
+        ("submit", "q", False, True),
+        ("submit", "k", True, True),
+        ("wait", "q"),
+        ("wait", "k"),
+        ("wait", "v"),
+    ]
+
+
 def test_enable_tp_shards_fused_projections_by_logical_section() -> None:
     model = MiniMaxH3DiT(_small_config())
     block = model.blocks[0]

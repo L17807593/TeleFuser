@@ -351,7 +351,7 @@ class QwenDoubleStreamAttention(nn.Module):
         img_value = img_value.unflatten(-1, (self.num_heads, -1))
         txt_value = txt_value.unflatten(-1, (self.num_heads, -1))
         joint_value = torch.cat([txt_value, img_value], dim=1)
-        joint_value_wait = ulysses_scatter_heads(joint_value, group)
+        joint_value_wait = ulysses_scatter_heads(joint_value, group, tag="v", barrier=False)
 
         img_query = self.to_q(image)
         txt_query = self.add_q_proj(text)
@@ -366,7 +366,7 @@ class QwenDoubleStreamAttention(nn.Module):
             img_query = apply_rotary_emb_qwen(img_query, img_freqs)
             txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs)
         joint_query = torch.cat([txt_query, img_query], dim=1)
-        joint_query_wait = ulysses_scatter_heads(joint_query, group)
+        joint_query_wait = ulysses_scatter_heads(joint_query, group, tag="q", barrier=False)
 
         img_key = self.to_k(image)
         txt_key = self.add_k_proj(text)
@@ -381,7 +381,7 @@ class QwenDoubleStreamAttention(nn.Module):
             img_key = apply_rotary_emb_qwen(img_key, img_freqs)
             txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs)
         joint_key = torch.cat([txt_key, img_key], dim=1)
-        joint_key_wait = ulysses_scatter_heads(joint_key, group)
+        joint_key_wait = ulysses_scatter_heads(joint_key, group, tag="k")
 
         joint_value = joint_value_wait()
         joint_query = joint_query_wait()
