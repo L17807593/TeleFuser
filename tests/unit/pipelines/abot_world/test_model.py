@@ -111,3 +111,46 @@ def test_sink_attention_uses_bounded_positions_for_long_sessions() -> None:
 
     assert output.shape == (1, 1, 8)
     assert torch.isfinite(output).all()
+
+
+def test_small_dit_forward_preserves_latent_and_cache_contract() -> None:
+    """Exercise the complete DiT path with the same cache shape as the stage."""
+    model = _tiny_dit().eval()
+    model.set_causal_attention_window(local_attn_size=3, sink_size=1)
+    batch, frames, latent_height, latent_width = 1, 1, 8, 8
+    frame_tokens = (latent_height // 2) * (latent_width // 2)
+    self_cache = []
+    cross_cache = []
+    for _ in range(model.num_layers):
+        self_cache.append(
+            {
+                "k": torch.zeros(batch, 3 * frame_tokens, model.num_heads, model.dim // model.num_heads),
+                "v": torch.zeros(batch, 3 * frame_tokens, model.num_heads, model.dim // model.num_heads),
+                "global_end_index": torch.zeros(1, dtype=torch.long),
+                "local_end_index": torch.zeros(1, dtype=torch.long),
+            }
+        )
+        cross_cache.append(
+            {
+                "k": torch.zeros(batch, model.text_len, model.num_heads, model.dim // model.num_heads),
+                "v": torch.zeros(batch, model.text_len, model.num_heads, model.dim // model.num_heads),
+                "is_init": False,
+                "sequence_length": 0,
+            }
+        )
+
+    output = model(
+        x=torch.randn(batch, model.in_dim, frames, latent_height, latent_width),
+        timestep=torch.tensor([[0.5]]),
+        context=torch.randn(batch, model.text_len, 16),
+        # The action map is pixel-space, while x is VAE-latent space.
+        act_context=torch.randn(batch, 32, frames, latent_height * 2, latent_width * 2),
+        kv_cache=self_cache,
+        crossattn_cache=cross_cache,
+        current_start=0,
+    )
+
+    assert output.shape == (batch, model.out_dim, frames, latent_height, latent_width)
+    assert torch.isfinite(output).all()
+    assert all(int(cache["global_end_index"].item()) == frame_tokens for cache in self_cache)
+    assert all(bool(cache["is_init"]) for cache in cross_cache)
