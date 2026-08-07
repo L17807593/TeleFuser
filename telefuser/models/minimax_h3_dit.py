@@ -422,10 +422,12 @@ class MiniMaxH3Attention(nn.Module):
         self.k_norm = _rms_norm(self.head_dim, config.qk_norm_eps)
         self.out_proj = nn.Linear(self.inner_dim, config.hidden_size, bias=False, dtype=torch.bfloat16)
         self.ulysses_group: dist.ProcessGroup | None = None
+        self.ulysses_communicator: Any | None = None
         self.tp_group: dist.ProcessGroup | None = None
 
-    def set_ulysses_group(self, group: dist.ProcessGroup | None) -> None:
+    def set_ulysses_group(self, group: dist.ProcessGroup | None, communicator: Any | None = None) -> None:
         self.ulysses_group = group
+        self.ulysses_communicator = communicator
 
     def enable_tp(self, group: dist.ProcessGroup, *, rank: int, world_size: int) -> None:
         if self.num_heads % world_size:
@@ -471,7 +473,9 @@ class MiniMaxH3Attention(nn.Module):
         group = self.ulysses_group
         use_ulysses = group is not None and dist.get_world_size(group) > 1
         if use_ulysses:
-            value_wait = ulysses_scatter_heads(value.unsqueeze(0), group, tag="v", barrier=False)
+            value_wait = ulysses_scatter_heads(
+                value.unsqueeze(0), group, tag="v", barrier=False, communicator=self.ulysses_communicator
+            )
         if rope_cos_sin_cache is not None:
             query, key = apply_qk_norm_rope_neox(
                 query,
@@ -488,8 +492,10 @@ class MiniMaxH3Attention(nn.Module):
         key = key.unsqueeze(0)
         value = value.unsqueeze(0)
         if use_ulysses:
-            query_wait = ulysses_scatter_heads(query, group, tag="q", barrier=False)
-            key_wait = ulysses_scatter_heads(key, group, tag="k")
+            query_wait = ulysses_scatter_heads(
+                query, group, tag="q", barrier=False, communicator=self.ulysses_communicator
+            )
+            key_wait = ulysses_scatter_heads(key, group, tag="k", communicator=self.ulysses_communicator)
             query = query_wait()
             key = key_wait()
             value = value_wait()
@@ -1199,8 +1205,9 @@ class MiniMaxH3DiT(BaseModel):
             )
         group = get_ulysses_group(self.device_mesh) if world_size > 1 else None
         self.usp_flag = world_size > 1
+        communicator = self._configure_ulysses_communicator(group)
         for block in self.blocks:
-            block.attn.set_ulysses_group(group)
+            block.attn.set_ulysses_group(group, communicator)
 
     def enable_tp(self, device_mesh: Any | None = None) -> None:
         self.device_mesh = device_mesh if device_mesh is not None else self.device_mesh

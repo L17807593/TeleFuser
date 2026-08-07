@@ -12,6 +12,7 @@ from telefuser.utils.logging import logger
 from .config import AttentionConfig, AttnImplType, OffloadConfig
 
 if TYPE_CHECKING:
+    from telefuser.distributed.ulysses_backend import UlyssesCommunicator
     from telefuser.feature_cache import BaseFeatureCache
 
 
@@ -37,6 +38,7 @@ class BaseModel(torch.nn.Module):
         self._use_pinned_memory: bool = True
         # Feature cache (lazy initialization)
         self._feature_cache: BaseFeatureCache | None = None
+        self._ulysses_communicator: UlyssesCommunicator | None = None
 
     @property
     def feature_cache(self) -> BaseFeatureCache:
@@ -46,6 +48,36 @@ class BaseModel(torch.nn.Module):
 
             self._feature_cache = NoOpCache()
         return self._feature_cache
+
+    def _configure_ulysses_communicator(
+        self,
+        process_group: torch.distributed.ProcessGroup | None,
+    ) -> UlyssesCommunicator | None:
+        communicator = self._ulysses_communicator
+        if communicator is not None and communicator.process_group is process_group:
+            return communicator
+        if communicator is not None:
+            communicator.close()
+        if process_group is None:
+            self._ulysses_communicator = None
+            return None
+
+        from telefuser.distributed.ulysses_backend import UlyssesCommunicator
+
+        communicator = UlyssesCommunicator(process_group)
+        self._ulysses_communicator = communicator
+        return communicator
+
+    def _release_ulysses_backend(self) -> None:
+        communicator = getattr(self, "_ulysses_communicator", None)
+        if communicator is not None:
+            communicator.close()
+
+    def __del__(self) -> None:
+        try:
+            self._release_ulysses_backend()
+        except Exception:
+            pass
 
     def onload_device(self, device: torch.device, non_blocking: bool | None = None) -> None:
         """Load model to specified device.
@@ -87,6 +119,7 @@ class BaseModel(torch.nn.Module):
         Args:
             pin_memory: Use pinned CPU memory for faster transfer back. If None, uses _use_pinned_memory.
         """
+        self._release_ulysses_backend()
         # Handle sequential offload: delegate to wrapped modules
         if getattr(self, "sequential_cpu_offload_enabled", False):
             for module in self.modules():

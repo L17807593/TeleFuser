@@ -173,6 +173,7 @@ def test_ulysses_overlaps_strided_value_scatter_with_qk_preprocessing() -> None:
         *,
         tag: str,
         barrier: bool = True,
+        communicator: object | None = None,
     ) -> object:
         events.append(("submit", tag, barrier, tensor.is_contiguous()))
 

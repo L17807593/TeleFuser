@@ -63,7 +63,14 @@ def test_ulysses_submits_all_qkv_collectives_before_waiting() -> None:
     events: list[str] = []
     submit_index = 0
 
-    def submit(tensor: torch.Tensor, group: object, *, tag: str, barrier: bool = True):
+    def submit(
+        tensor: torch.Tensor,
+        group: object,
+        *,
+        tag: str,
+        barrier: bool = True,
+        communicator: object | None = None,
+    ):
         nonlocal submit_index
         del group
         name = ("v", "q", "k")[submit_index]

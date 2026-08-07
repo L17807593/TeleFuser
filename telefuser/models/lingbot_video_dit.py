@@ -16,6 +16,7 @@ from torch import nn
 
 from telefuser.core.model_registry import register_model_config
 from telefuser.distributed.collectives import all_gather_cat
+from telefuser.distributed.ulysses_backend import UlyssesCommunicator
 from telefuser.distributed.ulysses_comm import ulysses_gather_heads, ulysses_scatter_heads
 from telefuser.ops.attention import attention
 from telefuser.utils.model_weight import hash_state_dict_keys
@@ -128,14 +129,18 @@ class LingBotVideoAttention(nn.Module):
         self.to_out = nn.Linear(hidden_size, hidden_size, bias=out_bias)
         self.attention_config: object | None = None
         self.ulysses_group: dist.ProcessGroup | None = None
+        self.ulysses_communicator: UlyssesCommunicator | None = None
 
     def set_attention_config(self, attention_config: object) -> None:
         """Attach a runtime-selected TeleFuser attention implementation."""
         self.attention_config = attention_config
 
-    def set_ulysses_group(self, group: dist.ProcessGroup | None) -> None:
+    def set_ulysses_group(
+        self, group: dist.ProcessGroup | None, communicator: UlyssesCommunicator | None = None
+    ) -> None:
         """Attach the Ulysses process group used for sequence-parallel attention."""
         self.ulysses_group = group
+        self.ulysses_communicator = communicator
 
     def forward(
         self,
@@ -152,17 +157,21 @@ class LingBotVideoAttention(nn.Module):
 
         value = self.to_v(hidden_states).view(batch, sequence, self.num_heads, self.head_dim)
         if use_ulysses:
-            value_wait = ulysses_scatter_heads(value, group, tag="v", barrier=False)
+            value_wait = ulysses_scatter_heads(
+                value, group, tag="v", barrier=False, communicator=self.ulysses_communicator
+            )
 
         query = self.to_q(hidden_states).view(batch, sequence, self.num_heads, self.head_dim)
         query = apply_lingbot_video_complex_rope(self.norm_q(query), rotary_emb)
         if use_ulysses:
-            query_wait = ulysses_scatter_heads(query, group, tag="q", barrier=False)
+            query_wait = ulysses_scatter_heads(
+                query, group, tag="q", barrier=False, communicator=self.ulysses_communicator
+            )
 
         key = self.to_k(hidden_states).view(batch, sequence, self.num_heads, self.head_dim)
         key = apply_lingbot_video_complex_rope(self.norm_k(key), rotary_emb)
         if use_ulysses:
-            key_wait = ulysses_scatter_heads(key, group, tag="k")
+            key_wait = ulysses_scatter_heads(key, group, tag="k", communicator=self.ulysses_communicator)
             query = query_wait()
             key = key_wait()
             value = value_wait()
@@ -329,6 +338,7 @@ class LingBotVideoTransformer3DModel(nn.Module):
         self.norm_out_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size))
         self.proj_out = nn.Linear(hidden_size, prod(patch_size) * out_channels)
         self.ulysses_group: dist.ProcessGroup | None = None
+        self.ulysses_communicator: UlyssesCommunicator | None = None
 
     def set_attention_config(self, attention_config: object) -> None:
         """Propagate a shared attention backend configuration to every DiT block."""
@@ -364,11 +374,27 @@ class LingBotVideoTransformer3DModel(nn.Module):
             if any(part in fp32_names for part in name.split(".")):
                 parameter.data = parameter.data.float()
 
-    def set_ulysses_group(self, group: dist.ProcessGroup | None) -> None:
+    def set_ulysses_group(
+        self, group: dist.ProcessGroup | None, communicator: UlyssesCommunicator | None = None
+    ) -> None:
         """Enable source-order Ulysses sequence parallelism for the joint token stream."""
+        existing = self.ulysses_communicator
+        if existing is not None and existing.process_group is not group:
+            existing.close()
+            existing = None
+        if communicator is None and group is not None:
+            communicator = existing or UlyssesCommunicator(group)
         self.ulysses_group = group
+        self.ulysses_communicator = communicator
         for block in self.blocks:
-            block.attn.set_ulysses_group(group)
+            block.attn.set_ulysses_group(group, communicator)
+
+    def __del__(self) -> None:
+        try:
+            if self.ulysses_communicator is not None:
+                self.ulysses_communicator.close()
+        except Exception:
+            pass
 
     def get_fsdp_module_names(self) -> list[str]:
         """Return block containers suitable for per-block FSDP wrapping."""

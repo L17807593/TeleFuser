@@ -296,7 +296,7 @@ class LiveKitWorker:
         if wait_for_delivery_ack and published_frames and not self._stop_event.is_set():
             try:
                 await asyncio.wait_for(self._delivery_ack_event.wait(), timeout=_DELIVERY_ACK_TIMEOUT_SECONDS)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 logger.warning(f"LiveKit delivery acknowledgement timed out: session={session_id}")
         elif published_frames and not self._stop_event.is_set():
             # VideoSource accepts frames before the underlying RTP sender has drained them.
@@ -313,7 +313,7 @@ class LiveKitWorker:
                 self.room_client.disconnect(),
                 timeout=_ROOM_DISCONNECT_TIMEOUT_SECONDS,
             )
-        except TimeoutError:
+        except asyncio.TimeoutError:
             logger.warning(
                 f"LiveKit room disconnect timed out after {_ROOM_DISCONNECT_TIMEOUT_SECONDS:g}s: "
                 f"worker={self.worker_id}"

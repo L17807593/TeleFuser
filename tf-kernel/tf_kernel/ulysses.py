@@ -218,8 +218,6 @@ class CudaIpcUlyssesGroup:
         if self._closed:
             return
         self._comm_stream.synchronize()
-        if dist.is_initialized():
-            dist.barrier(group=self.process_group)
         for target in self._targets.values():
             self._close_target(target)
         for pointer in self._barrier_remote_pointers:

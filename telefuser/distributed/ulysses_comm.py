@@ -8,14 +8,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Any
 
 import torch
 import torch.distributed as dist
 import torch.distributed._functional_collectives as fc
 
+from telefuser.distributed.ulysses_backend import UlyssesCommunicator
+
 logger = logging.getLogger(__name__)
-_cuda_ipc_groups: dict[int, Any | None] = {}
 
 
 def _get_distributed_info(process_group: dist.ProcessGroup) -> tuple[int, int]:
@@ -40,43 +40,6 @@ def _wait_async_tensor(tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
-def _get_cuda_ipc_group(tensor: torch.Tensor, process_group: dist.ProcessGroup) -> Any | None:
-    """Lazily create the optional same-host tf-kernel communication backend."""
-    if not tensor.is_cuda or torch.compiler.is_compiling():
-        return None
-    key = id(process_group)
-    if key in _cuda_ipc_groups:
-        return _cuda_ipc_groups[key]
-    try:
-        from tf_kernel.ulysses import CudaIpcUlyssesGroup
-
-        if not CudaIpcUlyssesGroup.is_available():
-            _cuda_ipc_groups[key] = None
-        else:
-            _cuda_ipc_groups[key] = CudaIpcUlyssesGroup(process_group, tensor.device)
-    except (ImportError, NotImplementedError, RuntimeError) as error:
-        logger.debug("CUDA IPC Ulysses is unavailable; using NCCL: %s", error)
-        _cuda_ipc_groups[key] = None
-    return _cuda_ipc_groups[key]
-
-
-def _disable_cuda_ipc_group(process_group: dist.ProcessGroup, error: Exception) -> None:
-    key = id(process_group)
-    group = _cuda_ipc_groups.get(key)
-    if group is not None:
-        group.close()
-    _cuda_ipc_groups[key] = None
-    logger.warning("CUDA IPC Ulysses failed; falling back to NCCL: %s", error)
-
-
-def _close_cuda_ipc_groups() -> None:
-    """Collectively close initialized CUDA IPC groups before process-group teardown."""
-    groups = [group for group in _cuda_ipc_groups.values() if group is not None]
-    _cuda_ipc_groups.clear()
-    for group in groups:
-        group.close()
-
-
 def ulysses_scatter_heads(
     tensor: torch.Tensor,
     process_group: dist.ProcessGroup,
@@ -84,6 +47,7 @@ def ulysses_scatter_heads(
     async_comm: bool = True,
     tag: str | None = None,
     barrier: bool = True,
+    communicator: UlyssesCommunicator | None = None,
 ) -> Callable[[], torch.Tensor]:
     """Scatter global heads and gather sequence across Ulysses ranks.
 
@@ -95,25 +59,13 @@ def ulysses_scatter_heads(
     batch, local_seq_len, num_heads, head_dim = tensor.shape
     local_heads = _local_head_count(num_heads, world_size)
 
-    existing_group = _cuda_ipc_groups.get(id(process_group))
-    use_cuda_ipc = (
-        async_comm
-        and tag is not None
-        and (not barrier or (existing_group is not None and existing_group.has_pending_group))
+    use_optimized_backend = (
+        async_comm and tag is not None and communicator is not None and (not barrier or communicator.has_pending_group)
     )
-    cuda_ipc_group = _get_cuda_ipc_group(tensor, process_group) if use_cuda_ipc else None
-    if cuda_ipc_group is not None:
-        group_was_pending = cuda_ipc_group.has_pending_group
-        try:
-            handle = cuda_ipc_group.all_to_all_single_4d_async(tensor, mode=0, tag=tag, barrier=barrier)
-            return handle.wait
-        except RuntimeError as error:
-            if group_was_pending or cuda_ipc_group.has_pending_group:
-                raise RuntimeError(
-                    "CUDA IPC Ulysses failed after a grouped transfer started; "
-                    "the request cannot safely fall back to NCCL"
-                ) from error
-            _disable_cuda_ipc_group(process_group, error)
+    if use_optimized_backend:
+        wait = communicator.submit(tensor, tag=tag, barrier=barrier)
+        if wait is not None:
+            return wait
 
     tensor = tensor.reshape(batch, local_seq_len, world_size, local_heads, head_dim)
     tensor = tensor.permute(2, 1, 0, 3, 4).contiguous()

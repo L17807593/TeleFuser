@@ -191,6 +191,11 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         parallel_config = self.model_runtime_config.parallel_config
         self.dit.device_mesh = create_device_mesh_from_config(parallel_config)
         self.dit.set_attention_config(self.model_runtime_config.attention_config)
+        if parallel_config.tp_degree > 1:
+            if parallel_config.enable_fsdp:
+                raise ValueError("LingBot does not support FSDP with tensor parallelism")
+            self.dit.enable_tp(self.dit.device_mesh)
+
         if parallel_config.sp_ulysses_degree > 1:
             self.dit.enable_usp(self.dit.device_mesh)
         if parallel_config.enable_fsdp:
@@ -268,6 +273,13 @@ class LingBotWorldFastDenoisingStage(BaseStage):
     def release_vae_decode_cache(self, cache_handle: int) -> bool:
         return self._require_vae_decode_stage().release_cache(cache_handle)
 
+    def _local_attention_head_counts(self) -> tuple[int, int]:
+        """Return self- and cross-attention head counts after optional TP sharding."""
+        blocks = getattr(self.dit, "blocks", None)
+        if blocks:
+            return blocks[0].self_attn.num_heads, blocks[0].cross_attn.num_heads
+        return self.dit.num_heads, self.dit.num_heads
+
     def _init_self_kv_cache(
         self,
         batch_size: int,
@@ -276,7 +288,7 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         head_dim = self.dit.dim // self.dit.num_heads
         device_mesh = getattr(self.dit, "device_mesh", None)
         ulysses_world_size = get_ulysses_world_size(device_mesh)
-        num_heads = self.dit.num_heads
+        num_heads, _ = self._local_attention_head_counts()
         if ulysses_world_size > 1:
             if num_heads % ulysses_world_size:
                 raise ValueError(
@@ -306,7 +318,8 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         max_sequence_length: int,
     ) -> list[dict[str, torch.Tensor | bool | int]]:
         head_dim = self.dit.dim // self.dit.num_heads
-        shape = (batch_size, max_sequence_length, self.dit.num_heads, head_dim)
+        _, cross_num_heads = self._local_attention_head_counts()
+        shape = (batch_size, max_sequence_length, cross_num_heads, head_dim)
         return [
             {
                 "k": torch.zeros(shape, dtype=self.torch_dtype, device=self.device),
@@ -321,11 +334,12 @@ class LingBotWorldFastDenoisingStage(BaseStage):
         head_dim = self.dit.dim // self.dit.num_heads
         device_mesh = getattr(self.dit, "device_mesh", None)
         ulysses_world_size = get_ulysses_world_size(device_mesh)
-        if self.dit.num_heads % ulysses_world_size:
+        self_num_heads, cross_num_heads = self._local_attention_head_counts()
+        if self_num_heads % ulysses_world_size:
             raise ValueError(
-                f"LingBot attention heads {self.dit.num_heads} are not divisible by SP degree {ulysses_world_size}"
+                f"LingBot TP-local attention heads {self_num_heads} are not divisible by SP degree {ulysses_world_size}"
             )
-        return head_dim, self.dit.num_heads, self.dit.num_heads // ulysses_world_size
+        return head_dim, cross_num_heads, self_num_heads // ulysses_world_size
 
     def estimate_session_cache_bytes(self, batch_size: int, kv_size: int, max_sequence_length: int) -> int:
         """Return persistent DiT KV and observed retained-state bytes for one session on this rank."""

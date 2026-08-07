@@ -71,6 +71,7 @@ def test_causal_self_attention_overlaps_tagged_qkv_ulysses_collectives() -> None
         *,
         tag: str,
         barrier: bool = True,
+        communicator: object | None = None,
     ):
         events.append(f"submit-{tag}")
         assert barrier is (tag == "k")

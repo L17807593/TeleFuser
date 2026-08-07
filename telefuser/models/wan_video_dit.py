@@ -114,6 +114,7 @@ class SelfAttention(nn.Module):
         self.norm_q = RMSNorm(dim, eps=eps)
         self.norm_k = RMSNorm(dim, eps=eps)
         self.usp_flag = False
+        self.ulysses_communicator: Any | None = None
 
     def _resolve_attention_config(self, sparse_state: SparseAttentionState | None) -> AttentionConfig:
         if sparse_state is None and self.attention_config.is_sparse():
@@ -132,15 +133,15 @@ class SelfAttention(nn.Module):
         group = get_ulysses_group(device_mesh)
         v = self.v(x)
         v = rearrange(v, "b s (n d) -> b s n d", n=self.num_heads)
-        v_wait = ulysses_scatter_heads(v, group, tag="v", barrier=False)
+        v_wait = ulysses_scatter_heads(v, group, tag="v", barrier=False, communicator=self.ulysses_communicator)
         q = self.norm_q(self.q(x))
         q = rope_apply(q, freqs_cos, freqs_sin, self.num_heads)
         q = rearrange(q, "b s (n d) -> b s n d", n=self.num_heads)
-        q_wait = ulysses_scatter_heads(q, group, tag="q", barrier=False)
+        q_wait = ulysses_scatter_heads(q, group, tag="q", barrier=False, communicator=self.ulysses_communicator)
         k = self.norm_k(self.k(x))
         k = rope_apply(k, freqs_cos, freqs_sin, self.num_heads)
         k = rearrange(k, "b s (n d) -> b s n d", n=self.num_heads)
-        k_wait = ulysses_scatter_heads(k, group, tag="k")
+        k_wait = ulysses_scatter_heads(k, group, tag="k", communicator=self.ulysses_communicator)
         v = v_wait()
         q = q_wait()
         k = k_wait()
@@ -571,8 +572,11 @@ class WanModel(BaseModel):
         """Enable Ulysses-style sequence parallelism."""
         logger.info("wan dit enable usp")
         self.usp_flag = True
+        group = get_ulysses_group(self.device_mesh)
+        communicator = self._configure_ulysses_communicator(group)
         for block in self.blocks:
             block.self_attn.usp_flag = True
+            block.self_attn.ulysses_communicator = communicator
 
     def enable_pp(self):
         """Enable pipeline parallelism."""

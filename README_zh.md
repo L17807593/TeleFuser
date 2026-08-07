@@ -248,6 +248,7 @@ telefuser/
 
 ## 文档
 
+- [docs/zh/blog/index.md](docs/zh/blog/index.md)：优化设计、profiling 证据、效果与 Related Work
 - [docs/zh/service.md](docs/zh/service.md)：REST 服务、任务 API、OpenAI 兼容接口
 - [docs/zh/stream_server.md](docs/zh/stream_server.md)：LiveKit 流服务、session API、data topic 和部署
 - [docs/zh/stream_scheduler.md](docs/zh/stream_scheduler.md)：基于 actor 的 Stage 调度、backpressure、生命周期、指标和 LingBot 卡位
