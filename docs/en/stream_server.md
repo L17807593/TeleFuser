@@ -121,8 +121,9 @@ python examples/stream_server/livekit_bidirectional_demo.py \
 ```
 
 Open `http://127.0.0.1:8092`, select an image, and click **Start**. With VS Code Remote SSH, forward TCP ports
-`8092`, `7880`, and `3478` to the same local ports. The page proxies the session API, so `8088` does not need
-browser-side forwarding.
+`8092`, `7880`, `3478`, and the TURN relay range `49160-49200` to the same local ports. The page proxies the
+session API, so `8088` does not need browser-side forwarding. For a single ABot session, set coturn's min/max relay
+port to `49160` and forward only that port.
 
 The loopback TURN listener, static password, disabled TLS, `--allow-loopback-peers`, LiveKit development
 credentials, and `--skip-validation` are for a trusted development host only. Stop the browser session before
