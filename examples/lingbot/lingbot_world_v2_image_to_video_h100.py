@@ -5,6 +5,8 @@ Single GPU:
 
 Four GPUs with Ulysses sequence parallelism:
     python examples/lingbot/lingbot_world_v2_image_to_video_h100.py --gpu_num 4
+Four GPUs with SP2 + TP2 DiT parallelism:
+    python examples/lingbot/lingbot_world_v2_image_to_video_h100.py --gpu_num 4 --tp_degree 2
 Six GPUs with five-way DiT parallelism and one dedicated VAE GPU:
     python examples/lingbot/lingbot_world_v2_image_to_video_h100.py --gpu_num 6
 Multi-GPU runs configure the VAE worker and DiT SP group independently in PPL_CONFIG.
@@ -68,6 +70,7 @@ PPL_CONFIG = dict(
         )
         for index in range(1, 9)
     ],
+    tp_degree=1,
     parallelism=1,
     vae_encode_device_id=0,
     vae_decode_device_id=0,
@@ -221,9 +224,9 @@ def get_pipeline(
     return pipeline
 
 
-def get_service(gpu_num: int = PPL_CONFIG["parallelism"]) -> LingBotWorldFastService:
+def get_service(gpu_num: int = PPL_CONFIG["parallelism"], tp_degree: int | None = None) -> LingBotWorldFastService:
     """Build the service loaded by the TeleFuser stream server."""
-    pipeline = get_pipeline(parallelism=gpu_num)
+    pipeline = get_pipeline(parallelism=gpu_num, tp_degree=PPL_CONFIG["tp_degree"] if tp_degree is None else tp_degree)
     return _LingBotWorldV2Service(
         pipeline,
         default_fps=PPL_CONFIG["target_fps"],
@@ -300,7 +303,7 @@ def run(
 )
 @click.option(
     "--tp_degree",
-    default=1,
+    default=PPL_CONFIG["tp_degree"],
     type=click.IntRange(min=1),
     help="DiT tensor-parallel degree; use 2 with --gpu_num 4 for SP2+TP2",
 )

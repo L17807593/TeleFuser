@@ -88,6 +88,7 @@ PY
 | Continuous chunked generation | ✔️ |
 | Single-GPU inference | ✔️ |
 | Ulysses Sequence Parallel | ✔️ |
+| Tensor Parallel (v2 DiT) | Configurable through `--tp_degree` offline or `PPL_CONFIG["tp_degree"]` for stream service |
 | FSDP | Configurable through PPL_CONFIG |
 | H100 optimized attention | v2: FA4, then FA3/SageAttention; v1: SageAttention |
 
@@ -122,6 +123,41 @@ python examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
     --gpu_num 4 \
     --model_root "${TF_MODEL_ZOO_PATH}/Wan2.2-I2V-A14B" \
     --v2_model_root "${TF_MODEL_ZOO_PATH}/lingbot/lingbot-world-v2-14b-causal-fast/transformers"
+```
+
+### LingBot-World v2 Tensor Parallel
+
+For four H100 GPUs, the default v2 layout is `SP4 TP1`: all four DiT workers participate in Ulysses sequence parallelism and no DiT tensor sharding is applied. Use `--tp_degree 2` to run `SP2 TP2`, matching the MiniMax-H3 style 2-way sequence parallel plus 2-way tensor parallel layout. `tp_degree` must divide the DiT worker count selected by `--gpu_num`.
+
+```bash
+python examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
+    --gpu_num 4 \
+    --tp_degree 2 \
+    --model_root "${TF_MODEL_ZOO_PATH}/Wan2.2-I2V-A14B" \
+    --v2_model_root "${TF_MODEL_ZOO_PATH}/lingbot/lingbot-world-v2-14b-causal-fast/transformers"
+```
+
+The stream-server loader only passes `gpu_num` into `get_service()`. To serve with TP, set `PPL_CONFIG["tp_degree"] = 2` in this example or call `get_service(gpu_num=4, tp_degree=2)` from an explicit wrapper. This keeps the shared stream service API unchanged.
+
+The following direct pipeline-service benchmark uses 77 frames, five chunks, 832x480, BF16 DiT, FP32 VAE, FlashAttention 4, and excludes chunk 0 from the steady summary. `steady_compute_fps` includes target-side condition handling, DiT, clean-KV update, spatial VAE decode, GPU-to-CPU transfer, and frame conversion. `steady_denoise_gpu_fps` isolates the DiT denoise GPU span reported by the denoise worker.
+
+| DiT layout | Steady compute FPS | Steady denoise GPU FPS | Steady DMD step FPS | Denoise peak allocated | Denoise peak reserved |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `SP4 TP1` | 18.25 | 24.57 | 30.39 | 50.7 GiB | 57.1 GiB |
+| `SP2 TP2` | 16.22 | 20.93 | 25.71 | 34.9 GiB | 41.2 GiB |
+
+`SP2 TP2` reduces denoise peak allocated memory by about 31% and peak reserved memory by about 28%, with an 11% drop in steady service chunk FPS on this 77-frame run.
+
+Reproduce the same steady TP comparison with the benchmark harness:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+python tools/validation/benchmark_lingbot_world_v2_tp.py \
+    --tp-degree 2 \
+    --frame-num 77 \
+    --output work_dirs/lingbot_world_v2_sp2_tp2_steady.json \
+    --model-root "${TF_MODEL_ZOO_PATH}/Wan2.2-I2V-A14B" \
+    --v2-model-root "${TF_MODEL_ZOO_PATH}/lingbot/lingbot-world-v2-14b-causal-fast/transformers"
 ```
 
 ### Validated Four-H100 Real-Time Gate

@@ -133,7 +133,7 @@ def test_v2_unified_example_service_constructs_v2_session_from_ppl_config() -> N
     with patch.object(offline_example, "get_pipeline", return_value=pipeline) as get_pipeline:
         service = offline_example.get_service(gpu_num=4)
 
-    get_pipeline.assert_called_once_with(parallelism=4)
+    get_pipeline.assert_called_once_with(parallelism=4, tp_degree=1)
     session_id = service.create_session({"image": Image.new("RGB", (8, 8))})
     session_config = pipeline.control_context.call_args.args[0]
 
@@ -152,6 +152,18 @@ def test_v2_unified_example_service_constructs_v2_session_from_ppl_config() -> N
     assert service.default_session_config["control_translation_scale"] == 1.0
     assert service.default_session_config["intrinsics_path"] == offline_example.DEFAULT_INTRINSICS_PATH
     assert session_id in service._sessions
+
+
+def test_v2_service_forwards_configured_tp_degree() -> None:
+    pipeline = MagicMock()
+
+    with (
+        patch.dict(offline_example.PPL_CONFIG, {"tp_degree": 2}),
+        patch.object(offline_example, "get_pipeline", return_value=pipeline) as get_pipeline,
+    ):
+        offline_example.get_service(gpu_num=4)
+
+    get_pipeline.assert_called_once_with(parallelism=4, tp_degree=2)
 
 
 def test_v2_service_resolves_one_minute_to_complete_latent_chunks() -> None:

@@ -5,6 +5,7 @@ import os
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
@@ -12,7 +13,14 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from telefuser.core.base_model import BaseModel
 from telefuser.core.config import AttentionConfig
-from telefuser.distributed.device_mesh import get_ulysses_group, get_ulysses_world_size
+from telefuser.distributed.collectives import all_reduce_sum_
+from telefuser.distributed.device_mesh import (
+    get_tp_group,
+    get_tp_rank,
+    get_tp_world_size,
+    get_ulysses_group,
+    get_ulysses_world_size,
+)
 from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequence_parallel_unshard
 from telefuser.distributed.ulysses_comm import ulysses_gather_heads, ulysses_scatter_heads
 from telefuser.ops.attention import attention as attn_func
@@ -29,6 +37,78 @@ from telefuser.utils.model_weight import init_weights_on_device, load_state_dict
 from .wan_video_dit import apply_rotary_emb, precompute_freqs_cis_3d, sinusoidal_embedding_1d
 
 _PreparedControl = tuple[torch.Tensor, tuple[tuple[torch.Tensor, torch.Tensor], ...]]
+
+
+def _replace_parameter(module: nn.Module, name: str, value: torch.Tensor) -> None:
+    parameter = module.get_parameter(name)
+    setattr(module, name, nn.Parameter(value.contiguous(), requires_grad=parameter.requires_grad))
+
+
+def _shard_linear_output(linear: nn.Linear, *, rank: int, world_size: int) -> None:
+    """Shard a linear output dimension, retaining local bias elements."""
+    if linear.out_features % world_size:
+        raise ValueError(f"linear output size {linear.out_features} must divide TP degree {world_size}")
+    _replace_parameter(linear, "weight", linear.weight.chunk(world_size, dim=0)[rank])
+    if linear.bias is not None:
+        _replace_parameter(linear, "bias", linear.bias.chunk(world_size, dim=0)[rank])
+    linear.out_features //= world_size
+
+
+def _shard_linear_input(linear: nn.Linear, *, rank: int, world_size: int) -> None:
+    """Shard a linear input dimension while retaining a full output bias."""
+    if linear.in_features % world_size:
+        raise ValueError(f"linear input size {linear.in_features} must divide TP degree {world_size}")
+    _replace_parameter(linear, "weight", linear.weight.chunk(world_size, dim=1)[rank])
+    linear.in_features //= world_size
+
+
+def _shard_normalization_output(norm: nn.Module, *, rank: int, world_size: int) -> None:
+    """Shard an affine normalization parameter following an output projection."""
+    weight = getattr(norm, "weight", None)
+    if weight is None:
+        return
+    if weight.numel() % world_size:
+        raise ValueError(f"normalization width {weight.numel()} must divide TP degree {world_size}")
+    _replace_parameter(norm, "weight", weight.chunk(world_size)[rank])
+    bias = getattr(norm, "bias", None)
+    if bias is not None:
+        _replace_parameter(norm, "bias", bias.chunk(world_size)[rank])
+
+
+def _tp_rowwise_linear(
+    linear: nn.Linear,
+    value: torch.Tensor,
+    *,
+    group: dist.ProcessGroup,
+    rank: int,
+    world_size: int,
+) -> torch.Tensor:
+    """Apply an input-sharded linear and sum its full-width output across TP ranks."""
+    if value.shape[-1] != linear.in_features * world_size:
+        raise ValueError(
+            f"TP row-parallel input has width {value.shape[-1]}, expected {linear.in_features * world_size}"
+        )
+    local_input = value.narrow(-1, rank * linear.in_features, linear.in_features)
+    output = F.linear(local_input, linear.weight, bias=None)
+    all_reduce_sum_((output,), group=group)
+    if linear.bias is not None:
+        output = output + linear.bias
+    return output
+
+
+def _tp_rowwise_linear_local(
+    linear: nn.Linear,
+    value: torch.Tensor,
+    *,
+    group: dist.ProcessGroup,
+    rank: int = 0,
+    world_size: int = 1,
+) -> torch.Tensor:
+    output = F.linear(value, linear.weight, bias=None)
+    all_reduce_sum_((output,), group=group)
+    if linear.bias is not None:
+        output = output + linear.bias
+    return output
 
 
 def _cache_index_to_int(cache: dict[str, object], name: str) -> int:
@@ -87,6 +167,10 @@ class CausalSelfAttention(nn.Module):
         self.norm_q = RMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = RMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
+        self.tp_group: dist.ProcessGroup | None = None
+        self.ulysses_communicator: Any | None = None
+        self.tp_rank = 0
+
     def _prepare_causal_rope(
         self,
         freqs_cos: torch.Tensor,
@@ -142,6 +226,20 @@ class CausalSelfAttention(nn.Module):
             return roped
         return torch.cat([roped, x[:, sequence_length:]], dim=1)
 
+    def enable_tp(self, group: dist.ProcessGroup, *, rank: int, world_size: int) -> None:
+        """Shard attention projections across a tensor-parallel group."""
+        if self.num_heads % world_size:
+            raise ValueError(f"attention heads ({self.num_heads}) must divide TP degree ({world_size})")
+        _shard_linear_output(self.q, rank=rank, world_size=world_size)
+        _shard_linear_output(self.k, rank=rank, world_size=world_size)
+        _shard_linear_output(self.v, rank=rank, world_size=world_size)
+        _shard_linear_input(self.o, rank=rank, world_size=world_size)
+        _shard_normalization_output(self.norm_q, rank=rank, world_size=world_size)
+        _shard_normalization_output(self.norm_k, rank=rank, world_size=world_size)
+        self.num_heads //= world_size
+        self.tp_group = group
+        self.tp_rank = rank
+
     def forward(
         self,
         x: torch.Tensor,
@@ -160,15 +258,15 @@ class CausalSelfAttention(nn.Module):
 
         v = rearrange(self.v(x), "b s (n d) -> b s n d", n=self.num_heads)
         if ulysses_enabled:
-            v_wait = ulysses_scatter_heads(v, group, tag="v", barrier=False)
+            v_wait = ulysses_scatter_heads(v, group, tag="v", barrier=False, communicator=self.ulysses_communicator)
 
         q = rearrange(self.norm_q(self.q(x)), "b s (n d) -> b s n d", n=self.num_heads)
         if ulysses_enabled:
-            q_wait = ulysses_scatter_heads(q, group, tag="q", barrier=False)
+            q_wait = ulysses_scatter_heads(q, group, tag="q", barrier=False, communicator=self.ulysses_communicator)
 
         k = rearrange(self.norm_k(self.k(x)), "b s (n d) -> b s n d", n=self.num_heads)
         if ulysses_enabled:
-            k_wait = ulysses_scatter_heads(k, group, tag="k")
+            k_wait = ulysses_scatter_heads(k, group, tag="k", communicator=self.ulysses_communicator)
 
         frame_tokens = grid_size[1] * grid_size[2]
         start_frame = current_start // frame_tokens
@@ -235,6 +333,10 @@ class CausalSelfAttention(nn.Module):
             out = ulysses_gather_heads(out, group, num_heads=self.num_heads)()
 
         out = rearrange(out, "b s n d -> b s (n d)")
+        if self.tp_group is not None:
+            return _tp_rowwise_linear_local(
+                self.o, out, group=self.tp_group, rank=self.tp_rank, world_size=self.dim // self.o.in_features
+            )
         return self.o(out)
 
 
@@ -254,6 +356,23 @@ class CachedCrossAttention(nn.Module):
         self.o = nn.Linear(dim, dim)
         self.norm_q = RMSNorm(dim, eps=eps)
         self.norm_k = RMSNorm(dim, eps=eps)
+
+        self.tp_group: dist.ProcessGroup | None = None
+        self.tp_rank = 0
+
+    def enable_tp(self, group: dist.ProcessGroup, *, rank: int, world_size: int) -> None:
+        """Shard attention projections across a tensor-parallel group."""
+        if self.num_heads % world_size:
+            raise ValueError(f"attention heads ({self.num_heads}) must divide TP degree ({world_size})")
+        _shard_linear_output(self.q, rank=rank, world_size=world_size)
+        _shard_linear_output(self.k, rank=rank, world_size=world_size)
+        _shard_linear_output(self.v, rank=rank, world_size=world_size)
+        _shard_linear_input(self.o, rank=rank, world_size=world_size)
+        _shard_normalization_output(self.norm_q, rank=rank, world_size=world_size)
+        _shard_normalization_output(self.norm_k, rank=rank, world_size=world_size)
+        self.num_heads //= world_size
+        self.tp_group = group
+        self.tp_rank = rank
 
     def forward(
         self,
@@ -300,6 +419,10 @@ class CachedCrossAttention(nn.Module):
             output_layout="BSND",
         )
         out = rearrange(out, "b s n d -> b s (n d)")
+        if self.tp_group is not None:
+            return _tp_rowwise_linear_local(
+                self.o, out, group=self.tp_group, rank=self.tp_rank, world_size=self.dim // self.o.in_features
+            )
         return self.o(out)
 
 
@@ -345,8 +468,51 @@ class LingBotWorldFastBlock(nn.Module):
 
         self.cam_injector_layer1 = nn.Linear(dim, dim)
         self.cam_injector_layer2 = nn.Linear(dim, dim)
+
         self.cam_scale_layer = nn.Linear(dim, dim)
         self.cam_shift_layer = nn.Linear(dim, dim)
+
+        self.tp_group: dist.ProcessGroup | None = None
+        self.tp_rank = 0
+        self.tp_world_size = 1
+
+    def enable_tp(self, group: dist.ProcessGroup, *, rank: int, world_size: int) -> None:
+        """Shard the repeated transformer-block weights across TP ranks."""
+        if self.ffn[0].out_features % world_size:
+            raise ValueError(f"FFN width ({self.ffn[0].out_features}) must divide TP degree ({world_size})")
+        self.self_attn.enable_tp(group, rank=rank, world_size=world_size)
+        self.cross_attn.enable_tp(group, rank=rank, world_size=world_size)
+        _shard_linear_output(self.ffn[0], rank=rank, world_size=world_size)
+        _shard_linear_input(self.ffn[2], rank=rank, world_size=world_size)
+        _shard_linear_output(self.cam_injector_layer1, rank=rank, world_size=world_size)
+        _shard_linear_input(self.cam_injector_layer2, rank=rank, world_size=world_size)
+        _shard_linear_input(self.cam_scale_layer, rank=rank, world_size=world_size)
+        _shard_linear_input(self.cam_shift_layer, rank=rank, world_size=world_size)
+        self.tp_group = group
+        self.tp_rank = rank
+        self.tp_world_size = world_size
+
+    def camera_modulation(self, control_tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Prepare one block's static camera modulation with the active TP layout."""
+        if self.tp_group is None:
+            hidden = self.cam_injector_layer2(F.silu(self.cam_injector_layer1(control_tokens)))
+            hidden = hidden + control_tokens
+            return self.cam_scale_layer(hidden), self.cam_shift_layer(hidden)
+        hidden = _tp_rowwise_linear_local(
+            self.cam_injector_layer2,
+            F.silu(self.cam_injector_layer1(control_tokens)),
+            group=self.tp_group,
+            rank=self.tp_rank,
+            world_size=self.tp_world_size,
+        )
+        hidden = hidden + control_tokens
+        scale = _tp_rowwise_linear(
+            self.cam_scale_layer, hidden, group=self.tp_group, rank=self.tp_rank, world_size=self.tp_world_size
+        )
+        shift = _tp_rowwise_linear(
+            self.cam_shift_layer, hidden, group=self.tp_group, rank=self.tp_rank, world_size=self.tp_world_size
+        )
+        return scale, shift
 
     def forward(
         self,
@@ -398,19 +564,44 @@ class LingBotWorldFastBlock(nn.Module):
             scale, shift = camera_modulation
             x = fused_scale_shift(x, scale, shift).to(dtype=x.dtype)
         elif control_tokens is not None:
-            hidden = self.cam_injector_layer2(F.silu(self.cam_injector_layer1(control_tokens)))
-            hidden = hidden + control_tokens
-            x = (1.0 + self.cam_scale_layer(hidden)) * x + self.cam_shift_layer(hidden)
+            if self.tp_group is None:
+                hidden = self.cam_injector_layer2(F.silu(self.cam_injector_layer1(control_tokens)))
+                hidden = hidden + control_tokens
+                x = (1.0 + self.cam_scale_layer(hidden)) * x + self.cam_shift_layer(hidden)
+            else:
+                hidden = (
+                    _tp_rowwise_linear_local(
+                        self.cam_injector_layer2,
+                        F.silu(self.cam_injector_layer1(control_tokens)),
+                        group=self.tp_group,
+                        rank=self.tp_rank,
+                        world_size=self.tp_world_size,
+                    )
+                    + control_tokens
+                )
+                scale = _tp_rowwise_linear(
+                    self.cam_scale_layer, hidden, group=self.tp_group, rank=self.tp_rank, world_size=self.tp_world_size
+                )
+                shift = _tp_rowwise_linear(
+                    self.cam_shift_layer, hidden, group=self.tp_group, rank=self.tp_rank, world_size=self.tp_world_size
+                )
+                x = fused_scale_shift(x, scale, shift).to(dtype=x.dtype)
 
         cross_attn_out = self.cross_attn(self.norm3(x), context, crossattn_cache)
-        mlp_in, x = _fused_add_layer_norm_scale_shift(
-            x,
-            cross_attn_out,
-            scale_mlp,
-            shift_mlp,
-            eps=self.norm2.eps,
+        mlp_in, x = _fused_add_layer_norm_scale_shift(x, cross_attn_out, scale_mlp, shift_mlp, eps=self.norm2.eps)
+        ffn_output = (
+            self.ffn(mlp_in)
+            if self.tp_group is None
+            else _tp_rowwise_linear_local(
+                self.ffn[2],
+                self.ffn[1](self.ffn[0](mlp_in)),
+                group=self.tp_group,
+                rank=self.tp_rank,
+                world_size=self.tp_world_size,
+            )
         )
-        x = self.gate(x, gate_mlp, self.ffn(mlp_in))
+        x = self.gate(x, gate_mlp, ffn_output)
+
         return x
 
 
@@ -517,6 +708,7 @@ class LingBotWorldFastDiT(BaseModel):
         self._freqs_by_device: dict[tuple[str, int | None], tuple[torch.Tensor, torch.Tensor]] = {}
         self.device_mesh: DeviceMesh | None = None
         self.usp_flag = False
+        self.tp_flag = False
 
         self.init_weights()
 
@@ -577,9 +769,7 @@ class LingBotWorldFastDiT(BaseModel):
             sequence_parallel_shard(self.device_mesh, [control_tokens], [1])
         camera_modulations: list[tuple[torch.Tensor, torch.Tensor]] = []
         for block in self.blocks:
-            block_hidden = block.cam_injector_layer2(F.silu(block.cam_injector_layer1(control_tokens)))
-            block_hidden = block_hidden + control_tokens
-            camera_modulations.append((block.cam_scale_layer(block_hidden), block.cam_shift_layer(block_hidden)))
+            camera_modulations.append(block.camera_modulation(control_tokens))
         return control_tokens, tuple(camera_modulations)
 
     def _project_text_context(self, context: torch.Tensor) -> torch.Tensor:
@@ -753,6 +943,30 @@ class LingBotWorldFastDiT(BaseModel):
         """Enable Ulysses sequence parallelism for LingBot-World-Fast DiT."""
         self.device_mesh = device_mesh if device_mesh is not None else self.device_mesh
         self.usp_flag = get_ulysses_world_size(self.device_mesh) > 1
+        group = get_ulysses_group(self.device_mesh) if self.usp_flag else None
+        communicator = self._configure_ulysses_communicator(group)
+        for block in self.blocks:
+            block.self_attn.ulysses_communicator = communicator
+
+    def enable_tp(self, device_mesh: DeviceMesh | None = None) -> None:
+        """Enable manual tensor parallelism for the repeated LingBot DiT blocks."""
+        self.device_mesh = device_mesh if device_mesh is not None else self.device_mesh
+        world_size = get_tp_world_size(self.device_mesh)
+        if world_size <= 1:
+            return
+        if self.tp_flag:
+            raise RuntimeError("LingBot tensor parallelism is already enabled")
+        group = get_tp_group(self.device_mesh)
+        if group is None:
+            raise RuntimeError("LingBot TP requires a tensor-parallel process group")
+        rank = get_tp_rank(self.device_mesh)
+        if self.num_heads % world_size:
+            raise ValueError(f"LingBot attention heads ({self.num_heads}) must divide TP degree ({world_size})")
+        if self.ffn_dim % world_size:
+            raise ValueError(f"LingBot FFN width ({self.ffn_dim}) must divide TP degree ({world_size})")
+        for block in self.blocks:
+            block.enable_tp(group, rank=rank, world_size=world_size)
+        self.tp_flag = True
 
     def set_attention_config(self, attention_config: AttentionConfig) -> None:
         """Set the unified attention backend for self-attention and cross-attention."""
