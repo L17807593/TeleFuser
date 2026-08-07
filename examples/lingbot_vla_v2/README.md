@@ -186,6 +186,64 @@ the first accepted request represents a ready replica. The default `service-thre
 service runner's fixed worker thread; use `--execution-mode direct` only to measure the in-process pipeline ceiling.
 Shutdown still offloads the policy explicitly.
 
+## Native Structured API Validation
+
+Use the VLA-specific HTTP validator after the native service reports ready. This is the structured-output counterpart
+to the model-specific direct and AIPerf workloads used by the video and LingBot-World integrations: it exercises the
+real TeleFuser HTTP boundary, asynchronous scheduler, task status polling, pipeline pool, and result serialization.
+It emits raw request facts and aggregate latency distributions to a JSON artifact; it does not add a VLA-specific
+service interface or change shared metric semantics.
+
+Run a single-replica smoke and latency check:
+
+```bash
+.venv-vla/bin/python tools/validation/validate_lingbot_vla_v2_structured_service.py \
+  --base-url http://127.0.0.1:18080 \
+  --image examples/data/lingbot_world_fast/image.jpg \
+  --warmup 1 \
+  --requests 20 \
+  --concurrency 1 \
+  --output work_dirs/vla_service_validation/smoke_20.json
+```
+
+When the target was started with two independent replicas, validate request-level concurrency with:
+
+```bash
+.venv-vla/bin/python tools/validation/validate_lingbot_vla_v2_structured_service.py \
+  --base-url http://127.0.0.1:18080 \
+  --image examples/data/lingbot_world_fast/image.jpg \
+  --warmup 2 \
+  --requests 100 \
+  --concurrency 2 \
+  --output work_dirs/vla_service_validation/two_replica_100.json
+```
+
+Use duration mode for a bounded soak. Workers use closed-loop scheduling: each worker submits its next request only
+after its previous task reaches a terminal state.
+
+```bash
+.venv-vla/bin/python tools/validation/validate_lingbot_vla_v2_structured_service.py \
+  --base-url http://127.0.0.1:18080 \
+  --camera-high /data/cam_high.png \
+  --camera-left-wrist /data/cam_left_wrist.png \
+  --camera-right-wrist /data/cam_right_wrist.png \
+  --duration-seconds 7200 \
+  --concurrency 1 \
+  --output work_dirs/vla_service_validation/soak_2h.json
+```
+
+The command exits nonzero if readiness or contract checks fail, any measured request fails, task IDs are duplicated,
+or the queue is not drained at the end. Each successful record validates the expected `50x55` finite action tensor
+and retains only statistics and a float64 action fingerprint. Full actions and Base64 camera contents are deliberately
+excluded from the artifact. `--max-records` bounds retained per-request samples during long runs while aggregate
+latency and success counters still cover the complete run.
+
+This validation aligns VLA with the repository's existing deployment practice, but it is not yet an AIPerf workload:
+AIPerf currently has maintained adapters for batch media and LingBot streaming transports, not the asynchronous
+structured task API. The JSON report therefore keeps target inference time separate from client end-to-end time and
+preserves target metadata and raw service metric snapshots so a future transport adapter can consume the same facts.
+Passing this check proves serving and normalized action structure, not embodiment-specific control semantics.
+
 ## TeleFuser Regression Baseline
 
 The validation capture runs through the public loader and pipeline, then records preprocessing tensors, fixed initial
