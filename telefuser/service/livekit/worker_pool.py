@@ -11,6 +11,7 @@ from .session_registry import SessionRecord
 from .worker import LiveKitWorker
 
 _SESSION_STOP_GRACE_SECONDS = 8.0
+_SESSION_CANCEL_GRACE_SECONDS = 1.0
 
 
 class WorkerPool(Protocol):
@@ -65,7 +66,7 @@ class InProcessLiveKitWorkerPool:
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=_SESSION_STOP_GRACE_SECONDS)
             return
-        except TimeoutError:
+        except asyncio.TimeoutError:
             logger.warning(
                 f"LiveKit session did not stop within {_SESSION_STOP_GRACE_SECONDS:g}s; "
                 f"cancelling runner: session={session_id}"
@@ -74,9 +75,14 @@ class InProcessLiveKitWorkerPool:
         if not task.done():
             task.cancel()
         try:
-            await task
+            await asyncio.wait_for(task, timeout=_SESSION_CANCEL_GRACE_SECONDS)
         except asyncio.CancelledError:
             pass
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"LiveKit session runner did not acknowledge cancellation within "
+                f"{_SESSION_CANCEL_GRACE_SECONDS:g}s: session={session_id}"
+            )
 
     async def aclose(self) -> None:
         """Stop every active session and worker."""

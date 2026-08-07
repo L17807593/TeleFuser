@@ -87,14 +87,16 @@ telefuser/distributed/
 - 适合中等长度序列
 - 需要头数能被 GPU 数整除
 
-当已安装的 `tf-kernel` wheel 包含 Ulysses CUDA IPC 算子，且 Ulysses 进程组内所有 rank 位于同一主机时，
-TeleFuser 会对成组的 Q/K/V scatter 使用源码编译的 Copy Engine 后端。该后端直接写入对端最终布局的
-target buffer，在按 tag/shape/dtype 组织的 LRU 中最多缓存 12 个 target allocation，并使用一条高优先级
-copy stream。淘汰前会同步参与设备，再关闭 peer mapping。Q、K、V 保持独立提交，因此 projection 计算仍
-可与通信重叠；三次传输只共享一次不占用 SM 的 CUDA
-stream-memory 握手。
-单次 collective 和输出 gather 继续使用实测更快的 PyTorch/NCCL 路径。跨主机进程组、缺少算子或 CUDA IPC
-不受支持时也会回退到 PyTorch/NCCL。
+在 PyTorch 2.11 及以上版本中，TeleFuser 优先使用 PyTorch Symmetric Memory 分配并 rendezvous 成组 Q/K/V
+scatter 的对端 target buffer，再由源码编译的 `tf-kernel` Copy Engine 算子通过一条高优先级 stream 直接
+写入这些由 PyTorch 管理的映射。Q、K、V 保持独立提交以保留 projection overlap，同时共享一次 grouped
+handshake。communicator 及其缓存 buffer 由模型持有，因此模型 offload 或销毁时即可释放资源，无需 worker
+在 process-group teardown 阶段执行额外 collective。
+
+主包仍支持 `torch>=2.6.0`：能力检测采用延迟方式，较旧 PyTorch 会优先回退到源码编译的 CUDA IPC backend，
+不可用时再回退到 PyTorch/NCCL。单次 collective 和 output gather 继续使用实测更快的 PyTorch/NCCL 路径。
+设计、执行时间线、H100 测量、限制和 Related Work 见
+[CUDA IPC Ulysses 技术文章](blog/cuda_ipc_ulysses.md)。
 
 ### Ring Attention
 

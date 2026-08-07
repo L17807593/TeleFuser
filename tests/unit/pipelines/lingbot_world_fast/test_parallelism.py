@@ -130,3 +130,57 @@ def test_denoising_stage_parallel_models_compiles_after_fsdp() -> None:
 
     compile.assert_called_once_with(fsdp_model, **compile_config.get_compile_kwargs())
     assert stage.dit is compiled_model
+
+
+def test_denoising_stage_parallel_models_enables_tp_before_ulysses() -> None:
+    dit = MagicMock()
+    parallel_config = ParallelConfig(
+        device_ids=[0, 1, 2, 3],
+        sp_ulysses_degree=2,
+        tp_degree=2,
+    )
+    runtime_config = ModelRuntimeConfig(
+        device_type="cuda",
+        device_id=0,
+        attention_config=AttentionConfig(),
+        parallel_config=parallel_config,
+    )
+    module_manager = MagicMock()
+    module_manager.fetch_module.return_value = dit
+    stage = LingBotWorldFastDenoisingStage("denoise", module_manager, runtime_config)
+    device_mesh = MagicMock()
+
+    with (
+        patch(
+            "telefuser.pipelines.lingbot_world_fast.denoising.create_device_mesh_from_config",
+            return_value=device_mesh,
+        ),
+        patch("telefuser.pipelines.lingbot_world_fast.denoising.shard_model") as shard,
+    ):
+        stage.parallel_models()
+
+    dit.enable_tp.assert_called_once_with(device_mesh)
+    dit.enable_usp.assert_called_once_with(device_mesh)
+    shard.assert_not_called()
+
+
+def test_denoising_stage_rejects_fsdp_with_tp() -> None:
+    parallel_config = ParallelConfig(
+        device_ids=[0, 1, 2, 3],
+        sp_ulysses_degree=2,
+        tp_degree=2,
+        enable_fsdp=True,
+    )
+    module_manager = MagicMock()
+    module_manager.fetch_module.return_value = MagicMock()
+    stage = LingBotWorldFastDenoisingStage(
+        "denoise",
+        module_manager,
+        ModelRuntimeConfig(device_type="cuda", device_id=0, parallel_config=parallel_config),
+    )
+
+    with (
+        patch("telefuser.pipelines.lingbot_world_fast.denoising.create_device_mesh_from_config"),
+        pytest.raises(ValueError, match="FSDP with tensor parallelism"),
+    ):
+        stage.parallel_models()

@@ -259,6 +259,7 @@ See [examples/README.md](examples/README.md) for the example runner and baseline
 
 ## Documentation
 
+- [docs/en/blog/index.md](docs/en/blog/index.md): optimization design, profiling evidence, results, and related work
 - [docs/en/service.md](docs/en/service.md): REST serving, task APIs, OpenAI-compatible APIs
 - [docs/en/stream_server.md](docs/en/stream_server.md): LiveKit streaming, session APIs, data topics, and deployment
 - [docs/en/stream_scheduler.md](docs/en/stream_scheduler.md): actor-based stage scheduling, backpressure, lifecycle, metrics, and LingBot placement

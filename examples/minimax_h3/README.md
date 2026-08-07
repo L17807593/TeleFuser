@@ -377,6 +377,20 @@ python -m tools.validation.benchmark_minimax_h3_four_gpu \
 | SageAttention 2_8_8 SM90 | Disabled | 49 / 0 | 72.41 s | 72.72 s | 69.85 s | 1.07x | 51.42 / 50.20 / 50.24 / 50.24 GiB |
 | FlashAttention 4 | AdaTaylorCache | 26 / 23 | 42.39 s | 42.68 s | 39.82 s | 1.82x | 52.73 / 52.09 / 51.56 / 51.54 GiB |
 
+The immediately preceding revision (`ebbcf9f`) used PyTorch/NCCL scatter under the same documented request, warmup,
+hardware, and parallel profile. Holding each attention/cache configuration fixed gives the communication-path
+comparison below:
+
+| Fixed configuration | NCCL pipeline / DiT | CUDA IPC pipeline / DiT | Pipeline reduction | DiT reduction |
+|---|---:|---:|---:|---:|
+| FlashAttention 4, cache disabled | 79.10 / 76.48 s | **77.32 / 74.64 s** | **2.25%** | **2.41%** |
+| SageAttention 2_8_8 SM90, cache disabled | 75.96 / 73.37 s | **72.41 / 69.85 s** | **4.67%** | **4.80%** |
+| FlashAttention 4, AdaTaylorCache | 43.53 / 40.87 s | **42.39 / 39.82 s** | **2.62%** | **2.57%** |
+
+These are separate fresh revision runs rather than an in-process toggle, so ordinary run-to-run variance remains.
+See the [CUDA IPC Ulysses technical article](../../docs/en/blog/cuda_ipc_ulysses.md) for the execution trace, design,
+claim boundary, and related work.
+
 Sage SM90 reduces pipeline latency by 6.34% and DiT latency by 6.43%. It is approximate and remains an H100 opt-in:
 
 ```bash

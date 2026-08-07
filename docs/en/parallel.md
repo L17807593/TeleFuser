@@ -88,14 +88,16 @@ Input: (B, S_LOCAL, H_GLOBAL, D)
 - Suitable for medium-length sequences
 - Requires number of heads to be divisible by GPU count
 
-When the installed `tf-kernel` wheel contains the Ulysses CUDA IPC operators and every rank in the Ulysses process
-group is on the same host, TeleFuser uses the source-built Copy Engine backend for grouped Q/K/V scatter. It writes
-directly into each peer final-layout target buffer, keeps up to 12 target allocations in a tag/shape/dtype LRU cache,
-and fans out over one high-priority copy stream. Eviction synchronizes participating devices before closing peer
-mappings. Q, K, and V stay as separate submissions so projection compute can overlap
-with communication, while the three transfers share one CUDA stream-memory handshake that does not occupy an SM.
-Single collectives and output gather stay on the faster PyTorch/NCCL path. Multi-host groups, missing kernels,
-and unsupported CUDA IPC configurations also use the PyTorch/NCCL fallback.
+With PyTorch 2.11 or newer, TeleFuser first uses PyTorch Symmetric Memory to allocate and rendezvous the peer target
+buffers for grouped Q/K/V scatter. The source-built `tf-kernel` Copy Engine operator writes directly into those
+PyTorch-owned mappings over one high-priority stream. Q, K, and V remain separate submissions, preserving projection
+overlap while sharing one grouped handshake. The model owns the communicator and its cached buffers, so offload or
+model destruction releases them without a worker-level collective during process-group teardown.
+
+The main package still supports `torch>=2.6.0`: capability detection is lazy, and older PyTorch versions fall back to
+the source-built CUDA IPC backend when available, then to PyTorch/NCCL. Single collectives and output gather continue
+to use the measured-faster PyTorch/NCCL path. See the [CUDA IPC Ulysses technical article](blog/cuda_ipc_ulysses.md)
+for the design, execution timeline, H100 measurements, limitations, and related work.
 
 ### Ring Attention
 
