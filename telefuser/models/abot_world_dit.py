@@ -359,7 +359,7 @@ class CausalHead(nn.Module):
 
 
 class ABotWorldDiT(BaseModel):
-    """Checkpoint-compatible ABot-World 0.5B long-forcing backbone."""
+    """Checkpoint-compatible ABot-World-0-5B-LF backbone."""
 
     def __init__(
         self,

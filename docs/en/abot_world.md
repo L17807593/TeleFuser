@@ -1,8 +1,9 @@
-# ABot-World 0.5B-LF
+# ABot-World-0-5B-LF
 
-TeleFuser provides a single-GPU, direct-browser integration for the public
-ABot-World 0.5B-LF long-forcing checkpoint. The supported entry point is the
-native HTTP controller:
+TeleFuser provides a single-GPU integration for the public ABot-World-0-5B-LF
+long-forcing checkpoint. There are two supported transport entry points:
+
+* Native HTTP controller for local debugging:
 
 ```bash
 python examples/abot_world/abot_world_interactive_web.py \
@@ -11,13 +12,42 @@ python examples/abot_world/abot_world_interactive_web.py \
   --port 7860
 ```
 
-This integration does not use `telefuser stream-serve`, LiveKit, WebRTC, or a
-TURN server. The browser speaks to the local HTTP controller. For an SSH
-session, forward the port from the remote host:
+* The shared `stream-serve` LiveKit path, which reuses TeleFuser room admission,
+  reliable `tf.control` messages, WebRTC media publication, pacing, and the
+  existing LingBot browser controller:
 
 ```bash
-ssh -N -p <ssh-port> -L 7860:127.0.0.1:7860 <user>@<server>
+TF_MODEL_ZOO_PATH=/path/to/model_zoo \
+CUDA_VISIBLE_DEVICES=0 \
+telefuser stream-serve examples/abot_world/abot_world_livekit_service.py \
+  --livekit-url ws://127.0.0.1:7880 \
+  --livekit-api-key devkey --livekit-api-secret secret \
+  --worker-gpu-map 0 --max-sessions-per-worker 1 \
+  --port 8088 --skip-validation
 ```
+
+Start coturn with one fixed relay port for this single-session SSH setup, then start LiveKit:
+
+```bash
+turnserver -n -m 1 \
+  --listening-ip=127.0.0.1 --relay-ip=127.0.0.1 \
+  --listening-port=3478 --min-port=49160 --max-port=49160 \
+  --user=livekit-demo:livekit-demo-password --realm=livekit.local \
+  --fingerprint --lt-cred-mech --no-tls --no-dtls --no-cli \
+  --allow-loopback-peers
+```
+
+Then run `livekit-server --dev` as described in the [stream
+server guide](stream_server.md), and serve the reused ABot browser defaults:
+
+```bash
+python examples/abot_world/abot_world_livekit.py \
+  --server-url http://127.0.0.1:8088 --port 8092 --no-open
+```
+
+For an SSH session, forward remote TCP ports `8092`, `7880`, `3478`, and `49160` to the
+same local ports. The browser wrapper proxies the TeleFuser API, so port 8088
+does not need forwarding.
 
 ## Checkpoint And Image
 
@@ -96,6 +126,7 @@ visual quality, prompt fidelity, or parity over an unbounded session.
 
 ## Scope
 
-The first integration is intentionally single-GPU and direct HTTP. LiveKit or
-`stream-serve` support requires a separate transport integration and is not
-part of this example.
+The integration is intentionally single-GPU and advertises one retained causal
+session per worker. Both transports use the same interactive pipeline and
+fixed six-sink/twelve-tail KV policy; LiveKit adds only the shared TeleFuser
+transport and room lifecycle.

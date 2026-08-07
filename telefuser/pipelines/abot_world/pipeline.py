@@ -19,7 +19,7 @@ from .denoising import ABotWorldDenoisingStage
 
 @dataclass
 class ABotWorldPipelineConfig:
-    """Runtime settings for the public ABot-World 0.5B long-forcing checkpoint."""
+    """Runtime settings for the public ABot-World-0-5B-LF checkpoint."""
 
     vae_config: ModelRuntimeConfig = field(default_factory=ModelRuntimeConfig)
     text_encoding_config: ModelRuntimeConfig = field(default_factory=ModelRuntimeConfig)
