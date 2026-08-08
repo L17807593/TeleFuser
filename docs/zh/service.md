@@ -113,7 +113,6 @@ Runtime 拓扑、room 角色、常驻容量、execution lease、GPU 放置、生
 | 管线 | 任务 | 说明 |
 |------|------|------|
 | `WanVideo`（Wan2.1 / Wan2.2） | T2V, I2V, FL2V | 主要视频生成系列 |
-| `HunyuanVideo` | T2V, I2V | 通过服务示例支持 |
 | `LTX Video` | I2V + Audio | 音视频统一生成 |
 | `LingBot-Video` | T2I, T2V, TI2V, MoE refiner | 支持原生 CFG/SP 的 Dense/MoE 生成与内存直传 refinement；参见 `examples/lingbot_video/README.md` |
 

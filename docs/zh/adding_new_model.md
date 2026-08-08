@@ -52,10 +52,10 @@ class MyCustomDiT(BaseModel):
 模型可以可选地实现 `from_pretrained` 类方法，以便在 pipeline 示例中方便地加载模型。该方法提供统一的模型加载接口：
 
 ```python
-# telefuser/models/hunyuan_video_text_encoder.py
+# telefuser/models/my_text_encoder.py
 
 class TextEncoder(nn.Module):
-    """Text encoder using LLM for HunyuanVideo."""
+    """Text encoder using LLM for MyVideo."""
 
     def __init__(
         self,
@@ -110,10 +110,10 @@ class TextEncoder(nn.Module):
 #### VAE 模型示例
 
 ```python
-# telefuser/models/hunyuan_video_vae.py
+# telefuser/models/my_video_vae.py
 
-class HunyuanVideoVAE(nn.Module):
-    """HunyuanVideo VAE for video encoding/decoding."""
+class MyVideoVAE(nn.Module):
+    """MyVideo VAE for video encoding/decoding."""
 
     @classmethod
     def from_pretrained(
@@ -121,8 +121,8 @@ class HunyuanVideoVAE(nn.Module):
         pretrained_model_name_or_path: str,
         torch_dtype: torch.dtype = torch.bfloat16,
         **kwargs,
-    ) -> "HunyuanVideoVAE":
-        """Load HunyuanVideoVAE from pretrained checkpoint.
+    ) -> "MyVideoVAE":
+        """Load MyVideoVAE from pretrained checkpoint.
 
         Args:
             pretrained_model_name_or_path: VAE 检查点目录路径
@@ -130,7 +130,7 @@ class HunyuanVideoVAE(nn.Module):
             **kwargs: 忽略未知参数以保持兼容性
 
         Returns:
-            加载完成的 HunyuanVideoVAE 实例
+            加载完成的 MyVideoVAE 实例
         """
         # 从 JSON 加载配置
         config_path = os.path.join(pretrained_model_name_or_path, "config.json")
@@ -366,8 +366,8 @@ import os
 import torch
 from telefuser.utils.logging import logger
 from telefuser.core.module_manager import ModuleManager
-from telefuser.models.hunyuan_video_vae import HunyuanVideoVAE
-from telefuser.models.hunyuan_video_text_encoder import HunyuanVideoTextEncoder
+from telefuser.models.my_video_vae import MyVideoVAE
+from telefuser.models.my_text_encoder import MyTextEncoder
 
 def get_pipeline(model_root: str = "/path/to/models"):
     """创建并初始化包含所有模型的 pipeline。"""
@@ -376,21 +376,21 @@ def get_pipeline(model_root: str = "/path/to/models"):
     # 1. 使用 from_pretrained 加载 VAE
     vae_path = os.path.join(model_root, "vae")
     logger.info(f"Loading VAE from {vae_path}")
-    vae = HunyuanVideoVAE.from_pretrained(vae_path, torch_dtype=torch.bfloat16)
+    vae = MyVideoVAE.from_pretrained(vae_path, torch_dtype=torch.bfloat16)
     module_manager.add_module(vae, name="vae")
 
     # 2. 使用 from_pretrained 加载 TextEncoder
     text_encoder_path = os.path.join(model_root, "text_encoder", "llm")
     logger.info(f"Loading TextEncoder from {text_encoder_path}")
-    text_encoder = HunyuanVideoTextEncoder.from_pretrained(text_encoder_path, torch_dtype=torch.bfloat16)
+    text_encoder = MyTextEncoder.from_pretrained(text_encoder_path, torch_dtype=torch.bfloat16)
     module_manager.add_module(text_encoder, name="text_encoder")
 
     # 3. 其他模型类似加载...
-    # transformer = HunyuanVideoDiT.from_pretrained(transformer_path, torch_dtype=torch.bfloat16)
-    # module_manager.add_module(transformer, name="hunyuan_video_dit")
+    # transformer = MyCustomDiT.from_pretrained(transformer_path, torch_dtype=torch.bfloat16)
+    # module_manager.add_module(transformer, name="my_custom_dit")
 
     # 4. 创建并初始化 pipeline
-    # pipe = HunyuanVideo15Pipeline(device="cuda", torch_dtype=torch.bfloat16)
+    # pipe = MyVideoPipeline(device="cuda", torch_dtype=torch.bfloat16)
     # pipe.init(module_manager, pipe_config)
 
     return pipe
@@ -400,18 +400,18 @@ def get_pipeline(model_root: str = "/path/to/models"):
 
 1. **所有模型使用 `from_pretrained` 加载** - 提供一致的接口
 2. **只对外暴露模型路径** - 所有其他参数应为内部默认值
-3. **使用有意义的名称调用 `add_module`** - 如 `"vae"`、`"text_encoder"`、`"hunyuan_video_dit"` 等，pipeline stages 使用这些名称获取模块
+3. **使用有意义的名称调用 `add_module`** - 如 `"vae"`、`"text_encoder"`、`"my_custom_dit"` 等，pipeline stages 使用这些名称获取模块
 4. **由 stage 处理运行时设置** - 分块、切片等运行时配置应由 pipeline stage 处理，而非模型初始化时
 
 ### 模块命名规范
 
 | 模块类型 | 推荐名称 | 使用方 |
 |---------|---------|--------|
-| VAE | `"vae"` | `HunyuanVideoVAEStage` |
-| Text Encoder | `"text_encoder"` | `HunyuanVideoTextEncodingStage` |
-| DiT/Transformer | `"hunyuan_video_dit"` | `HunyuanVideoDenoisingStage` |
-| Vision Encoder (I2V) | `"vision_encoder"` | `HunyuanVideoImageEncodingStage` |
-| Upsampler (SR) | `"upsampler"` | `HunyuanVideoUpsamplerStage` |
+| VAE | `"vae"` | `MyVideoVAEStage` |
+| Text Encoder | `"text_encoder"` | `MyVideoTextEncodingStage` |
+| DiT/Transformer | `"my_custom_dit"` | `MyVideoDenoisingStage` |
+| Vision Encoder (I2V) | `"vision_encoder"` | `MyVideoImageEncodingStage` |
+| Upsampler (SR) | `"upsampler"` | `MyVideoUpsamplerStage` |
 | Scheduler | `"scheduler"` | Pipeline init |
 
 ## 特殊情况处理

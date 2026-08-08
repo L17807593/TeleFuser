@@ -230,7 +230,6 @@ telefuser/
 | Pipeline | 任务 | 说明 |
 |----------|------|------|
 | `WanVideo` (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | 主力视频生成家族，含异步和服务示例，见 [examples/wan_video/README.md](examples/wan_video/README.md) |
-| `HunyuanVideo` | T2V, I2V | 见 [examples/hunyuan_video/README.md](examples/hunyuan_video/README.md) |
 | `LTX Video` | I2V + Audio | 统一音视频生成，见 [examples/ltx_video/README.md](examples/ltx_video/README.md) |
 | `MiniMax H3` | T2VA, FL2VA, Ref2VA + Audio | 本地 768p 联合音视频生成，见 [examples/minimax_h3/README.md](examples/minimax_h3/README.md) |
 | `LongCat-Video` | T2V, I2V, VC | 长视频生成与续写，见 [examples/longcat_video/README.md](examples/longcat_video/README.md) |

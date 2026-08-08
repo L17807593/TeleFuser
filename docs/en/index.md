@@ -72,7 +72,6 @@ Reusable stages, model configs, schedulers, and pipeline orchestration.
 | Model | Tasks | Description |
 |-------|-------|-------------|
 | WanVideo (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Video generation and editing |
-| HunyuanVideo | T2V, I2V | Video generation |
 | LTX Video | I2V + Audio | Video generation with audio |
 | MiniMax H3 | T2VA, FL2VA, Ref2VA + Audio | Local 768p joint audio-video generation |
 | FlashVSR | VSR | Video super-resolution |

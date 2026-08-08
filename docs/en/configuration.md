@@ -194,7 +194,6 @@ Model Weights (Layer 1)
 | **Wan21 1.3B** | Single DiT | `sample_solver="euler"` | prompt, seed, resolution |
 | **Wan22 A14B** | MoE (high+low DiT) | `boundary=0.875`, `cfg_scale_high/low` | Same as above |
 | **Wan22 Distill** | distill weights | `cfg_scale=1.0` (no CFG needed) | Same as above |
-| **HunyuanVideo + SR** | base DiT + SR DiT | `enable_sr=True`, `lq_noise_strength` | Same as above |
 
 ## Design Principles
 

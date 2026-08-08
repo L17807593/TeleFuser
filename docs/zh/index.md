@@ -70,7 +70,6 @@ AdaTaylorCache 和运行时缓存控制，面向重复生成工作负载。
 | 模型 | 任务 | 描述 |
 |------|------|------|
 | WanVideo (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | 视频生成和编辑 |
-| HunyuanVideo | T2V, I2V | 视频生成 |
 | LTX Video | I2V + Audio | 视频生成 + 音频 |
 | MiniMax H3 | T2VA, FL2VA, Ref2VA + Audio | 本地 768p 音视频联合生成 |
 | FlashVSR | VSR | 视频超分辨率 |

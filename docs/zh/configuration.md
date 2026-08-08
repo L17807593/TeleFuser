@@ -194,7 +194,6 @@ def run(
 | **Wan21 1.3B** | 单 DiT | `sample_solver="euler"` | prompt, seed, resolution |
 | **Wan22 A14B** | MoE (high+low DiT) | `boundary=0.875`, `cfg_scale_high/low` | 同上 |
 | **Wan22 Distill** | distill 权重 | `cfg_scale=1.0` (无需 CFG) | 同上 |
-| **HunyuanVideo + SR** | base DiT + SR DiT | `enable_sr=True`, `lq_noise_strength` | 同上 |
 
 ## 设计原则
 

@@ -23,7 +23,6 @@ examples/
 │   ├── wan21_*.py          # Wan2.1 model examples
 │   ├── wan22_*.py          # Wan2.2 model examples
 ├── qwen_image/             # Qwen-Image generation examples
-├── hunyuan_video/          # HunyuanVideo generation examples
 ├── z_image/                # Z-Image generation examples
 ├── liveact/                # LiveAct examples
 └── ...

@@ -37,7 +37,6 @@ SERVICE_EXAMPLES = {
     "wan21_i2v": (Path("examples/wan_video/wan21_14b_image_to_video_h100.py"), "i2v", False),
     "wan21_i2v_lora": (Path("examples/wan_video/wan21_14b_image_to_video_lora_h100.py"), "i2v", False),
     "wan22_i2v_lora": (Path("examples/wan_video/wan22_14b_image_to_video_lora_h100.py"), "i2v", False),
-    "hunyuan_i2v": (Path("examples/hunyuan_video/hunyuan_video_i2v.py"), "i2v", False),
     "longcat_t2v": (Path("examples/longcat_video/longcat_text_to_video.py"), "t2v", False),
     "longcat_i2v": (Path("examples/longcat_video/longcat_image_to_video.py"), "i2v", False),
     "longcat_continue": (Path("examples/longcat_video/longcat_video_continue.py"), "vc", False),

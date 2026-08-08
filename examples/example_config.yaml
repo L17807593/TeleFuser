@@ -161,27 +161,6 @@ pipelines:
       expert_backend: sorted
 
   # ============================================================
-  # hunyuan_video
-  # ============================================================
-
-  hunyuan_t2v:
-    script: hunyuan_video/hunyuan_video_t2v.py
-    gpu_count: 1
-    output_type: video
-    timeout_seconds: 3600
-    max_gpu_memory_mb: 49152
-    resolution: "480p"
-
-  hunyuan_i2v:
-    script: hunyuan_video/hunyuan_video_i2v.py
-    gpu_count: 1
-    output_type: video
-    input_image_path: examples/data/101235-video-720_0.png
-    timeout_seconds: 3600
-    max_gpu_memory_mb: 55296
-    resolution: "480p"
-
-  # ============================================================
   # qwen_image
   # ============================================================
 

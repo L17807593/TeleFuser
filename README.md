@@ -243,7 +243,6 @@ telefuser/
 | Pipeline | Task | Notes |
 |----------|------|-------|
 | `WanVideo` (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Main video generation family, including async and service examples in [examples/wan_video/README.md](examples/wan_video/README.md) |
-| `HunyuanVideo` | T2V, I2V | Supported via [examples/hunyuan_video/README.md](examples/hunyuan_video/README.md) |
 | `LTX Video` | I2V + Audio | Unified audio-video generation via [examples/ltx_video/README.md](examples/ltx_video/README.md) |
 | `MiniMax H3` | T2VA, FL2VA, Ref2VA + Audio | Local 768p joint audio-video generation via [examples/minimax_h3/README.md](examples/minimax_h3/README.md) |
 | `LongCat-Video` | T2V, I2V, VC | Long-form generation and continuation via [examples/longcat_video/README.md](examples/longcat_video/README.md) |
