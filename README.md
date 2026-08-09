@@ -237,6 +237,7 @@ telefuser/
 | `ABot-World-0-5B-LF` | Single-GPU interactive world model | Direct HTTP or shared LiveKit controller via [examples/abot_world/README.md](examples/abot_world/README.md) |
 | `LiveAct` | S2V | Speech-driven talking head generation via [examples/liveact/liveact_s2v_h100.py](examples/liveact/liveact_s2v_h100.py) |
 | `FlashVSR` | VSR | Streaming video super-resolution via [examples/flashvsr/README.md](examples/flashvsr/README.md) |
+| `SwiftVR` | Causal video restoration | Single-GPU BF16 offline and direct streaming restoration via [examples/swiftvr/README.md](examples/swiftvr/README.md) |
 
 ### Video Generation
 
@@ -274,6 +275,7 @@ See [examples/README.md](examples/README.md) for the example runner and baseline
 - [docs/en/adding_new_model.md](docs/en/adding_new_model.md): integrating new models
 - [docs/en/adding_new_example.md](docs/en/adding_new_example.md): authoring examples and pipeline contracts
 - [docs/en/abot_world.md](docs/en/abot_world.md): ABot-World single-GPU interactive pipeline, controls, and tests
+- [docs/en/swiftvr.md](docs/en/swiftvr.md): SwiftVR checkpoint loading, streaming usage, performance, and service limits
 
 ## Known Limitations
 
