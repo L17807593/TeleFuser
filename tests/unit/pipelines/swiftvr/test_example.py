@@ -6,6 +6,7 @@ import pytest
 import torch
 from PIL import Image
 
+from examples.swiftvr import swiftvr_restore_h100 as swiftvr_example
 from examples.swiftvr.swiftvr_restore_h100 import _parse_stage_devices, _warmup_frame_count, main, run
 
 
@@ -133,3 +134,33 @@ def test_stage_device_parser_requires_encode_dit_decode_devices() -> None:
     assert _parse_stage_devices(None, 1) is None
     with pytest.raises(ValueError, match="exactly three devices"):
         _parse_stage_devices("0,1", 1)
+
+
+def test_get_pipeline_uses_gpu_num_for_ulysses_sp(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def from_pretrained(_model_root: str, **kwargs: object) -> object:
+        calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(swiftvr_example.SwiftVRPipeline, "from_pretrained", staticmethod(from_pretrained))
+
+    swiftvr_example.get_pipeline(parallelism=2, model_root="/models/swiftvr")
+
+    assert calls[0]["sp_device_ids"] == [0, 1]
+    assert calls[0]["stage_device_ids"] is None
+
+
+def test_get_pipeline_keeps_stage_parallel_separate_from_sp(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def from_pretrained(_model_root: str, **kwargs: object) -> object:
+        calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(swiftvr_example.SwiftVRPipeline, "from_pretrained", staticmethod(from_pretrained))
+
+    swiftvr_example.get_pipeline(parallelism=3, model_root="/models/swiftvr", enable_stage_parallel=True)
+
+    assert calls[0]["stage_device_ids"] == [0, 1, 2]
+    assert calls[0]["sp_device_ids"] is None

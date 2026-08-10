@@ -83,8 +83,7 @@ def get_pipeline(
 ) -> SwiftVRPipeline:
     """Initialize the SwiftVR pipeline."""
     stage_device_ids = _parse_stage_devices(stage_devices, parallelism) if enable_stage_parallel else None
-    if not enable_stage_parallel and parallelism != 1:
-        raise ValueError("SwiftVR supports multiple GPUs only through --enable_stage_parallel")
+    sp_device_ids = list(range(parallelism)) if not enable_stage_parallel and parallelism > 1 else None
     return SwiftVRPipeline.from_pretrained(
         model_root,
         device="cuda",
@@ -96,6 +95,7 @@ def get_pipeline(
         enable_stage_overlap=enable_stage_parallel,
         stage_dit_overlap=PPL_CONFIG["dit_overlap"],
         stage_device_ids=stage_device_ids,
+        sp_device_ids=sp_device_ids,
         tensor_channel_slots=tensor_channel_slots,
     )
 
@@ -150,7 +150,7 @@ def _warmup_frame_count(frame_count: int) -> int:
 @click.option("--scale", "-s", default=PPL_CONFIG["scale"], type=int, help="Upscaling factor (default: 4)")
 @click.option("--height", "-h", default=None, type=int, help="Input video height (default: auto-detect)")
 @click.option("--width", "-w", default=None, type=int, help="Input video width (default: auto-detect)")
-@click.option("--gpu_num", default=1, type=int, help="Number of GPUs to use (default: 1)")
+@click.option("--gpu_num", default=1, type=int, help="Number of GPUs: Ulysses SP by default, or three-stage mode")
 @click.option(
     "--model_root",
     default=PPL_CONFIG["model_root"],
@@ -174,7 +174,7 @@ def _warmup_frame_count(frame_count: int) -> int:
     help="torch.compile mode / kernel fusion preset",
 )
 @click.option("--quantization", type=click.Choice(["torchao-fp8", "tf-kernel-fp8"]), default=None)
-@click.option("--enable_stage_parallel", is_flag=True, help="Split encode, DiT, and decode into worker stages")
+@click.option("--enable_stage_parallel", is_flag=True, help="Split encode, DiT, and decode into three worker stages")
 @click.option("--stage_devices", default=None, help="Comma-separated encode,dit,decode GPU ids, e.g. 0,1,2")
 @click.option("--tensor_channel_slots", default=2, type=int, help="CUDA IPC slots per stage tensor-channel profile")
 def main(
@@ -211,7 +211,7 @@ def main(
     click.echo(f"Compile DiT: {compile_dit}")
     click.echo(f"Compile mode: {compile_mode}")
     click.echo(f"Quantization: {quantization or 'none'}")
-    click.echo(f"Stage parallel: {enable_stage_parallel}")
+    click.echo(f"Parallel mode: {'stage' if enable_stage_parallel else 'Ulysses SP' if gpu_num > 1 else 'single GPU'}")
     if stage_devices:
         click.echo(f"Stage devices: {stage_devices}")
     click.echo(f"Output: {output}")

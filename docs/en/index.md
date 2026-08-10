@@ -75,6 +75,7 @@ Reusable stages, model configs, schedulers, and pipeline orchestration.
 | LTX Video | I2V + Audio | Video generation with audio |
 | MiniMax H3 | T2VA, FL2VA, Ref2VA + Audio | Local 768p joint audio-video generation |
 | FlashVSR | VSR | Video super-resolution |
+| SwiftVR | Causal video restoration | Stateful restoration with BF16, compile, FP8Linear, Ulysses SP, and stage-parallel options; see the [example guide](../../examples/swiftvr/README.md) |
 | LiveAct | S2V | Speech-to-video |
 | LongCat-Video | T2V, I2V | Long video generation |
 | LingBot-Video | T2I, T2V, TI2V, MoE refiner | Precision-first Dense and MoE video generation |

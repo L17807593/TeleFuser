@@ -29,6 +29,7 @@ from telefuser.core.config import (
     QuantConfig,
 )
 from telefuser.core.module_manager import ModuleManager
+from telefuser.distributed.device_mesh import create_device_mesh_from_config
 from telefuser.models.swiftvr_reae import ReAE
 from telefuser.models.swiftvr_transformer import (
     SwiftVRWanTransformer3DModel,
@@ -134,6 +135,7 @@ class SwiftVRPipelineConfig:
     )
     decode_config: ModelRuntimeConfig = field(default_factory=ModelRuntimeConfig)
     enable_stage_parallel: bool = False
+    enable_dit_parallel: bool = False
     enable_stage_overlap: bool = False
     dit_overlap: int = 1
     tensor_channel_slots: int = 2
@@ -241,6 +243,15 @@ class _SwiftVRDiTStage(BaseStage):
             self._dit._cond_cache_key = None
         self._dit = None
 
+    def parallel_models(self) -> None:
+        """Configure the DiT worker for Ulysses sequence parallelism."""
+        parallel_config = self.model_runtime_config.parallel_config
+        if parallel_config.sp_ring_degree != 1:
+            raise ValueError("SwiftVR supports Ulysses SP only; ring/USP is not available")
+        if parallel_config.sp_ulysses_degree != parallel_config.world_size:
+            raise ValueError("SwiftVR Ulysses SP requires all DiT worker ranks to belong to the SP group")
+        self.transformer.enable_usp(create_device_mesh_from_config(parallel_config))
+
 
 class _SwiftVRReAEDecodeStage(BaseStage):
     def __init__(self, name: str, module_manager: ModuleManager, model_runtime_config: ModelRuntimeConfig) -> None:
@@ -293,11 +304,16 @@ class SwiftVRPipeline(BasePipeline):
         self.prompt_emb = prompt_emb.to(dtype=self.torch_dtype)
         self._worker_tensor_channels: list[WorkerTensorChannel] = []
         self._stage_parallel_active_session = False
+        self._dit_parallel_active_session = False
         self.encode_stage = None
         self.dit_stage = None
         self.decode_stage = None
+        if config.enable_stage_parallel and config.enable_dit_parallel:
+            raise ValueError("SwiftVR stage parallelism and Ulysses SP cannot be enabled together")
         if config.enable_stage_parallel:
             self._init_stage_workers(module_manager, prompt_emb)
+        elif config.enable_dit_parallel:
+            self._init_dit_parallel_worker(module_manager, prompt_emb)
         else:
             self._prepare_for_inference()
 
@@ -347,6 +363,33 @@ class SwiftVRPipeline(BasePipeline):
         )
         logger.info("SwiftVR stage-parallel workers initialized with direct tensor channels")
 
+    def _init_dit_parallel_worker(self, module_manager: ModuleManager, prompt_emb: torch.Tensor) -> None:
+        parallel_config = self.config.dit_config.parallel_config
+        if parallel_config.sp_ulysses_degree <= 1:
+            raise ValueError("SwiftVR distributed DiT requires sp_ulysses_degree greater than one")
+        if parallel_config.sp_ring_degree != 1:
+            raise ValueError("SwiftVR supports Ulysses SP only; ring/USP is not available")
+        if self.config.dit_config.compile_config.enabled:
+            raise ValueError("SwiftVR Ulysses SP does not support torch.compile")
+        if self.transformer.config.num_attention_heads % parallel_config.sp_ulysses_degree:
+            raise ValueError(
+                "SwiftVR attention heads "
+                f"({self.transformer.config.num_attention_heads}) must be divisible by SP degree "
+                f"({parallel_config.sp_ulysses_degree})"
+            )
+        self.dit_stage = ParallelWorker(
+            _SwiftVRDiTStage(
+                "swiftvr_dit",
+                module_manager,
+                self.config.dit_config,
+                prompt_emb,
+                self.config.dit_overlap,
+            )
+        )
+        self.reae.to(device=self.device, dtype=self.torch_dtype).eval()
+        _apply_cuda_runtime_flags(self.device)
+        logger.info("SwiftVR DiT worker initialized with Ulysses sequence parallelism")
+
     @classmethod
     def from_pretrained(
         cls,
@@ -361,6 +404,7 @@ class SwiftVRPipeline(BasePipeline):
         enable_stage_overlap: bool = False,
         stage_dit_overlap: int = 1,
         stage_device_ids: tuple[int, int, int] | list[int] | None = None,
+        sp_device_ids: tuple[int, ...] | list[int] | None = None,
         tensor_channel_slots: int = 2,
     ) -> "SwiftVRPipeline":
         """Load the released local checkpoint through ModuleManager."""
@@ -400,6 +444,7 @@ class SwiftVRPipeline(BasePipeline):
 
         pipeline_config = SwiftVRPipelineConfig(
             enable_stage_parallel=enable_stage_parallel,
+            enable_dit_parallel=sp_device_ids is not None,
             enable_stage_overlap=enable_stage_overlap,
             dit_overlap=stage_dit_overlap,
             tensor_channel_slots=tensor_channel_slots,
@@ -413,6 +458,16 @@ class SwiftVRPipeline(BasePipeline):
             pipeline_config.dit_config.compile_config = compile_config
         if quant_config is not None:
             pipeline_config.dit_config.quant_config = quant_config
+        if sp_device_ids is not None:
+            if enable_stage_parallel:
+                raise ValueError("SwiftVR stage parallelism and Ulysses SP cannot be enabled together")
+            sp_devices = [int(device_id) for device_id in sp_device_ids]
+            if len(sp_devices) < 2:
+                raise ValueError("SwiftVR Ulysses SP requires at least two device ids")
+            pipeline_config.dit_config.parallel_config = ParallelConfig(
+                device_ids=sp_devices,
+                sp_ulysses_degree=len(sp_devices),
+            )
         if stage_device_ids is not None:
             if len(stage_device_ids) != 3:
                 raise ValueError("stage_device_ids must contain encode, dit, and decode device ids")
@@ -514,7 +569,7 @@ class SwiftVRPipeline(BasePipeline):
         if total_frames <= 0:
             raise ValueError("frames_uint8 must contain at least one frame")
         frames_uint8 = frames_uint8[:total_frames]
-        if self.config.enable_stage_parallel:
+        if self.config.enable_stage_parallel or self.config.enable_dit_parallel:
             session = self.stream(
                 clip_len=clip_len,
                 resolution=resolution,
@@ -581,6 +636,12 @@ class SwiftVRPipeline(BasePipeline):
                 resolution=resolution,
                 upscale=upscale,
             )
+        if self.config.enable_dit_parallel:
+            if dit_overlap != self.config.dit_overlap:
+                raise ValueError("SwiftVR Ulysses SP requires dit_overlap to match the configured worker overlap")
+            if self._dit_parallel_active_session:
+                raise RuntimeError("SwiftVR Ulysses SP supports one active stream session per pipeline")
+            self._dit_parallel_active_session = True
         return SwiftVRStreamSession(
             self,
             clip_len=clip_len,
@@ -597,6 +658,7 @@ class SwiftVRPipeline(BasePipeline):
             channel.close()
         self._worker_tensor_channels = []
         self._stage_parallel_active_session = False
+        self._dit_parallel_active_session = False
 
     def __del__(self) -> None:
         try:
@@ -771,7 +833,8 @@ class SwiftVRStreamSession:
         self.upscale = upscale
         self._sizes: tuple[int, int, int, int] | None = None
         self._tae = StreamingTAE(pipeline.reae)
-        self._dit = StreamingDiT(pipeline.transformer, overlap=dit_overlap)
+        self._dit_parallel = bool(getattr(getattr(pipeline, "config", None), "enable_dit_parallel", False))
+        self._dit = None if self._dit_parallel else StreamingDiT(pipeline.transformer, overlap=dit_overlap)
         self._closed = False
 
     def _ensure_open(self) -> None:
@@ -784,6 +847,12 @@ class SwiftVRStreamSession:
         return self._sizes
 
     def _run_latents(self, encoded: torch.Tensor) -> torch.Tensor:
+        if self._dit_parallel:
+            if not isinstance(self.pipeline.dit_stage, ParallelWorker):
+                raise RuntimeError("SwiftVR Ulysses SP worker is not initialized")
+            return self.pipeline.dit_stage.process(encoded, sync=True)
+        if self._dit is None:
+            raise RuntimeError("SwiftVR direct DiT session is not initialized")
         encoded_bcfhw = encoded.permute(0, 2, 1, 3, 4).contiguous()
         denoised = self._dit.denoise(encoded_bcfhw, self.pipeline.prompt_emb)
         return denoised.permute(0, 2, 1, 3, 4).contiguous()
@@ -826,8 +895,12 @@ class SwiftVRStreamSession:
         if self._closed:
             return
         self._tae.reset()
-        self._dit.reset()
-        self._dit._cond_cache = None
-        self._dit._cond_cache_key = None
+        if self._dit is not None:
+            self._dit.reset()
+            self._dit._cond_cache = None
+            self._dit._cond_cache_key = None
+        elif isinstance(self.pipeline.dit_stage, ParallelWorker):
+            self.pipeline.dit_stage.reset_session(sync=True)
         self._sizes = None
         self._closed = True
+        self.pipeline._dit_parallel_active_session = False

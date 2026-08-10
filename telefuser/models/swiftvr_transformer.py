@@ -16,8 +16,12 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed.device_mesh import DeviceMesh
 
 from telefuser.core.config import AttentionConfig, AttnImplType, CompileConfig
+from telefuser.distributed.device_mesh import get_attention_strategy, get_ulysses_group, get_ulysses_world_size
+from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequence_parallel_unshard
+from telefuser.distributed.ulysses_comm import ulysses_gather_heads, ulysses_scatter_qkv
 from telefuser.ops.attention import attention
 from telefuser.ops.ffn import FeedForward
 from telefuser.utils.logging import logger
@@ -495,9 +499,13 @@ class WanShiftWindow2DInferProcessor:
 
         Tg, Hg, Wg = attn._thw
         B, K, _ = hidden_states.shape
-        T, H, W = _infer_local_thw((Tg, Hg, Wg), K)
-        if K != T * H * W:
-            raise RuntimeError(f"K mismatch: K={K}, inferred T*H*W={T * H * W}.")
+        device_mesh = getattr(attn, "device_mesh", None)
+        if device_mesh is None:
+            T, H, W = _infer_local_thw((Tg, Hg, Wg), K)
+            if K != T * H * W:
+                raise RuntimeError(f"K mismatch: K={K}, inferred T*H*W={T * H * W}.")
+        else:
+            T, H, W = Tg, Hg, Wg
 
         cfg_wh, cfg_ww = self.window_hw
         wh, ww = min(cfg_wh, H), min(cfg_ww, W)
@@ -525,11 +533,27 @@ class WanShiftWindow2DInferProcessor:
         key = attn.norm_k(key).unflatten(2, (Hn, Dh))
         value = value.unflatten(2, (Hn, Dh))
 
-        value = torch.index_select(value, 1, meta.lin_flat).view(B * Nw, Lw, Hn, Dh)
-
         if rotary_emb is not None:
             query = _apply_rotary_emb_inplace(query, *rotary_emb)
             key = _apply_rotary_emb_inplace(key, *rotary_emb)
+
+        if device_mesh is not None:
+            sp_size = get_ulysses_world_size(device_mesh)
+            group = get_ulysses_group(device_mesh)
+            query, key, value = ulysses_scatter_qkv(query, key, value, group)()
+            local_heads = Hn // sp_size
+            value = torch.index_select(value, 1, meta.lin_flat).view(B * Nw, Lw, local_heads, Dh)
+            query = torch.index_select(query, 1, meta.lin_flat).view(B * Nw, Lw, local_heads, Dh)
+            key = torch.index_select(key, 1, meta.lin_flat).view(B * Nw, Lw, local_heads, Dh)
+
+            o_win = _dense_attn(query, key, value, attn.attention_config)
+            o_flat = o_win.reshape(B, Nw * Lw, local_heads, Dh)
+            out = torch.index_select(o_flat, 1, meta.owner_pos)
+            out = ulysses_gather_heads(out, group, num_heads=Hn)()
+            out = out.reshape(B, K, Hn * Dh)
+            return attn.to_out[0](out)
+
+        value = torch.index_select(value, 1, meta.lin_flat).view(B * Nw, Lw, Hn, Dh)
 
         query = torch.index_select(query, 1, meta.lin_flat).view(B * Nw, Lw, Hn, Dh)
         key = torch.index_select(key, 1, meta.lin_flat).view(B * Nw, Lw, Hn, Dh)
@@ -885,6 +909,7 @@ class SwiftVRWanTransformer3DModel(nn.Module):
         self._enable_swa = enable_swa
         self._self_attn_window_hw = self_attn_window_hw
         self.attention_config = AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA)
+        self.device_mesh = None
 
     @classmethod
     def state_dict_converter(cls, config: dict | None = None) -> SwiftVRTransformerStateDictConverter:
@@ -895,6 +920,24 @@ class SwiftVRWanTransformer3DModel(nn.Module):
         for module in self.modules():
             if isinstance(module, WanAttention):
                 module.attention_config = attention_config
+
+    def enable_usp(self, device_mesh: DeviceMesh) -> None:
+        """Enable Ulysses sequence parallelism for the shifted-window DiT."""
+        strategy = get_attention_strategy(device_mesh)
+        if strategy != "ulysses":
+            raise ValueError(f"SwiftVR supports Ulysses SP only, got attention strategy {strategy!r}")
+        sp_size = get_ulysses_world_size(device_mesh)
+        if sp_size <= 1:
+            raise ValueError("SwiftVR Ulysses SP requires at least two ranks")
+        if self.config.num_attention_heads % sp_size:
+            raise ValueError(
+                "SwiftVR attention heads "
+                f"({self.config.num_attention_heads}) must be divisible by SP degree ({sp_size})"
+            )
+        self.device_mesh = device_mesh
+        for block in self.blocks:
+            underlying = getattr(block, "_orig_mod", block)
+            underlying.attn1.device_mesh = device_mesh
 
     def prepare_for_inference(
         self,
@@ -1013,6 +1056,13 @@ class SwiftVRWanTransformer3DModel(nn.Module):
             ppf, pph, ppw, min(cfg_wh, pph), min(cfg_ww, ppw), do_shift=True, prefer_front=False, device=dev
         )
 
+        if self.device_mesh is not None:
+            sequence_parallel_shard(
+                self.device_mesh,
+                [hidden_states, rotary_emb[0], rotary_emb[1]],
+                seq_dims=[1, 1, 1],
+            )
+
         for blk in self.blocks:
             underlying = getattr(blk, "_orig_mod", blk)
             if hasattr(underlying, "attn1"):
@@ -1034,6 +1084,14 @@ class SwiftVRWanTransformer3DModel(nn.Module):
         normed.mul_(1.0 + scale).add_(shift)
         hidden_states = self.proj_out(normed)
         del normed
+
+        if self.device_mesh is not None:
+            (hidden_states,) = sequence_parallel_unshard(
+                self.device_mesh,
+                [hidden_states],
+                seq_dims=[1],
+                seq_lens=[ppf * pph * ppw],
+            )
 
         hidden_states = hidden_states.reshape(B, ppf, pph, ppw, p_t, p_h, p_w, -1)
         hidden_states = hidden_states.permute(0, 7, 1, 4, 2, 5, 3, 6)

@@ -75,6 +75,16 @@ python examples/swiftvr/swiftvr_restore_h100.py \
   --quantization tf-kernel-fp8
 ```
 
+For multi-GPU DiT execution, `--gpu_num` enables Ulysses sequence parallelism.
+The DiT's 40 attention heads support SP degrees that divide 40, such as 2, 4,
+5, or 8. ReAE stays on GPU 0 to preserve the causal encoder/decoder state:
+
+```bash
+python examples/swiftvr/swiftvr_restore_h100.py \
+  --model_root /data/SwiftVR \
+  --gpu_num 2
+```
+
 For multi-GPU stage execution, pass three stage devices. Latents between ReAE
 encode, DiT, and ReAE decode are handed off through `WorkerTensorChannel`:
 
@@ -85,6 +95,10 @@ python examples/swiftvr/swiftvr_restore_h100.py \
   --enable_stage_parallel \
   --stage_devices 0,1,2
 ```
+
+Ulysses SP and stage parallelism are mutually exclusive.
+`torch.compile` is currently a single-GPU optimization and cannot be combined
+with SwiftVR Ulysses SP.
 
 The direct causal API accepts uint8 `[T,H,W,3]` tensors and returns PIL RGB
 frames. A partial chunk can return an empty list until enough causal context is

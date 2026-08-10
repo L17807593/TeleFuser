@@ -2,14 +2,22 @@ import threading
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 from PIL import Image
 from torch import nn
 
+from telefuser.core.config import ParallelConfig
 from telefuser.models.swiftvr_reae import MemBlock, TPool
 from telefuser.pipelines.swiftvr import pipeline as pipeline_module
 from telefuser.pipelines.swiftvr.chunk import ChunkType, build_chunk_specs
-from telefuser.pipelines.swiftvr.pipeline import SwiftVRStagedStreamSession, SwiftVRStreamSession, aligned_pad
+from telefuser.pipelines.swiftvr.pipeline import (
+    SwiftVRPipeline,
+    SwiftVRPipelineConfig,
+    SwiftVRStagedStreamSession,
+    SwiftVRStreamSession,
+    aligned_pad,
+)
 from telefuser.pipelines.swiftvr.streaming_tae import apply_parallel_with_boundary
 
 
@@ -161,6 +169,93 @@ def test_interleaved_stream_sessions_do_not_exchange_frames(monkeypatch) -> None
         np.asarray(frame).tolist() for frame in control_second
     ]
     assert second._closed is False
+
+
+def test_pipeline_initializes_a_dit_worker_for_ulysses_sp(monkeypatch) -> None:
+    class FakeReAE:
+        def to(self, **_kwargs: object) -> "FakeReAE":
+            return self
+
+        def eval(self) -> "FakeReAE":
+            return self
+
+    class FakeTransformer:
+        config = SimpleNamespace(num_attention_heads=40)
+
+    class FakeModuleManager:
+        @staticmethod
+        def get_model_info() -> dict[str, object]:
+            return {}
+
+        @staticmethod
+        def fetch_module(name: str) -> object:
+            return FakeReAE() if name == "swiftvr_reae" else FakeTransformer()
+
+    class FakeParallelWorker:
+        def __init__(self, stage: object) -> None:
+            self.stage = stage
+
+    monkeypatch.setattr(pipeline_module, "ParallelWorker", FakeParallelWorker)
+    config = SwiftVRPipelineConfig(enable_dit_parallel=True)
+    config.dit_config.parallel_config = ParallelConfig(device_ids=[0, 1], sp_ulysses_degree=2)
+    pipeline = SwiftVRPipeline(device="cpu", torch_dtype=torch.float32)
+
+    pipeline.init(FakeModuleManager(), config, torch.empty(1, 4))
+
+    assert isinstance(pipeline.dit_stage, FakeParallelWorker)
+    assert pipeline.encode_stage is None
+    assert pipeline.decode_stage is None
+
+
+def test_pipeline_rejects_compile_with_ulysses_sp() -> None:
+    config = SwiftVRPipelineConfig(enable_dit_parallel=True)
+    config.dit_config.parallel_config = ParallelConfig(device_ids=[0, 1], sp_ulysses_degree=2)
+    config.dit_config.compile_config.enabled = True
+    pipeline = SwiftVRPipeline(device="cpu", torch_dtype=torch.float32)
+    pipeline.config = config
+    pipeline.transformer = SimpleNamespace(config=SimpleNamespace(num_attention_heads=40))
+
+    with pytest.raises(ValueError, match="does not support torch.compile"):
+        pipeline._init_dit_parallel_worker(SimpleNamespace(), torch.empty(1, 4))
+
+
+def test_batch_call_routes_ulysses_sp_through_stream_session(monkeypatch) -> None:
+    class FakeSession:
+        def __init__(self) -> None:
+            self.closed = False
+            self.step_sizes: list[int] = []
+
+        def step(self, frames: torch.Tensor) -> list[Image.Image]:
+            self.step_sizes.append(int(frames.shape[0]))
+            return []
+
+        @staticmethod
+        def flush() -> list[Image.Image]:
+            return []
+
+        def close(self) -> None:
+            self.closed = True
+
+    pipeline = SwiftVRPipeline(device="cpu", torch_dtype=torch.float32)
+    pipeline.config = SimpleNamespace(
+        enable_stage_parallel=False,
+        enable_dit_parallel=True,
+        enable_stage_overlap=False,
+        dit_overlap=1,
+    )
+    session = FakeSession()
+    calls: list[dict[str, object]] = []
+
+    def stream(**kwargs: object) -> FakeSession:
+        calls.append(kwargs)
+        return session
+
+    monkeypatch.setattr(pipeline, "stream", stream)
+    pipeline(torch.zeros((5, 2, 2, 3), dtype=torch.uint8), clip_len=4, dit_overlap=0)
+
+    assert calls == [{"clip_len": 4, "resolution": None, "upscale": 4, "dit_overlap": 1}]
+    assert session.step_sizes == [4, 1]
+    assert session.closed is True
 
 
 def test_stage_restore_chunks_converts_decoded_tensors_to_pil(monkeypatch) -> None:

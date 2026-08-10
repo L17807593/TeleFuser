@@ -24,6 +24,7 @@ TeleFuser 是一个开源的多模态生成与世界模型流式推理和服务�
 
 ## News 📰
 
+- ✨ **2026-08-10**：新增 [**SwiftVR**](examples/swiftvr/README.md) 因果视频修复、有状态流式推理及单卡 H100 示例。
 - ✨ **2026-08-05**：新增 [**MiniMax H3**](examples/minimax_h3/README.md) T2VA、FL2VA 和 Ref2VA 联合
   音视频生成，并支持标准 `telefuser serve` 服务模式。在相同的 768p、5 秒、50 步 T2VA 请求和一次预热
   条件下，常驻 **4 张 H100 80 GB** 配置的性能与固定版本的本地 SGLang SP2+TP2 对齐，同时使用更少
@@ -224,6 +225,7 @@ telefuser/
 | `LingBot-World v2` | 双向世界模型流式推理 | LiveKit 控制闭环，见 [examples/lingbot/lingbot_world_v2_image_to_video_h100.py](examples/lingbot/lingbot_world_v2_image_to_video_h100.py) |
 | `LiveAct` | S2V | 语音驱动数字人视频生成，见 [examples/liveact/liveact_s2v_h100.py](examples/liveact/liveact_s2v_h100.py) |
 | `FlashVSR` | VSR | 流式视频超分，见 [examples/flashvsr/README.md](examples/flashvsr/README.md) |
+| `SwiftVR` | 因果视频修复 | 单卡 BF16 离线和流式视频修复，见 [examples/swiftvr/README.md](examples/swiftvr/README.md) |
 
 ### 视频生成
 
@@ -260,6 +262,8 @@ telefuser/
 - [docs/zh/torch_compile_compatibility.md](docs/zh/torch_compile_compatibility.md)：`torch.compile` 相关约束
 - [docs/zh/adding_new_model.md](docs/zh/adding_new_model.md)：新模型接入
 - [docs/zh/adding_new_example.md](docs/zh/adding_new_example.md)：Example 与 Pipeline Contract 编写方式
+
+- [examples/swiftvr/README.md](examples/swiftvr/README.md)：SwiftVR 权重下载、流式推理、加速配置和 H100 性能
 
 ## 已知限制
 

@@ -73,6 +73,7 @@ AdaTaylorCache 和运行时缓存控制，面向重复生成工作负载。
 | LTX Video | I2V + Audio | 视频生成 + 音频 |
 | MiniMax H3 | T2VA, FL2VA, Ref2VA + Audio | 本地 768p 音视频联合生成 |
 | FlashVSR | VSR | 视频超分辨率 |
+| SwiftVR | 因果视频修复 | 支持 BF16、torch.compile、FP8Linear、Ulysses SP 和 stage-parallel，见 [示例文档](../../examples/swiftvr/README.md) |
 | LiveAct | S2V | 语音转视频 |
 | LongCat-Video | T2V, I2V | 长视频生成 |
 | LingBot-Video | T2I, T2V, TI2V, MoE refiner | 精度优先的 Dense/MoE 视频生成 |

@@ -25,6 +25,8 @@ runtime path, supported workloads, and reproducible real-time gate.
 
 ## News 📰
 
+- ✨ **2026-08-10**: Added [**SwiftVR**](examples/swiftvr/README.md) causal video restoration with stateful streaming
+  and a single-GPU H100 example.
 - ✨ **2026-08-05**: Added [**MiniMax H3**](examples/minimax_h3/README.md) T2VA, FL2VA, and Ref2VA joint
   audio-video generation with standard `telefuser serve` support. On the matched 768p, five-second, 50-step T2VA
   benchmark after warmup, the resident **4 x H100 80 GB** profile matched pinned local SGLang SP2+TP2 performance
@@ -247,7 +249,7 @@ telefuser/
 | `LTX Video` | I2V + Audio | Unified audio-video generation via [examples/ltx_video/README.md](examples/ltx_video/README.md) |
 | `MiniMax H3` | T2VA, FL2VA, Ref2VA + Audio | Local 768p joint audio-video generation via [examples/minimax_h3/README.md](examples/minimax_h3/README.md) |
 | `LongCat-Video` | T2V, I2V, VC | Long-form generation and continuation via [examples/longcat_video/README.md](examples/longcat_video/README.md) |
-| **NEW** `LingBot-Video` | T2I, T2V, TI2V, MoE refiner | Dense/MoE generation with native CFG/SP and an in-memory base-to-refiner path; see [examples/lingbot_video/README.md](examples/lingbot_video/README.md) |
+| `LingBot-Video` | T2I, T2V, TI2V, MoE refiner | Dense/MoE generation with native CFG/SP and an in-memory base-to-refiner path; see [examples/lingbot_video/README.md](examples/lingbot_video/README.md) |
 
 ### Image Generation and Other Multimodal Pipelines
 
@@ -275,7 +277,7 @@ See [examples/README.md](examples/README.md) for the example runner and baseline
 - [docs/en/adding_new_model.md](docs/en/adding_new_model.md): integrating new models
 - [docs/en/adding_new_example.md](docs/en/adding_new_example.md): authoring examples and pipeline contracts
 - [docs/en/abot_world.md](docs/en/abot_world.md): ABot-World single-GPU interactive pipeline, controls, and tests
-- [docs/en/swiftvr.md](docs/en/swiftvr.md): SwiftVR checkpoint loading, streaming usage, performance, and service limits
+- [examples/swiftvr/README.md](examples/swiftvr/README.md): SwiftVR checkpoint loading, streaming usage, performance, and acceleration options
 
 ## Known Limitations
 

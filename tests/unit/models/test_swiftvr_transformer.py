@@ -1,8 +1,14 @@
+import os
+import socket
 from types import SimpleNamespace
 
+import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
-from telefuser.core.config import CompileConfig, QuantConfig, QuantKernelBackend, QuantType
+from telefuser.core.config import CompileConfig, ParallelConfig, QuantConfig, QuantKernelBackend, QuantType
+from telefuser.distributed.device_mesh import create_device_mesh_from_config
 from telefuser.models.swiftvr_transformer import (
     SwiftVRWanTransformer3DModel,
     _WindowRuntimeMetaCache,
@@ -22,6 +28,58 @@ def _rope(length: int = 4) -> SimpleNamespace:
         freqs_cos=torch.cat([part[0] for part in parts], dim=1),
         freqs_sin=torch.cat([part[1] for part in parts], dim=1),
     )
+
+
+def _swiftvr_sp_test_model() -> SwiftVRWanTransformer3DModel:
+    model = SwiftVRWanTransformer3DModel(
+        patch_size=(1, 1, 1),
+        num_attention_heads=4,
+        attention_head_dim=4,
+        in_channels=4,
+        out_channels=4,
+        text_dim=4,
+        freq_dim=4,
+        ffn_dim=32,
+        num_layers=2,
+        cross_attn_norm=False,
+        self_attn_window_hw=(2, 2),
+    ).cuda()
+    model.to(dtype=torch.bfloat16).eval()
+    model.prepare_for_inference()
+    return model
+
+
+def _swiftvr_ulysses_parity_worker(rank: int, world_size: int, port: int) -> None:
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size, device_id=torch.device("cuda", rank))
+    try:
+        torch.manual_seed(17)
+        reference = _swiftvr_sp_test_model()
+        torch.manual_seed(17)
+        distributed_model = _swiftvr_sp_test_model()
+        distributed_model.enable_usp(
+            create_device_mesh_from_config(
+                ParallelConfig(device_ids=list(range(world_size)), sp_ulysses_degree=world_size)
+            )
+        )
+        torch.manual_seed(23)
+        hidden_states = torch.randn((1, 4, 2, 4, 4), device="cuda", dtype=torch.bfloat16)
+        timestep = torch.ones((1,), device="cuda", dtype=torch.float32)
+        context = torch.randn((1, 4, 4), device="cuda", dtype=torch.bfloat16)
+        with torch.inference_mode():
+            expected = reference(hidden_states, timestep, context).sample
+            actual = distributed_model(hidden_states, timestep, context).sample
+        torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+    finally:
+        dist.destroy_process_group()
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 def test_window_starts_cover_boundary_without_redundant_interior() -> None:
@@ -104,6 +162,56 @@ def test_swiftvr_transformer_torchao_fp8_quantization_uses_block_linears(monkeyp
     assert calls == [(model, ("blocks.",), ("head", "time_embedding", "time_projection", "patch_embedding"))]
     assert model.torchao_fp8_replaced_linear == 2
     assert model.quant_type is QuantType.TORCHAO_FP8
+
+
+def test_swiftvr_transformer_enables_ulysses_sp_on_shifted_window_attention(monkeypatch) -> None:
+    model = SwiftVRWanTransformer3DModel(
+        patch_size=(1, 1, 1),
+        num_attention_heads=4,
+        attention_head_dim=4,
+        in_channels=4,
+        out_channels=4,
+        text_dim=4,
+        freq_dim=4,
+        ffn_dim=8,
+        num_layers=2,
+        cross_attn_norm=False,
+    )
+    mesh = object()
+    monkeypatch.setattr("telefuser.models.swiftvr_transformer.get_attention_strategy", lambda _mesh: "ulysses")
+    monkeypatch.setattr("telefuser.models.swiftvr_transformer.get_ulysses_world_size", lambda _mesh: 2)
+
+    model.enable_usp(mesh)
+
+    assert model.device_mesh is mesh
+    assert all(block.attn1.device_mesh is mesh for block in model.blocks)
+
+
+def test_swiftvr_transformer_rejects_non_ulysses_sp(monkeypatch) -> None:
+    model = SwiftVRWanTransformer3DModel(
+        patch_size=(1, 1, 1),
+        num_attention_heads=4,
+        attention_head_dim=4,
+        in_channels=4,
+        out_channels=4,
+        text_dim=4,
+        freq_dim=4,
+        ffn_dim=8,
+        num_layers=1,
+        cross_attn_norm=False,
+    )
+    monkeypatch.setattr("telefuser.models.swiftvr_transformer.get_attention_strategy", lambda _mesh: "ring")
+
+    with pytest.raises(ValueError, match="Ulysses SP only"):
+        model.enable_usp(object())
+
+
+@pytest.mark.distributed
+@pytest.mark.gpu
+@pytest.mark.multi_gpu
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
+def test_swiftvr_ulysses_sp_matches_single_rank_output() -> None:
+    mp.spawn(_swiftvr_ulysses_parity_worker, args=(2, _free_port()), nprocs=2, join=True)
 
 
 def test_compile_transformer_blocks_uses_runtime_config(monkeypatch) -> None:

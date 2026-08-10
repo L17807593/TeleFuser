@@ -10,6 +10,7 @@ your training schedule uses a different number of train timesteps.
 
 import torch
 
+from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequence_parallel_unshard
 from telefuser.models.swiftvr_transformer import SwiftVRWanTransformer3DModel
 
 from .chunk import ChunkSpec
@@ -92,6 +93,12 @@ def _dit_forward_chunk(transformer, chunk, temb, tp, enc_hs, t_off=0):
         if hasattr(underlying, "attn1"):
             underlying.attn1._thw = thw_global
             underlying.attn1._layer_id = i
+    if transformer.device_mesh is not None:
+        sequence_parallel_shard(
+            transformer.device_mesh,
+            [hs, rope[0], rope[1]],
+            seq_dims=[1, 1, 1],
+        )
     for blk in transformer.blocks:
         hs = blk(hs, enc_hs, tp, rope)
 
@@ -102,6 +109,13 @@ def _dit_forward_chunk(transformer, chunk, temb, tp, enc_hs, t_off=0):
         shift, scale = (transformer.scale_shift_table.to(temb.device) + temb.unsqueeze(1)).chunk(2, dim=1)
     hs = (transformer.norm_out(hs.float()) * (1 + scale.to(hs.device)) + shift.to(hs.device)).type_as(hs)
     hs = transformer.proj_out(hs)
+    if transformer.device_mesh is not None:
+        (hs,) = sequence_parallel_unshard(
+            transformer.device_mesh,
+            [hs],
+            seq_dims=[1],
+            seq_lens=[ppf * pph * ppw],
+        )
     hs = hs.reshape(B, ppf, pph, ppw, p_t, p_h, p_w, -1).permute(0, 7, 1, 4, 2, 5, 3, 6)
     return hs.flatten(6, 7).flatten(4, 5).flatten(2, 3)
 
