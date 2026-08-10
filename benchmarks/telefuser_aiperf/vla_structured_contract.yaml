@@ -1,0 +1,39 @@
+contract_version: v1
+name: telefuser_lingbot_vla_v2_structured
+mode: structured_action
+implementation: telefuser
+model_family: lingbot_vla_v2
+model: lingbot-vla-v2-6b
+supported_tasks:
+  - vla_action
+transport: http_polling
+endpoint:
+  submit_path: /v1/tasks/structured
+  status_path: /v1/tasks/{task_id}/status
+  protocol: telefuser_structured_task
+request_encoding:
+  content_type: application/json
+  parameters:
+    instruction: text
+    state: extra.state
+    camera_high: image
+    camera_left_wrist: image
+    camera_right_wrist: image
+    seed: extra.seed
+result_delivery:
+  terminal_status: completed
+  result_field: result
+  action_field: canonical_normalized_actions
+  expected_shape: [50, 55]
+workload:
+  warmup_requests: 2
+  profile_requests: 20
+  concurrency: 1
+metrics:
+  - request_latency
+  - request_throughput
+  - success_rate
+  - server_metrics
+artifacts:
+  config: benchmarks/telefuser_aiperf/configs/vla_structured_e2e.yaml
+  dataset: benchmarks/telefuser_aiperf/data/vla_structured.jsonl

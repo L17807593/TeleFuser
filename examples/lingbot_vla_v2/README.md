@@ -254,11 +254,32 @@ excluded from the artifact. `--max-records` bounds retained per-request samples 
 latency and success counters still cover the complete run. `--max-resource-samples` independently bounds retained
 resource samples.
 
-This validation aligns VLA with the repository's existing deployment practice, but it is not yet an AIPerf workload:
-AIPerf currently has maintained adapters for batch media and LingBot streaming transports, not the asynchronous
-structured task API. The JSON report therefore keeps target inference time separate from client end-to-end time and
-preserves target metadata and raw service metric snapshots so a future transport adapter can consume the same facts.
-Passing this check proves serving and normalized action structure, not embodiment-specific control semantics.
+For fault handling, run the independent validator against a ready service:
+
+```bash
+.venv-vla/bin/python tools/validation/validate_lingbot_vla_v2_service_faults.py \
+  --base-url http://127.0.0.1:18080 \
+  --image examples/data/lingbot_world_fast/image.jpg
+```
+
+It checks missing cameras, invalid state size, invalid Base64, and cancellation. Replica termination is opt-in and
+requires a disposable two-replica service: add `--service-pid <telefuser-parent-pid>` and
+`--kill-replica-gpu-index <physical-index>`. The tool only selects a GPU compute process inside that parent process
+tree, sends `SIGTERM`, and verifies one-replica capacity degradation plus a subsequent valid `50x55` response. It does
+not promise automatic replica restart.
+
+The same structured API is available through the repository-owned AIPerf workload. Install the pinned isolated
+AIPerf environment once, then run the workload while the native service is ready:
+
+```bash
+bash scripts/setup_aiperf.sh
+bash benchmarks/telefuser_aiperf/scripts/run_vla_structured_bench.sh
+```
+
+AIPerf excludes the configured warmup, aggregates request latency, throughput, success, traces, and server metrics,
+and writes normal AIPerf artifacts. The adapter strictly validates the action contract but retains only bounded action
+facts, not full arrays or Base64 inputs. Passing either validator proves serving and normalized action structure, not
+embodiment-specific control semantics.
 
 ## TeleFuser Regression Baseline
 

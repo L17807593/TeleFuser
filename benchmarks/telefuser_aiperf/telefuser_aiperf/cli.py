@@ -6,9 +6,10 @@ from __future__ import annotations
 def main() -> None:
     """Register TeleFuser adapters and delegate to the AIPerf CLI."""
 
-    from telefuser_aiperf import register_adapters
+    from telefuser_aiperf import register_adapters, register_plugins
 
     register_adapters()
+    register_plugins()
 
     from aiperf.cli import app
 

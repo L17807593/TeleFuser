@@ -197,13 +197,16 @@ def _forward_cancel_fn(
     cancel_event: mp_stdlib.Event,
     stop_event: threading.Event,
     forwarder_exit: threading.Event,
+    forwarder_wake: threading.Event,
     forwarder_done: threading.Event,
 ) -> None:
     """Forward main-process stop_event to subprocess cancel_event (polled)."""
     while not forwarder_exit.is_set():
-        if stop_event.wait(timeout=0.5):
+        if stop_event.is_set():
             cancel_event.set()
             break
+        forwarder_wake.wait(timeout=0.5)
+        forwarder_wake.clear()
     forwarder_done.set()
 
 
@@ -236,24 +239,32 @@ class ReplicaHandle:
         self.cancel_event.clear()
 
         forwarder_exit = threading.Event()
+        forwarder_wake = threading.Event()
         forwarder_done = threading.Event()
 
         forwarder = threading.Thread(
             target=_forward_cancel_fn,
-            args=(self.cancel_event, stop_event, forwarder_exit, forwarder_done),
+            args=(self.cancel_event, stop_event, forwarder_exit, forwarder_wake, forwarder_done),
             daemon=True,
         )
         forwarder.start()
 
         loop = asyncio.get_running_loop()
-        self.conn.send(("task", task_data, timeout_s, output_root))
-
         ipc_timeout = (timeout_s or 600) + _TASK_IPC_MARGIN_S
 
         try:
-            result = await loop.run_in_executor(None, self._recv_with_health_check, ipc_timeout)
+            if not self.process.is_alive():
+                self._dead = True
+                raise ReplicaDeadError(f"Replica {self.replica_id} process is not alive")
+            try:
+                self.conn.send(("task", task_data, timeout_s, output_root))
+                result = await loop.run_in_executor(None, self._recv_with_health_check, ipc_timeout)
+            except (EOFError, OSError) as error:
+                self._dead = True
+                raise ReplicaDeadError(f"Replica {self.replica_id} IPC failed: {error}") from error
         finally:
             forwarder_exit.set()
+            forwarder_wake.set()
             forwarder_done.wait(2.0)
 
         if result is None:
