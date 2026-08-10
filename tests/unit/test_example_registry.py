@@ -10,6 +10,7 @@ from examples.run_examples import load_config
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES_ROOT = PROJECT_ROOT / "examples"
 SERVICE_PARITY_EXAMPLES = {
+    "lingbot_vla_v2/lingbot_vla_v2_native_service.py",
     "wan_video/wan21_14b_image_to_video_480p_service.py",
     "wan_video/wan22_14b_image_to_video_distill_h100.py",
     "lingbot_video/lingbot_video_dense_1_3b.py",
@@ -36,6 +37,22 @@ def _declares_service_contract(path: Path) -> bool:
         ):
             return True
     return False
+
+
+def _declared_run_entrypoint(path: Path) -> str:
+    tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+    for node in tree.body:
+        targets = (
+            node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AnnAssign) else []
+        )
+        if not any(isinstance(target, ast.Name) and target.id == "PIPELINE_CONTRACT" for target in targets):
+            continue
+        try:
+            contract = ast.literal_eval(node.value)
+        except (TypeError, ValueError):
+            break
+        return contract.get("entrypoints", {}).get("run_with_file", "run_with_file")
+    return "run_with_file"
 
 
 def test_example_regression_registry_has_runnable_entrypoints() -> None:
@@ -78,6 +95,8 @@ def test_all_declared_service_examples_have_cpu_parity_coverage() -> None:
 
     assert declared_contract_examples == SERVICE_PARITY_EXAMPLES
     for script in declared_contract_examples:
-        symbols = _module_symbols(EXAMPLES_ROOT / script)
+        script_path = EXAMPLES_ROOT / script
+        symbols = _module_symbols(script_path)
         assert "get_pipeline" in symbols, f"{script} is missing get_pipeline()"
-        assert "run_with_file" in symbols, f"{script} is missing run_with_file()"
+        run_entrypoint = _declared_run_entrypoint(script_path)
+        assert run_entrypoint in symbols, f"{script} is missing {run_entrypoint}()"

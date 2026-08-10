@@ -2,8 +2,8 @@
 
 TeleFuser exposes raw target-side facts; AIPerf owns workload execution, aggregation, resource collection, artifacts,
 GreptimeDB history, and visualization. The checked-in integration covers batch video generation through the
-OpenAI-compatible `/v1/videos` API, TeleFuser LingBot streaming through LiveKit, and SGLang LingBot streaming through
-its native realtime WebSocket endpoint.
+OpenAI-compatible `/v1/videos` API, LingBot-VLA structured actions through native HTTP task polling, TeleFuser LingBot
+streaming through LiveKit, and SGLang LingBot streaming through its native realtime WebSocket endpoint.
 
 AIPerf's stream runner and result schema are transport-neutral. The LiveKit adapter is maintained by
 TeleFuser, loads from source at process startup, and produces AIPerf's standard session results. The contract records WebRTC as
@@ -80,6 +80,7 @@ parity comparisons. See the benchmark README for model, GPU, port, and executabl
 |---|---|---|
 | TeleFuser runtime | TeleFuser | Emit synchronized phase, chunk, runtime, cache, and environment facts |
 | Batch target adapter | AIPerf | Convert `/v1/videos` HTTP events into the standard request timeline |
+| VLA structured adapter | TeleFuser | Validate action results and convert native submit/poll events into bounded AIPerf records |
 | LiveKit source adapter | TeleFuser | Convert room, track, status, metrics, and control events into session results |
 | SGLang source adapter | TeleFuser | Convert MessagePack frames, chunk timings, and camera events into session results |
 | Aggregation and history | AIPerf | Apply warmup, percentiles, throughput, artifacts, GreptimeDB, and visualization |

@@ -16,9 +16,100 @@ import pytest
 from telefuser.platforms import current_platform
 from telefuser.service.api.schema import TaskRequest
 from telefuser.service.core.config import ServerConfig
+from telefuser.service.core.pipeline_pool import PipelinePool
+from telefuser.service.core.replica_worker import ReplicaDeadError, ReplicaHandle, _forward_cancel_fn
 from telefuser.service.core.task_manager import TaskManager, TaskStatus
 
 _DEVICE_ENV_VAR = current_platform.device_control_env_var
+
+
+def test_cancel_forwarder_wakes_immediately_on_normal_completion() -> None:
+    cancel_event = threading.Event()
+    stop_event = threading.Event()
+    forwarder_exit = threading.Event()
+    forwarder_wake = threading.Event()
+    forwarder_done = threading.Event()
+    forwarder = threading.Thread(
+        target=_forward_cancel_fn,
+        args=(cancel_event, stop_event, forwarder_exit, forwarder_wake, forwarder_done),
+        daemon=True,
+    )
+    forwarder.start()
+
+    forwarder_exit.set()
+    forwarder_wake.set()
+
+    assert forwarder_done.wait(0.2)
+    assert not cancel_event.is_set()
+    assert not stop_event.is_set()
+
+
+def test_cancel_forwarder_preserves_request_cancellation() -> None:
+    cancel_event = threading.Event()
+    stop_event = threading.Event()
+    stop_event.set()
+    forwarder_done = threading.Event()
+
+    _forward_cancel_fn(
+        cancel_event,
+        stop_event,
+        threading.Event(),
+        threading.Event(),
+        forwarder_done,
+    )
+
+    assert cancel_event.is_set()
+    assert forwarder_done.is_set()
+
+
+def test_replica_handle_converts_broken_pipe_to_dead_replica() -> None:
+    process = MagicMock()
+    process.is_alive.return_value = True
+    connection = MagicMock()
+    connection.send.side_effect = BrokenPipeError("closed")
+    handle = ReplicaHandle(
+        replica_id=0,
+        process=process,
+        conn=connection,
+        cancel_event=threading.Event(),
+        metadata={},
+    )
+
+    with pytest.raises(ReplicaDeadError, match="IPC failed"):
+        asyncio.run(handle.run_task({}, threading.Event(), None, None))
+
+    assert handle._dead is True
+
+
+def test_pipeline_pool_evicts_exited_replica_and_uses_remaining_capacity() -> None:
+    task_manager = MagicMock()
+    pool = PipelinePool(
+        num_replicas=2,
+        replica_device_ids=[["0"], ["1"]],
+        security_level_name="NONE",
+        task_manager=task_manager,
+    )
+    dead_handle = MagicMock()
+    dead_handle._dead = False
+    dead_handle.process.is_alive.return_value = False
+    live_handle = MagicMock()
+    live_handle._dead = False
+    live_handle.process.is_alive.return_value = True
+    pool._handles = [dead_handle, live_handle]
+    pool._instance_status = ["idle", "idle"]
+    pool._available.put_nowait(0)
+    pool._available.put_nowait(1)
+
+    async def scenario() -> None:
+        async with pool.acquire() as handle:
+            assert handle is live_handle
+
+    asyncio.run(scenario())
+
+    assert pool._live_count == 1
+    assert pool._instance_status == ["dead", "idle"]
+    dead_handle.shutdown.assert_called_once()
+    task_manager.set_max_concurrent_processing.assert_called_once_with(1)
 
 
 # ============================================================================

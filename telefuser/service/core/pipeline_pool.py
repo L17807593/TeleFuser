@@ -207,8 +207,11 @@ class PipelinePool:
                 continue
 
             handle = self._handles[idx]
-            if handle._dead:
-                self._evict_replica(idx, "pre-existing dead state")
+            process = getattr(handle, "process", None)
+            process_dead = process is not None and not process.is_alive()
+            if handle._dead or process_dead:
+                reason = "process exited" if process_dead else "pre-existing dead state"
+                self._evict_replica(idx, reason)
                 continue
             break
 

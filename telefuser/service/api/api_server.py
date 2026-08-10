@@ -18,7 +18,7 @@ from ..core.config import ServerConfig, server_config
 from ..core.file_service import FileService
 from ..core.task_manager import TaskManager
 from ..core.task_processor import AsyncTaskProcessor
-from ..core.task_service import MediaGenerationService
+from ..core.task_service import MediaGenerationService, StructuredInferenceService
 from . import routers
 from .task_application_service import TaskApplicationService
 
@@ -58,6 +58,7 @@ class ApiServer:
         self.file_service: FileService | None = None
         self.inference_service: PipelineService | None = None
         self.media_service: MediaGenerationService | None = None
+        self.structured_service: StructuredInferenceService | None = None
         self.task_app_service = TaskApplicationService(self)
         self.cache_service: Any | None = None
         self.max_queue_size = max_queue_size
@@ -188,6 +189,7 @@ class ApiServer:
             return
 
         if self.task_processor.is_running:
+            self.task_processor.notify_task_available()
             await self.ensure_artifact_cleanup_running()
             return
 
@@ -196,8 +198,10 @@ class ApiServer:
                 logger.warning("Task processor is not initialized; task will remain pending until services are ready")
                 return
             if self.task_processor.is_running:
+                self.task_processor.notify_task_available()
                 return
             await self.task_processor.start()
+            self.task_processor.notify_task_available()
             await self.ensure_artifact_cleanup_running()
 
     async def ensure_artifact_cleanup_running(self) -> None:
@@ -338,9 +342,11 @@ class ApiServer:
             cache_service=cache_service,
             cache_adapter=cache_adapter,
         )
+        self.structured_service = StructuredInferenceService(inference_service)
         self.task_processor = AsyncTaskProcessor(
             task_manager=self.task_manager,
             media_service=self.media_service,
+            structured_service=self.structured_service,
             max_concurrent=self.max_concurrent_tasks,
         )
 

@@ -92,6 +92,31 @@ Available batch configs:
 | `configs/video_generation_rate.yaml` | Poisson-arrival load |
 | `configs/video_generation_wan21_i2v_480p_compare.yaml` | Fixed Wan2.1 I2V comparison |
 
+## LingBot-VLA v2 Structured Actions
+
+Start the native VLA service from its isolated model environment, then run the AIPerf workload from the repository
+root:
+
+```bash
+bash benchmarks/telefuser_aiperf/scripts/run_vla_structured_bench.sh
+```
+
+The repository-owned `telefuser_vla_structured` endpoint and `telefuser_structured_http` transport submit
+`POST /v1/tasks/structured`, poll `GET /v1/tasks/{task_id}/status`, and pass request latency, throughput, success,
+trace, and server metric facts into AIPerf's normal warmup and aggregation pipeline. Defaults are two excluded warmup
+requests followed by 20 measured requests at concurrency one. Override them without changing the checked-in config:
+
+```bash
+TELEFUSER_AIPERF_REQUESTS=100 \
+TELEFUSER_AIPERF_CONCURRENCY=2 \
+  bash benchmarks/telefuser_aiperf/scripts/run_vla_structured_bench.sh
+```
+
+Each terminal result is required to contain a finite `50x55` action chunk and the frozen structured result fields.
+The adapter retains an action hash, bounds, dimensions, verification status, target inference time, and peak memory;
+it does not copy full action arrays or Base64 cameras into AIPerf response records. This validates service execution
+and normalized action structure, not physical robot control semantics.
+
 ## LingBot-World v2 Streaming
 
 The v2 pipeline expects the following files below `TF_MODEL_ZOO_PATH`:
@@ -264,10 +289,12 @@ AIPerf environment first, then run the checks from the repository root:
 PYTHONPATH=benchmarks/telefuser_aiperf \
   .venv-aiperf/bin/python -m pytest \
   benchmarks/telefuser_aiperf/tests/test_livekit_adapter.py \
-  benchmarks/telefuser_aiperf/tests/test_sglang_adapter.py
+  benchmarks/telefuser_aiperf/tests/test_sglang_adapter.py \
+  benchmarks/telefuser_aiperf/tests/test_vla_structured.py
 
 bash -n \
   scripts/setup_aiperf.sh \
   benchmarks/telefuser_aiperf/scripts/run_stream_bench.sh \
-  benchmarks/telefuser_aiperf/scripts/run_sglang_lingbot_world_v2_4gpu.sh
+  benchmarks/telefuser_aiperf/scripts/run_sglang_lingbot_world_v2_4gpu.sh \
+  benchmarks/telefuser_aiperf/scripts/run_vla_structured_bench.sh
 ```

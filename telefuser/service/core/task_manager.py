@@ -30,6 +30,7 @@ class TaskInfo:
     output_path: str | None = None
     peak_memory_mb: float | None = None
     inference_time_s: float | None = None
+    result: dict[str, Any] | None = None
     stop_event: threading.Event = field(default_factory=threading.Event)
     thread: threading.Thread | None = None
 
@@ -127,6 +128,7 @@ class TaskManager:
         *,
         peak_memory_mb: float | None = None,
         inference_time_s: float | None = None,
+        result: dict[str, Any] | None = None,
     ) -> None:
         """Mark task as completed with metrics."""
         with self._lock:
@@ -151,6 +153,7 @@ class TaskManager:
                 task.inference_time_s = inference_time_s if inference_time_s is not None else duration
                 get_service_metrics().record_task_completed(duration)
             task.peak_memory_mb = peak_memory_mb
+            task.result = result
 
     def fail_task(self, task_id: str, error: str) -> None:
         """Mark task as failed with metrics."""
@@ -227,6 +230,8 @@ class TaskManager:
             "peak_memory_mb": task.peak_memory_mb,
             "inference_time_s": task.inference_time_s,
         }
+        if task.result is not None:
+            status["result"] = task.result
         status.update(self._serialize_task_message(task.message))
         return status
 

@@ -2,20 +2,75 @@
 
 from __future__ import annotations
 
+import json
 import threading
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from telefuser.service_types import MediaType, PipelineRunStatus, TaskStatus, TaskType
 from telefuser.utils.logging import logger
 
-from ..api.schema import TaskRequest, TaskResponse
+from ..api.schema import StructuredTaskRequest, TaskRequest, TaskResponse
 from ..media.media_base import AudioHandler, ImageHandler, VideoHandler
 from .file_service import FileService
 from .pipeline_contract import infer_media_type_for_task
 
 if TYPE_CHECKING:
     from .pipeline_service import PipelineService
+
+
+@dataclass(frozen=True)
+class StructuredTaskExecutionResponse:
+    """Internal result returned to the shared task processor."""
+
+    task_id: str
+    result: dict[str, Any]
+    output_path: None = None
+    peak_memory_mb: float | None = None
+    inference_time_s: float | None = None
+
+
+class StructuredInferenceService:
+    """Execute pipeline tasks that return JSON objects instead of artifacts."""
+
+    def __init__(self, inference_service: "PipelineService") -> None:
+        self.inference_service = inference_service
+
+    async def execute_with_stop_event(
+        self,
+        message: StructuredTaskRequest,
+        stop_event: threading.Event,
+    ) -> StructuredTaskExecutionResponse | None:
+        """Run one structured task and retain its JSON result in task state."""
+        if stop_event.is_set():
+            logger.info(f"Task {message.task_id} cancelled before processing")
+            return None
+
+        task_data = message.model_dump(mode="json")
+        result = await self.inference_service.run_task_with_stop_event(task_data, stop_event)
+        if result is None:
+            if stop_event.is_set():
+                return None
+            raise RuntimeError("Task processing timeout")
+        if result.get("status") != PipelineRunStatus.SUCCESS:
+            raise RuntimeError(result.get("message") or "Inference failed")
+
+        payload = result.get("raw")
+        if not isinstance(payload, dict):
+            raise RuntimeError("Structured pipeline entrypoint must return a JSON object")
+        try:
+            json.dumps(payload, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("Structured pipeline result must contain finite JSON-serializable values") from error
+
+        return StructuredTaskExecutionResponse(
+            task_id=message.task_id,
+            result=payload,
+            peak_memory_mb=result.get("peak_memory_mb"),
+            inference_time_s=result.get("inference_time_s"),
+        )
+
 
 # Media handlers
 _image_handler = ImageHandler()

@@ -95,10 +95,22 @@ TASK_I2I = "i2i"
 TASK_S2V = "s2v"
 TASK_VSR = "vsr"
 TASK_EDIT = "edit"
+TASK_VLA_ACTION = "vla_action"
 
 VIDEO_TASKS = (TASK_T2V, TASK_I2V, TASK_FL2V, TASK_VC, TASK_S2V, TASK_VSR)
 IMAGE_TASKS = (TASK_T2I, TASK_I2I, TASK_EDIT)
-VALID_TASK_TYPES = (TASK_T2V, TASK_I2V, TASK_FL2V, TASK_VC, TASK_T2I, TASK_I2I, TASK_S2V, TASK_VSR, TASK_EDIT)
+VALID_TASK_TYPES = (
+    TASK_T2V,
+    TASK_I2V,
+    TASK_FL2V,
+    TASK_VC,
+    TASK_T2I,
+    TASK_I2I,
+    TASK_S2V,
+    TASK_VSR,
+    TASK_EDIT,
+    TASK_VLA_ACTION,
+)
 
 # ── Constants: Aspect Ratios ────────────────────────────────────────────────
 
@@ -247,6 +259,74 @@ class TFClient:
             raise TaskCreationError(f"Task creation failed (HTTP {e.response.status_code}): {e.response.text}") from e
         except requests.RequestException as e:
             raise TaskCreationError(f"Task creation request failed: {e}") from e
+
+    def create_structured_task(self, task_type: str, **params: Any) -> Dict[str, Any]:
+        """Create a task whose pipeline contract returns a JSON result."""
+        payload = {"task": task_type, **params}
+        try:
+            response = self._session.post(
+                f"{self.base_url}/v1/tasks/structured",
+                json=payload,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.HTTPError as error:
+            raise TaskCreationError(
+                f"Structured task creation failed (HTTP {error.response.status_code}): {error.response.text}"
+            ) from error
+        except requests.RequestException as error:
+            raise TaskCreationError(f"Structured task creation request failed: {error}") from error
+
+    def create_vla_action_task(
+        self,
+        instruction: str,
+        state: List[float],
+        camera_high_path: str,
+        camera_left_wrist_path: str,
+        camera_right_wrist_path: str,
+        seed: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Create a LingBot-VLA v2 canonical action inference task."""
+        return self.create_structured_task(
+            TASK_VLA_ACTION,
+            instruction=instruction,
+            state=state,
+            camera_high=self._encode_file_input(camera_high_path),
+            camera_left_wrist=self._encode_file_input(camera_left_wrist_path),
+            camera_right_wrist=self._encode_file_input(camera_right_wrist_path),
+            seed=seed,
+        )
+
+    def predict_vla_actions(
+        self,
+        instruction: str,
+        state: List[float],
+        camera_high_path: str,
+        camera_left_wrist_path: str,
+        camera_right_wrist_path: str,
+        seed: Optional[int] = None,
+        timeout: int = 300,
+        poll_interval: float = 0.5,
+    ) -> Dict[str, Any]:
+        """Run LingBot-VLA v2 inference and return its structured action result."""
+        created = self.create_vla_action_task(
+            instruction=instruction,
+            state=state,
+            camera_high_path=camera_high_path,
+            camera_left_wrist_path=camera_left_wrist_path,
+            camera_right_wrist_path=camera_right_wrist_path,
+            seed=seed,
+        )
+        status = self.wait_for_completion(
+            created["task_id"],
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
+        result = status.get("result")
+        if not isinstance(result, dict):
+            raise TaskFailedError(f"Task {created['task_id']} completed without a structured result")
+        return result
 
     # ── Video task creation methods ──────────────────────────────────────────
 

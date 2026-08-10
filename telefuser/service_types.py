@@ -17,7 +17,7 @@ class _StringEnum(str, Enum):
 
 
 class TaskType(_StringEnum):
-    """Supported media generation task types."""
+    """Supported inference task types."""
 
     T2V = "t2v"
     I2V = "i2v"
@@ -27,6 +27,7 @@ class TaskType(_StringEnum):
     I2I = "i2i"
     S2V = "s2v"
     VSR = "vsr"
+    VLA_ACTION = "vla_action"
 
 
 class AspectRatio(_StringEnum):
@@ -70,10 +71,11 @@ class StopTaskStatus(_StringEnum):
 
 
 class MediaType(_StringEnum):
-    """Generated media type."""
+    """Inference result type."""
 
     IMAGE = "image"
     VIDEO = "video"
+    STRUCTURED = "structured"
 
 
 class PipelineRunStatus(_StringEnum):

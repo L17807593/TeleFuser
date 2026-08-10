@@ -1,0 +1,49 @@
+# yaml-language-server: $schema=../../aiperf/src/aiperf/config/schema/aiperf-config.schema.json
+
+schemaVersion: "2.0"
+
+randomSeed: 42
+
+benchmark:
+  model: lingbot-vla-v2-6b
+
+  endpoint:
+    url: ${TELEFUSER_AIPERF_URL:http://127.0.0.1:18080}
+    type: telefuser_vla_structured
+    transport: telefuser_structured_http
+    timeout: ${TELEFUSER_AIPERF_TIMEOUT:120}
+
+  tokenizer:
+    name: builtin
+
+  dataset:
+    type: file
+    path: ./benchmarks/telefuser_aiperf/data/vla_structured.jsonl
+    format: single_turn
+    sampling: sequential
+
+  warmup:
+    type: concurrency
+    concurrency: 1
+    requests: ${TELEFUSER_AIPERF_WARMUP_REQUESTS:2}
+    excludeFromResults: true
+
+  profiling:
+    type: concurrency
+    concurrency: ${TELEFUSER_AIPERF_CONCURRENCY:1}
+    requests: ${TELEFUSER_AIPERF_REQUESTS:20}
+    duration: ${TELEFUSER_AIPERF_DURATION:3600}
+    gracePeriod: ${TELEFUSER_AIPERF_GRACE_PERIOD:120}
+
+  artifacts:
+    dir: ./artifacts/telefuser_aiperf/vla_structured
+    summary: [json]
+    records: [jsonl]
+    showTraceTiming: true
+    trace: true
+
+  serverMetrics:
+    enabled: ${TELEFUSER_AIPERF_SERVER_METRICS:true}
+    urls:
+      - ${TELEFUSER_AIPERF_METRICS_URL:http://127.0.0.1:18080/v1/service/metrics}
+    formats: [json, csv]

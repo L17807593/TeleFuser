@@ -19,7 +19,7 @@ from telefuser.service.core.pipeline_contract import default_task_contract, vali
 from telefuser.service_types import MediaType, StopTaskStatus
 from telefuser.utils.logging import logger
 
-from ..schema import StopTaskResponse, TaskRequest, TaskResponse
+from ..schema import StopTaskResponse, StructuredTaskRequest, StructuredTaskResponse, TaskRequest, TaskResponse
 from ..task_contract_runtime import match_task_candidates
 
 if TYPE_CHECKING:
@@ -39,6 +39,11 @@ def create_router(api_server: ApiServer) -> APIRouter:
     async def create_task(message: TaskRequest) -> TaskResponse:
         """Create a new generation task."""
         return await routes.create_task(message)
+
+    @new_router.post("/structured", response_model=StructuredTaskResponse)
+    async def create_structured_task(message: StructuredTaskRequest) -> StructuredTaskResponse:
+        """Create a task whose pipeline contract declares a structured result."""
+        return await routes.create_structured_task(message)
 
     @new_router.post("/form", response_model=TaskResponse)
     async def create_task_form(
@@ -98,6 +103,19 @@ class TaskRoutes:
         except Exception as e:
             logger.error(f"Failed to create task: {e}")
             raise HTTPException(status_code=500, detail=str(e))
+
+    async def create_structured_task(self, message: StructuredTaskRequest) -> StructuredTaskResponse:
+        """Create a structured inference task without allocating an artifact path."""
+        try:
+            return await self.api.task_app_service.submit_structured(
+                message,
+                explicit_fields=set(getattr(message, "model_fields_set", set())),
+            )
+        except HTTPException:
+            raise
+        except Exception as error:
+            logger.error(f"Failed to create structured task: {error}")
+            raise HTTPException(status_code=500, detail=str(error)) from error
 
     async def list_tasks(self) -> dict:
         """List all tasks."""
