@@ -2,9 +2,12 @@ from types import SimpleNamespace
 
 import torch
 
+from telefuser.core.config import CompileConfig, QuantConfig, QuantKernelBackend, QuantType
 from telefuser.models.swiftvr_transformer import (
+    SwiftVRWanTransformer3DModel,
     _WindowRuntimeMetaCache,
     _make_hw_starts,
+    compile_transformer_blocks_with_config,
     get_1d_rotary_pos_embed,
 )
 from telefuser.pipelines.swiftvr.streaming_dit import _ensure_rope_cache_len, _rope_with_offset
@@ -70,3 +73,118 @@ def test_rope_offset_uses_global_temporal_position() -> None:
 
     torch.testing.assert_close(cos_grid[:, 0, 0, :4], rope.freqs_cos[5:8, :4])
     torch.testing.assert_close(sin_grid[:, 0, 0, :4], rope.freqs_sin[5:8, :4])
+
+
+def test_swiftvr_transformer_torchao_fp8_quantization_uses_block_linears(monkeypatch) -> None:
+    calls = []
+
+    def replace_linear_layers_with_torchao_fp8(module, *, include_names=None, exclude_names=()):
+        calls.append((module, include_names, exclude_names))
+        return 2
+
+    monkeypatch.setattr(
+        "telefuser.ops.torchao_fp8_linear.replace_linear_layers_with_torchao_fp8",
+        replace_linear_layers_with_torchao_fp8,
+    )
+    model = SwiftVRWanTransformer3DModel(
+        patch_size=(1, 1, 1),
+        num_attention_heads=1,
+        attention_head_dim=4,
+        in_channels=4,
+        out_channels=4,
+        text_dim=4,
+        freq_dim=4,
+        ffn_dim=8,
+        num_layers=1,
+        cross_attn_norm=False,
+    )
+
+    model.enable_quant(QuantConfig(enabled=True, quant_type=QuantType.TORCHAO_FP8))
+
+    assert calls == [(model, ("blocks.",), ("head", "time_embedding", "time_projection", "patch_embedding"))]
+    assert model.torchao_fp8_replaced_linear == 2
+    assert model.quant_type is QuantType.TORCHAO_FP8
+
+
+def test_compile_transformer_blocks_uses_runtime_config(monkeypatch) -> None:
+    model = SwiftVRWanTransformer3DModel(
+        patch_size=(1, 1, 1),
+        num_attention_heads=1,
+        attention_head_dim=4,
+        in_channels=4,
+        out_channels=4,
+        text_dim=4,
+        freq_dim=4,
+        ffn_dim=8,
+        num_layers=1,
+        cross_attn_norm=False,
+    )
+    block = model.blocks[0]
+    calls = []
+
+    def compile_block(module, **kwargs):
+        calls.append((module, kwargs))
+        return module
+
+    monkeypatch.setattr(torch, "compile", compile_block)
+    compile_transformer_blocks_with_config(
+        model,
+        CompileConfig(enabled=True, mode="max-autotune-no-cudagraphs", fullgraph=False, dynamic=False),
+    )
+
+    assert calls == [
+        (
+            block,
+            {
+                "backend": "inductor",
+                "fullgraph": False,
+                "dynamic": False,
+                "mode": "max-autotune-no-cudagraphs",
+            },
+        )
+    ]
+
+
+def test_swiftvr_transformer_tf_kernel_fp8_quantization_uses_block_linears(monkeypatch) -> None:
+    calls = []
+
+    def count_linear_layers(module, *, module_filter=None):
+        calls.append(("count", module, module_filter))
+        return 3
+
+    def enable_fp8_gemm(module, *, options, module_filter=None):
+        calls.append(("enable", module, options, module_filter))
+        return module
+
+    monkeypatch.setattr("telefuser.ops.fp8_gemm.count_linear_layers", count_linear_layers)
+    monkeypatch.setattr("telefuser.ops.fp8_gemm.enable_fp8_gemm", enable_fp8_gemm)
+    model = SwiftVRWanTransformer3DModel(
+        patch_size=(1, 1, 1),
+        num_attention_heads=1,
+        attention_head_dim=4,
+        in_channels=4,
+        out_channels=4,
+        text_dim=4,
+        freq_dim=4,
+        ffn_dim=8,
+        num_layers=1,
+        cross_attn_norm=False,
+    )
+
+    model.enable_quant(
+        QuantConfig(
+            enabled=True,
+            quant_type=QuantType.FP8,
+            kernel_backend=QuantKernelBackend.TF_KERNEL,
+        )
+    )
+
+    assert [call[0] for call in calls] == ["count", "enable"]
+    assert model.tf_kernel_fp8_replaced_linear == 3
+    assert model.quant_type is QuantType.FP8
+    options = calls[1][2]
+    assert options.fp16_weight_storage == "discard"
+    assert options.materialize_fp8_on_wrap is True
+    module_filter = calls[0][2]
+    assert module_filter("blocks.0.ffn.net.0.proj", torch.nn.Linear(4, 4))
+    assert not module_filter("patch_embedding", torch.nn.Linear(4, 4))

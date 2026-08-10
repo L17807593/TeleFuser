@@ -4,7 +4,8 @@ TeleFuser integrates the released `H-oliday/SwiftVR` video-restoration model as
 a faithful, sequential, single-GPU pipeline. The default path preserves the
 upstream BF16 model, one-step DiT, mask-free shifted-window attention, causal
 ReAE state, and fixed chunk/flush behavior. Dense attention is dispatched
-through `telefuser.ops.attention` with Torch SDPA.
+through `telefuser.ops.attention`; Torch SDPA remains the default, while other
+TeleFuser dense attention backends can be selected explicitly.
 
 ## Provenance and checkpoint
 
@@ -48,7 +49,16 @@ encoding.
 state, DiT overlap state, RoPE position state, and condition cache. `step()`
 accepts arbitrary uint8 frame counts, buffers non-four-aligned tails, and
 `flush()` pads only the final encoder group while preserving output frame
-count. GPU execution is serialized by the shared pipeline lock.
+count. Pipeline calls and stream sessions return PIL RGB frames; partial chunks
+that do not yet produce causal output return an empty list. GPU execution is
+serialized by the shared pipeline lock in the default single-process path.
+
+The optional stage-parallel path splits ReAE encode, DiT denoise, and ReAE
+decode into `ParallelWorker` stages. The encode-to-DiT and DiT-to-decode latent
+handoffs use `WorkerTensorChannel`, so CUDA tensors are transported by direct
+worker-to-worker IPC when profiles fit the channel pool instead of being
+materialized in the parent process. This path supports one active stream
+session per pipeline because each worker owns its causal state.
 
 Direct sessions are isolated and tested with interleaved inputs so ReAE
 boundary state, DiT overlap, RoPE offsets, and frames cannot cross sessions.
@@ -59,18 +69,42 @@ track or frame payload, so a local queue adapter would not provide a usable
 
 ## H100 baseline
 
-The target-side compute measurements exclude model loading, video encoding,
-LiveKit delivery, and client playback. Each measured chunk contains 24 output
-frames after two warmup chunks.
+The published SwiftVR QHD result is 31.32 FPS on one H100 for 24 frames.
+A local probe of the released implementation measured 31.05 FPS under the same
+checkpoint and resolution. For an apples-to-apples core comparison, the
+following synchronized GPU timings use BF16, 24-frame chunks, dit_overlap=0,
+and exclude PIL conversion and device-to-host output transfer.
 
-| Resolution | Compute FPS | TTFC | P50 / P95 chunk | Peak allocated | Retained session state |
+| Output resolution | Official SwiftVR | TeleFuser default | TeleFuser opt-in compile |
+| --- | ---: | ---: | ---: |
+| 2560x1440 | 31.05 FPS local probe (31.32 published) | 32.42 FPS | 40.3-40.5 FPS steady |
+
+The TeleFuser default is therefore faster than the released implementation on
+the parity path. The compile result uses torch.compile for the DiT blocks; the
+first shape compile takes about 44 seconds on this host, so it is intended for
+long-lived processes. The default CLI enables the parity setting dit_overlap=0
+used by the published offline benchmark. The public stream() API still
+defaults to dit_overlap=1, matching upstream streaming semantics.
+
+The delivered List[PIL.Image.Image] path includes output conversion and
+device-to-host transfer and is expected to be lower and more host-variable
+than the core GPU number. The existing end-to-end example figures below report
+that delivered path separately.
+
+The optional stage-parallel path was measured on three H100 GPUs with
+WorkerTensorChannel latent handoff enabled. A 240-input-frame steady run
+produced 237 output frames at 39.87-40.11 FPS, with PIL conversion removed from
+the benchmark to isolate stage throughput. This is a pipeline throughput
+measurement and is not directly comparable to single-GPU memory or latency.
+
+| Resolution | Delivered PIL FPS | TTFC | P50 / P95 chunk | Peak allocated | Retained session state |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | 1920x1080 | 47.28 | 15.01 s | 0.506 / 0.511 s | 27.08 GiB | 235.5 MiB |
 | 2560x1440 | 26.50 | 16.31 s | 0.895 / 0.960 s | 35.93 GiB | 411.8 MiB |
 
 The complete example path was separately accepted on one H100 using all 81
-frames of `examples/data/dag.mp4`, resized to `640x360` and restored at 3x. The
-measured session produced the `1920x1080` frames in 2.33 seconds (34.78 FPS),
+frames of examples/data/dag.mp4, resized to 640x360 and restored at 3x. The
+measured session produced the 1920x1080 frames in 2.33 seconds (34.78 FPS),
 and H.264 encoding took 1.32 seconds, for 22.18 end-to-end FPS. The resulting
 video contains 81 frames at 16 FPS. These example figures exclude one-time
 model loading, input decoding, and shape warmup; they include output conversion
@@ -82,21 +116,16 @@ Retained memory in the table is the state of one direct causal session. No
 multi-session service capacity is claimed because there is no supported
 SwiftVR video transport in the shared streaming server.
 
-The 1080p long-stream run completed 1176 measured chunks and 28,224 frames over
-600.46 seconds at 47.01 compute FPS. P50/P95/max chunk latency was
-0.508/0.523/0.654 seconds. The first and last 100 chunks had P50 values of
-0.50810 and 0.50796 seconds respectively, so no latency growth was observed.
-Session cleanup completed and the benchmark process returned all device memory
-to the driver.
-
 ## Current constraints
 
-- No quantization, feature cache, sparse-attention substitution, or
-  `torch.compile` path is enabled.
-- No stage splitting or pipeline overlap is enabled; execution remains in the
-  upstream order.
-- The public example uses eager Torch SDPA and does not expose alternative
-  attention backends.
+- Quantization, `torch.compile`, alternative dense attention backends, and
+  stage-parallel execution are opt-in. The default remains BF16 eager Torch
+  SDPA for parity.
+- The stage-parallel path uses direct tensor channels for latent handoff, but it
+  does not change SwiftVR's causal execution order or enable tensor/model
+  parallelism inside the DiT blocks.
+- Feature cache and sparse-attention substitution are still not enabled for
+  SwiftVR.
 - The supported online surface is the direct causal session API; the example
   does not expose a partial `stream-serve` adapter.
 - RTX 5090 measurements require that hardware and are not represented by H100

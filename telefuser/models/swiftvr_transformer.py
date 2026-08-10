@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from telefuser.core.config import AttentionConfig, AttnImplType
+from telefuser.core.config import AttentionConfig, AttnImplType, CompileConfig
 from telefuser.ops.attention import attention
 from telefuser.ops.ffn import FeedForward
 from telefuser.utils.logging import logger
@@ -782,6 +782,23 @@ def compile_transformer_blocks(model: nn.Module, mode: str = "default") -> None:
             model.blocks[i] = torch.compile(blk, mode=mode, fullgraph=False)
 
 
+def compile_transformer_blocks_with_config(model: nn.Module, compile_config: CompileConfig) -> None:
+    if not hasattr(torch, "compile"):
+        logger.warning("torch.compile not available (requires PyTorch 2.0+). Skipping.")
+        return
+    kwargs = compile_config.get_compile_kwargs()
+    if kwargs.get("mode") == "reduce-overhead":
+        logger.warning(
+            "compile mode 'reduce-overhead' is incompatible with the in-place residuals; falling back to 'default'."
+        )
+        kwargs = dict(kwargs)
+        kwargs["mode"] = "default"
+    kwargs.pop("disable", None)
+    for i, blk in enumerate(getattr(model, "blocks", [])):
+        if isinstance(blk, WanTransformerBlock):
+            model.blocks[i] = torch.compile(blk, **kwargs)
+
+
 # --------------------------------------------------------------------------- #
 # Main model                                                                  #
 # --------------------------------------------------------------------------- #
@@ -892,6 +909,63 @@ class SwiftVRWanTransformer3DModel(nn.Module):
         _WindowIndexCache.clear()
         _WindowRuntimeMetaCache.clear()
         self.eval()
+
+    def enable_quant(self, quant_type: object) -> None:
+        """Apply supported online quantization to SwiftVR transformer Linear layers."""
+        from telefuser.core.config import QuantConfig, QuantKernelBackend, QuantType
+
+        if not isinstance(quant_type, QuantConfig):
+            if quant_type in (torch.float8_e4m3fn, "float8_e4m3fn", "fp8"):
+                from telefuser.ops.quantized_linear import replace_linear_layers
+
+                replace_linear_layers(self.blocks, torch.float8_e4m3fn)
+                self.quant_type = torch.float8_e4m3fn
+                return
+            raise ValueError(f"SwiftVR does not support quantization setting {quant_type!r}")
+        if not quant_type.enabled:
+            return
+
+        include_names = quant_type.quantize_modules or ("blocks.",)
+        replaced = 0
+        if quant_type.quant_type == QuantType.TORCHAO_FP8:
+            from telefuser.ops.torchao_fp8_linear import replace_linear_layers_with_torchao_fp8
+
+            replaced = replace_linear_layers_with_torchao_fp8(
+                self,
+                include_names=include_names,
+                exclude_names=quant_type.skip_modules,
+            )
+            self.torchao_fp8_replaced_linear = replaced
+        elif quant_type.quant_type == QuantType.FP8:
+            if quant_type.kernel_backend not in (QuantKernelBackend.AUTO, QuantKernelBackend.TF_KERNEL):
+                raise ValueError(
+                    "SwiftVR FP8 online quantization requires the tf-kernel backend; "
+                    f"got {quant_type.kernel_backend.name}"
+                )
+            from telefuser.ops.fp8_gemm import FP8GemmOptions, count_linear_layers, enable_fp8_gemm
+
+            def module_filter(name: str, _module: nn.Module) -> bool:
+                return any(token in name for token in include_names) and not any(
+                    token and token in name for token in quant_type.skip_modules
+                )
+
+            replaced = count_linear_layers(self, module_filter=module_filter)
+            enable_fp8_gemm(
+                self,
+                options=FP8GemmOptions(
+                    fp16_weight_storage="keep" if quant_type.keep_fp16_weight else "discard",
+                    materialize_fp8_on_wrap=True,
+                ),
+                module_filter=module_filter,
+            )
+            self.tf_kernel_fp8_replaced_linear = replaced
+        else:
+            raise ValueError(f"SwiftVR does not support online quantization type {quant_type.quant_type.name}")
+
+        if replaced == 0:
+            raise RuntimeError("SwiftVR online quantization did not select any Linear layers")
+        self.quant_type = quant_type.quant_type
+        logger.info(f"SwiftVR {quant_type.quant_type.name} converted {replaced} transformer Linear layers")
 
     @torch.inference_mode()
     def forward(

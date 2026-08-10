@@ -1,13 +1,15 @@
 import threading
 from types import SimpleNamespace
 
+import numpy as np
 import torch
+from PIL import Image
 from torch import nn
 
 from telefuser.models.swiftvr_reae import MemBlock, TPool
 from telefuser.pipelines.swiftvr import pipeline as pipeline_module
 from telefuser.pipelines.swiftvr.chunk import ChunkType, build_chunk_specs
-from telefuser.pipelines.swiftvr.pipeline import SwiftVRStreamSession, aligned_pad
+from telefuser.pipelines.swiftvr.pipeline import SwiftVRStagedStreamSession, SwiftVRStreamSession, aligned_pad
 from telefuser.pipelines.swiftvr.streaming_tae import apply_parallel_with_boundary
 
 
@@ -152,6 +154,55 @@ def test_interleaved_stream_sessions_do_not_exchange_frames(monkeypatch) -> None
     second_second = second.step(second_frames)
     control_second = control.step(second_frames)
 
-    torch.testing.assert_close(second_first, control_first, rtol=0, atol=0)
-    torch.testing.assert_close(second_second, control_second, rtol=0, atol=0)
+    assert [np.asarray(frame).tolist() for frame in second_first] == [
+        np.asarray(frame).tolist() for frame in control_first
+    ]
+    assert [np.asarray(frame).tolist() for frame in second_second] == [
+        np.asarray(frame).tolist() for frame in control_second
+    ]
     assert second._closed is False
+
+
+def test_stage_restore_chunks_converts_decoded_tensors_to_pil(monkeypatch) -> None:
+    class FakeWorker:
+        def __init__(self, role: str) -> None:
+            self.role = role
+            self.calls = 0
+
+        def process(self, value: object, *args: object, **kwargs: object):
+            self.calls += 1
+            if self.role == "encode":
+                result = torch.tensor(float(self.calls))
+            elif self.role == "dit":
+                result = value
+            else:
+                result = torch.full((1, 1, 3, 2, 2), float(self.calls) / 10)
+            return lambda: result
+
+        def flush_encoder(self, **kwargs: object):
+            return lambda: None
+
+        def reset_session(self, **kwargs: object) -> None:
+            return None
+
+    monkeypatch.setattr(pipeline_module, "ParallelWorker", FakeWorker)
+    pipeline = SimpleNamespace(
+        encode_stage=FakeWorker("encode"),
+        dit_stage=FakeWorker("dit"),
+        decode_stage=FakeWorker("decode"),
+        upscale_mode="nearest",
+        _target_size=lambda height, width, resolution, upscale: (height, width, 0, 0),
+        _stage_parallel_active_session=True,
+    )
+    session = SwiftVRStagedStreamSession(
+        pipeline,
+        clip_len=24,
+        resolution=None,
+        upscale=1,
+    )
+
+    output = session.restore_chunks(torch.zeros((48, 2, 2, 3), dtype=torch.uint8), clip_len=24)
+
+    assert len(output) == 2
+    assert all(isinstance(frame, Image.Image) for frame in output)
+    assert [np.asarray(frame)[0, 0, 0] for frame in output] == [25, 51]
