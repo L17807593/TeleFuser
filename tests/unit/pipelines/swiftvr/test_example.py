@@ -1,15 +1,17 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 from PIL import Image
 
-from examples.swiftvr.swiftvr_restore_h100 import _warmup_frame_count, main, run
+from examples.swiftvr.swiftvr_restore_h100 import _parse_stage_devices, _warmup_frame_count, main, run
 
 
 class FakePipeline:
     def __init__(self) -> None:
+        self.config = SimpleNamespace(enable_stage_parallel=False)
         self.frames: torch.Tensor | None = None
         self.options: dict[str, object] = {}
         self.step_sizes: list[int] = []
@@ -19,13 +21,13 @@ class FakePipeline:
         self.options = options
         return self
 
-    def step(self, frames: torch.Tensor) -> torch.Tensor:
+    def step(self, frames: torch.Tensor) -> list[Image.Image]:
         self.frames = frames
         self.step_sizes.append(len(frames))
-        return frames.permute(0, 3, 1, 2).unsqueeze(0).float() / 255
+        return [Image.fromarray(frame.numpy()) for frame in frames]
 
-    def flush(self) -> None:
-        return None
+    def flush(self) -> list[Image.Image]:
+        return []
 
     def close(self) -> None:
         self.closed = True
@@ -44,7 +46,7 @@ def test_run_uses_flashvsr_style_pil_interface() -> None:
     assert pipeline.frames is not None
     assert pipeline.frames.shape == (2, 8, 16, 3)
     assert pipeline.frames.dtype == torch.uint8
-    assert pipeline.options == {"upscale": 2}
+    assert pipeline.options == {"upscale": 2, "dit_overlap": 0}
     assert pipeline.step_sizes == [2]
     assert pipeline.closed is True
     assert [image.size for image in outputs] == [(16, 8), (16, 8)]
@@ -64,8 +66,31 @@ def test_run_processes_24_frame_streaming_chunks() -> None:
     outputs = run(pipeline, inputs, scale=3)
 
     assert pipeline.step_sizes == [24, 1]
-    assert pipeline.options == {"upscale": 3}
+    assert pipeline.options == {"upscale": 3, "dit_overlap": 0}
     assert len(outputs) == 25
+
+
+def test_run_uses_overlapped_pipeline_call_for_stage_parallel() -> None:
+    class FakeStagePipeline(FakePipeline):
+        def __init__(self) -> None:
+            super().__init__()
+            self.config.enable_stage_parallel = True
+
+        def __call__(self, frames: torch.Tensor, **options: object) -> list[Image.Image]:
+            self.frames = frames
+            self.options = options
+            return [Image.fromarray(frame.numpy()) for frame in frames]
+
+        def stream(self, **options: object) -> "FakePipeline":
+            raise AssertionError("stage-parallel run must use the overlapped pipeline call")
+
+    pipeline = FakeStagePipeline()
+    inputs = [Image.fromarray(np.full((8, 8, 3), value, dtype=np.uint8)) for value in range(25)]
+
+    outputs = run(pipeline, inputs, scale=4)
+
+    assert len(outputs) == 25
+    assert pipeline.options == {"upscale": 4, "clip_len": 24, "dit_overlap": 0}
 
 
 def test_warmup_covers_full_and_tail_shapes() -> None:
@@ -92,4 +117,19 @@ def test_cli_uses_flashvsr_style_options() -> None:
         "gpu_num",
         "model_root",
         "output",
+        "attn_impl",
+        "compile_dit",
+        "compile_mode",
+        "quantization",
+        "enable_stage_parallel",
+        "stage_devices",
+        "tensor_channel_slots",
     }
+
+
+def test_stage_device_parser_requires_encode_dit_decode_devices() -> None:
+    assert _parse_stage_devices("0,1,2", 1) == [0, 1, 2]
+    assert _parse_stage_devices(None, 3) == [0, 1, 2]
+    assert _parse_stage_devices(None, 1) is None
+    with pytest.raises(ValueError, match="exactly three devices"):
+        _parse_stage_devices("0,1", 1)
