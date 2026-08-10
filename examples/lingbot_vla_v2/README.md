@@ -229,14 +229,30 @@ after its previous task reaches a terminal state.
   --camera-right-wrist /data/cam_right_wrist.png \
   --duration-seconds 7200 \
   --concurrency 1 \
+  --service-pid <telefuser-parent-pid> \
+  --gpu-indexes 0 \
+  --resource-interval-seconds 1 \
   --output work_dirs/vla_service_validation/soak_2h.json
 ```
+
+Resource sampling is opt-in and local-only. `--service-pid` must identify the parent `telefuser serve` process; its
+replica descendants are discovered on every sample. RSS is summed across that process tree, while `nvidia-smi`
+process memory is grouped by physical GPU index. For a two-replica service on physical GPUs 0 and 1, pass
+`--gpu-indexes 0,1`. Omitting `--service-pid` keeps remote-service validation lightweight and does not invoke
+`nvidia-smi`. Reports retain bounded raw samples plus distributions and first/last 10% trends for latency, RSS, and
+per-GPU process memory.
+
+The validator freezes the current structured contract. Requests contain exactly `task`, `instruction`, `state`, the
+three camera fields, and optional `seed`. Action results contain exactly `canonical_normalized_actions`, `horizon`,
+`action_dim`, `checkpoint_variant`, `policy_verified`, and `verification_status`. Safe additive task-status metadata
+remains allowed, but status responses must not echo the three Base64 camera fields.
 
 The command exits nonzero if readiness or contract checks fail, any measured request fails, task IDs are duplicated,
 or the queue is not drained at the end. Each successful record validates the expected `50x55` finite action tensor
 and retains only statistics and a float64 action fingerprint. Full actions and Base64 camera contents are deliberately
 excluded from the artifact. `--max-records` bounds retained per-request samples during long runs while aggregate
-latency and success counters still cover the complete run.
+latency and success counters still cover the complete run. `--max-resource-samples` independently bounds retained
+resource samples.
 
 This validation aligns VLA with the repository's existing deployment practice, but it is not yet an AIPerf workload:
 AIPerf currently has maintained adapters for batch media and LingBot streaming transports, not the asynchronous

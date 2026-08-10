@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import threading
+import time
 from typing import Any
 
 import pytest
@@ -22,20 +23,25 @@ def _action_result(value: float = 0.25) -> dict[str, Any]:
 
 def _metadata() -> dict[str, Any]:
     parameters = {
-        name: {"type": "string", "required": True}
-        for name in (
-            "instruction",
-            "state",
-            "camera_high",
-            "camera_left_wrist",
-            "camera_right_wrist",
-        )
+        "instruction": {"type": "string", "required": True},
+        "state": {"type": "array", "required": True},
+        "camera_high": {"type": "string", "required": True},
+        "camera_left_wrist": {"type": "string", "required": True},
+        "camera_right_wrist": {"type": "string", "required": True},
+        "seed": {"type": "integer", "required": False},
     }
     return {
         "declared_pipeline_contract": True,
         "supported_tasks": ["vla_action"],
         "supported_media_types": ["structured"],
-        "task_contracts": {"vla_action": {"media_type": "structured", "parameters": parameters}},
+        "task_contracts": {
+            "vla_action": {
+                "media_type": "structured",
+                "required_inputs": ["camera_high", "camera_left_wrist", "camera_right_wrist"],
+                "optional_inputs": [],
+                "parameters": parameters,
+            }
+        },
     }
 
 
@@ -56,6 +62,11 @@ def test_validate_service_metadata_requires_native_structured_contract() -> None
     with pytest.raises(validator.ValidationFailure, match="structured task contract"):
         validator.validate_service_metadata(metadata)
 
+    metadata = _metadata()
+    del metadata["task_contracts"]["vla_action"]["parameters"]["seed"]
+    with pytest.raises(validator.ValidationFailure, match="parameter fields changed"):
+        validator.validate_service_metadata(metadata)
+
 
 def test_validate_action_result_reports_shape_stats_and_fingerprint() -> None:
     summary = validator.validate_action_result(_action_result(), expected_horizon=50, expected_action_dim=55)
@@ -66,6 +77,65 @@ def test_validate_action_result_reports_shape_stats_and_fingerprint() -> None:
     assert summary["maximum"] == 0.25
     assert summary["policy_verified"] is False
     assert len(summary["sha256_float64_le"]) == 64
+
+
+def test_validate_action_result_rejects_additive_result_fields() -> None:
+    result = _action_result()
+    result["debug"] = "unstable"
+
+    with pytest.raises(validator.ValidationFailure, match="result fields changed"):
+        validator.validate_action_result(result, expected_horizon=50, expected_action_dim=55)
+
+
+def test_validate_task_status_rejects_sensitive_echo_and_missing_fields() -> None:
+    status = {
+        "task_id": "task-1",
+        "status": "completed",
+        "inference_time_s": 0.25,
+        "peak_memory_mb": None,
+        "result": _action_result(),
+    }
+    validator.validate_task_status(status, task_id="task-1")
+
+    leaked = dict(status, camera_high="base64")
+    with pytest.raises(validator.ValidationFailure, match="sensitive image"):
+        validator.validate_task_status(leaked, task_id="task-1")
+
+
+def test_compare_windows_reports_first_and_last_measurement_change() -> None:
+    result = validator.compare_windows([1.0, 1.0, 1.0, 1.2, 1.2, 1.2])
+
+    assert result is not None
+    assert result["window_count"] == 1
+    assert result["change_percent"] == pytest.approx(20.0)
+
+
+def test_parse_gpu_process_memory_filters_process_tree_and_physical_gpu() -> None:
+    output = "\n".join(
+        [
+            "101, GPU-a, 1024",
+            "102, GPU-a, 512",
+            "101, GPU-b, 2048",
+            "999, GPU-a, 4096",
+            "malformed",
+        ]
+    )
+
+    result = validator._parse_gpu_process_memory(
+        output,
+        process_ids={101, 102},
+        uuid_to_index={"GPU-a": "0", "GPU-b": "1"},
+        gpu_indexes={"0"},
+    )
+
+    assert result == {"0": 1536.0}
+
+
+def test_parse_gpu_indexes_requires_integer_indexes() -> None:
+    assert validator.parse_gpu_indexes("0, 2") == {"0", "2"}
+
+    with pytest.raises(argparse.ArgumentTypeError, match="comma-separated"):
+        validator.parse_gpu_indexes("0,GPU-a")
 
 
 @pytest.mark.parametrize(
@@ -155,3 +225,29 @@ def test_run_workload_exercises_concurrent_structured_requests(monkeypatch: pyte
     assert report["requests"]["unique_task_ids"] == 4
     assert report["latency_seconds"]["target_inference"]["mean"] == 0.25
     assert len(report["retained_records"]["successful"]) == 4
+
+
+def test_resource_sampler_bounds_samples_and_reports_trend() -> None:
+    state = {"value": 100.0}
+    ready = threading.Event()
+
+    def sample() -> dict[str, Any]:
+        state["value"] += 10.0
+        ready.set()
+        return {"process_ids": [123], "cpu_rss_mib": state["value"], "gpu_memory_mib": {"0": 2048.0}}
+
+    sampler = validator.ResourceSampler(
+        123,
+        interval_seconds=0.001,
+        max_samples=4,
+        sample_function=sample,
+    )
+    sampler.start()
+    assert ready.wait(1.0)
+    time.sleep(0.01)
+    report = sampler.stop()
+
+    assert report["sample_count"] >= 2
+    assert len(report["retained_samples"]) <= 4
+    assert report["cpu_rss_mib"]["trend"]["last_mean"] > report["cpu_rss_mib"]["trend"]["first_mean"]
+    assert report["gpu_memory_mib"]["0"]["distribution"]["mean"] == 2048.0
