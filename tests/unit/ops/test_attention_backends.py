@@ -127,6 +127,40 @@ def test_flash_attn4_packed_falls_back_to_sdpa_without_varlen_backend() -> None:
     torch.testing.assert_close(output, expected)
 
 
+def test_torch_sdpa_bsnd_layout_uses_transpose_views(monkeypatch) -> None:
+    q = torch.randn(1, 7, 3, 5)
+    captured: dict[str, torch.Tensor] = {}
+
+    def fake_sdpa(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        **_kwargs: object,
+    ) -> torch.Tensor:
+        captured["query"] = query
+        captured["key"] = key
+        captured["value"] = value
+        return torch.zeros_like(query)
+
+    monkeypatch.setattr(attention_impl.F, "scaled_dot_product_attention", fake_sdpa)
+
+    output = attention_impl.attention(
+        q,
+        q,
+        q,
+        attn_impl=attention_impl.AttnImplType.TORCH_SDPA,
+        input_layout="BSND",
+        output_layout="BSND",
+    )
+
+    assert captured["query"]._base is q
+    assert captured["key"]._base is q
+    assert captured["value"]._base is q
+    assert captured["query"].shape == (1, 3, 7, 5)
+    assert not captured["query"].is_contiguous()
+    assert output.shape == q.shape
+
+
 def test_sage_attention_prefers_tf_kernel() -> None:
     imported_modules: list[str] = []
     tf_kernel_module = ModuleType("tf_kernel")
