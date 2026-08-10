@@ -192,7 +192,6 @@ def test_t2va_denoising_stage_runs_complete_packed_contract_on_cpu() -> None:
     assert result.packed["seq_len"] % 64 == 0
     assert result.runtime_metrics["peak_allocated_bytes"] == 0
     assert result.runtime_metrics["peak_reserved_bytes"] == 0
-    assert result.runtime_metrics["communication_seconds"] == 0.0
     assert result.runtime_metrics["feature_cache_computed_steps"] == 1
     assert result.runtime_metrics["feature_cache_skipped_steps"] == 0
 
@@ -479,6 +478,19 @@ def test_example_loader_allows_release_length_parallel_denoising(
     assert config.video_vae_config.offload_config.offload_type is WeightOffloadType.NO_CPU_OFFLOAD
     assert config.video_vae_config.parallel_config.tp_degree == 4
     assert config.audio_vae_config.offload_config.offload_type is WeightOffloadType.NO_CPU_OFFLOAD
+
+    common.load_minimax_h3_pipeline(
+        tmp_path,
+        partition="Ref2VA",
+        device="cuda:0",
+        quantization="torchao-fp8",
+    )
+    quantized_config = captured["config"]
+    assert quantized_config.dit_config.quant_config.enabled is True
+    assert quantized_config.dit_config.offload_config.offload_type is WeightOffloadType.NO_CPU_OFFLOAD
+    assert quantized_config.text_encoder_config.offload_config.offload_type is WeightOffloadType.MODEL_CPU_OFFLOAD
+    assert quantized_config.video_vae_config.offload_config.offload_type is WeightOffloadType.MODEL_CPU_OFFLOAD
+    assert quantized_config.audio_vae_config.offload_config.offload_type is WeightOffloadType.MODEL_CPU_OFFLOAD
 
 
 def test_example_writer_preserves_complete_generated_audio(

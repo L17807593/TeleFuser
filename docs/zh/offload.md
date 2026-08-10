@@ -43,13 +43,19 @@ TeleFuser 支持四种卸载策略，通过 `WeightOffloadType` 配置：
 | `offload_ratio` | float | `1.0` | 要卸载的层比例（1.0 = 所有层） |
 | `prefetch_size` | int | `1` | 提前预取的层数 |
 
+常驻层会沿 Transformer 执行顺序均匀分布。`offload_ratio` 独立决定常驻层数量，不再受
+`prefetch_size` 下限约束，因此 `offload_ratio=1.0` 不会永久
+保留任何层。预取按照非常驻层的执行顺序推进，每种 dtype 使用的有界 ring slot 数最多为
+`min(2 * prefetch_size, non_resident_layers)`。
+
 ### AsyncOffloadManager 延迟 GPU 缓存
 
 `lazy_gpu_cache` 是底层 `AsyncOffloadManager` 的构造参数，不是
 `OffloadConfig` 字段。它控制是否在 manager 初始化时预分配 GPU 缓冲区：
 
 - **`lazy_gpu_cache=False`（默认）**：在初始化期间分配 GPU 缓冲区池
-- **`lazy_gpu_cache=True`**：在首次使用时分配 GPU 缓冲区池（在初始化期间节省显存）
+- **`lazy_gpu_cache=True`**：在首次使用时分配可复用缓冲区池和首个非常驻预取窗口
+  （如果配置了常驻层，常驻层仍会在初始化时加载）
 
 在以下情况使用 `lazy_gpu_cache=True`：
 - 管道初始化期间 GPU 显存极其有限
@@ -230,54 +236,67 @@ CPU-GPU 互联的通用性能承诺。测试使用单张 NVIDIA H100 80GB，PyTo
 每个配置先运行一次完整 warmup，再运行一次完整生成。DiT 时间在 stage 入口和出口显式同步
 CUDA 后测量，因此包含该阶段的异步权重传输、计算和卸载。
 
+下面的 example 数据是 example 自身打印的 Pipeline wall time，与其他 benchmark 段落中的
+DiT-only 时间分开统计。
+
+#### BF16 基础 Qwen-Image Example
+
+在单张 NVIDIA H100 80GB 上运行 `examples/qwen_image/qwen_image_t2i_h100.py`，使用
+Qwen-Image-2512 BF16 权重、1664x928 输出、50 steps、CFG=4、`offload_ratio=0.5` 和默认的
+`prefetch_size=1`。测试先执行一次完整 warmup，再执行一次 timing run：
+
+| 实现 | Pipeline 时间 |
+|---|---:|
+| 均匀常驻与非常驻滑动窗口 | 37.757 s |
+
+生成的 RGB 图片与优化前输出在全部 4,632,576 个通道值上逐像素一致
+（`max_abs_diff=0`）。该结果是单次验证，不代表其他系统或配置的通用性能。
+
 #### FP8 Lightning
 
-Qwen-Image-2512-Lightning FP8 权重，1328×1328，16 steps，CFG=1，`offload_ratio=0.5`：
+修复预量化 checkpoint 加载后，当前使用 `TF_MODEL_ZOO_PATH=/hhb-data/aigc/model_zoo` 在
+单张 H100 上运行 `examples/qwen_image/qwen_image_t2i_lightning_fp8_h100.py` 已经可以完成
+推理。模型
+`Qwen-Image-2512-Lightning/qwen_image_2512_fp8_e4m3fn_scaled_8steps_v1.0.safetensors`
+包含 transformer block 线性层的按输出通道 `weight_scale`；loader 会在加载 state dict
+之前构造带 scale 的 `LinearFP8` 模块。example 使用 1328x1328 输出、16 steps、CFG=1，先
+执行一次 warmup，再执行一次 timing run。异步配置使用 `prefetch_size=2`，并保持默认的
+`pin_cpu_memory=True`：
 
-| 模式 / `prefetch_size` | DiT 时间 | 峰值已分配显存 |
+| 配置 | Pipeline 时间 | 峰值已分配显存 |
 |---|---:|---:|
-| `NO_CPU_OFFLOAD` | 4.360 s | 40.55 GiB |
-| `ASYNC_CPU_OFFLOAD`, 1 | 5.184 s | 31.61 GiB |
-| `ASYNC_CPU_OFFLOAD`, 2 | 4.966 s | 32.24 GiB |
-| `ASYNC_CPU_OFFLOAD`, 4 | 4.570 s | 33.50 GiB |
-| `ASYNC_CPU_OFFLOAD`, 8 | 4.469 s | 36.04 GiB |
-| `ASYNC_CPU_OFFLOAD`, 12 | 4.465 s | 38.57 GiB |
+| 预量化 FP8 Lightning，`NO_CPU_OFFLOAD` | 5.106 s | 40.55 GiB |
+| 预量化 FP8 Lightning，`ASYNC_CPU_OFFLOAD`，`offload_ratio=0.5`，`prefetch_size=2` | 5.236 s | 32.24 GiB |
+| 预量化 FP8 Lightning，`ASYNC_CPU_OFFLOAD`，`offload_ratio=1.0`，`prefetch_size=2` | 6.481 s | 22.73 GiB |
 
-`prefetch_size=8` 比无卸载只慢 2.5%，同时少用 4.51 GiB 显存；增至 12 已基本没有速度
-收益。作为重叠对照，在同一 FP8、`prefetch_size=2` 配置中，强制计算流在每次预取后等待
-copy stream 的 DiT 时间为 6.039 s，而正常异步路径为 4.966 s。这证明 H2D 传输与计算在正常
-路径中存在有效重叠。
+`offload_ratio=0.5` 时少用 8.31 GiB 显存（20.5%），Pipeline 时间仅增加 2.5%，是该负载
+下的均衡配置。`offload_ratio=1.0` 时少用 17.82 GiB 显存（43.9%），Pipeline 时间增加
+26.9%。全部输出在 5,290,752 个 RGB 通道值上逐像素一致（`max_abs_diff=0`）。这是单次
+H100 测量，不代表其他系统或配置的通用性能。
 
-#### 原始 Cache-DiT 对比
+#### Cache-DiT 对比
 
-为比较调度粒度，使用 [Cache-DiT 的原始 `layerwise_cpu_offload` 实现](https://github.com/vipshop/cache-dit/blob/main/src/cache_dit/offload/layerwise.py)，让它按默认规则选择整个 DiT 的叶子模块。相同 FP8 模型、输入、预热和计时口径下，Cache-DiT 选择了 1087 个叶子 target，保留 543 个 persistent target（约 50%），并使用 `transfer_buckets=4` 和受限预取窗口。
+使用固定的 Cache-DiT commit
+[`ad9335f`](https://github.com/vipshop/cache-dit/commit/ad9335fdcc7d648b50a7d4ff46b1f25e2abdaf45)
+重新测试，使用相同 checkpoint、prompt、1328x1328 输入、16 steps、CFG=1、一次 warmup 和
+一次 timing run。Cache-DiT 使用默认 leaf-module 选择（1087 个 target），其中 543 个
+常驻（约 50%），`persistent_bins=4`、`async_transfer=True`、`transfer_buckets=4`、
+`prefetch_limit=False`。其 `max_inflight_prefetch_bytes=1,360,433,152`，等于 4 个 Qwen
+transformer block 的 checkpoint state 大小（4 x 340,108,288 bytes），与 TeleFuser
+`prefetch_size=4` 表示的未来非常驻权重体量一致。TeleFuser 使用 block 级异步卸载，
+`offload_ratio=0.5`：
 
-| 实现 | DiT 时间 | 峰值已分配显存 |
+| 实现 | Pipeline 时间 | 峰值已分配显存 |
 |---|---:|---:|
-| TeleFuser block 级 `ASYNC_CPU_OFFLOAD`，`prefetch_size=4` | 4.570 s | 33.50 GiB |
-| 原始 Cache-DiT leafwise，`transfer_buckets=4` | 9.695 s | 31.20 GiB |
+| TeleFuser block 级 `ASYNC_CPU_OFFLOAD`，`offload_ratio=0.5`，`prefetch_size=4` | 5.153 s | 33.50 GiB |
+| Cache-DiT leafwise，543/1087 常驻，4-block 等价字节预算 | 8.040 s | 31.39 GiB |
 
-Cache-DiT 峰值显存少 2.30 GiB，但 TeleFuser 的 DiT 仍快 2.12×（时间减少 52.9%）。该对比说明对 Qwen-Image 而言，以 transformer block 为传输、缓冲复用和预取单位，比 1087 个叶子模块的小粒度 H2D、参数重绑定和分配开销更低。
-
-#### BF16 基础 Qwen-Image
-
-Qwen-Image-2512 BF16 权重，1664×928，50 steps，CFG=4：
-
-| `offload_ratio` | `prefetch_size` | DiT 时间 | 峰值已分配显存 |
-|---:|---:|---:|---:|
-| 无卸载 | — | 26.990 s | 55.84 GiB |
-| 0.5 | 2 | 46.253 s | 39.00 GiB |
-| 0.5 | 4 | 42.470 s | 44.81 GiB |
-| 0.5 | 8 | 39.954 s | 49.88 GiB |
-| 0.6 | 8 | 47.473 s | 46.08 GiB |
-| 0.75 | 8 | 56.335 s | 40.38 GiB |
-
-该模型中，增加预取深度能够加速：50% offload 下从 2 提升到 8 个预取 block，DiT 时间缩短
-13.6%，但增加 10.88 GiB 峰值显存。提高 `offload_ratio` 会减少常驻层和显存，但也会增加
-每个 denoising step 的 H2D 数据量；即使保留 8 个预取 block，60% 和 75% offload 都比
-50%/2-block 基线更慢。因此应先在固定 `offload_ratio` 下调大 `prefetch_size`，再根据显存
-预算选择折中点。
-
+Cache-DiT 少用 2.11 GiB 峰值显存（6.3%），但 TeleFuser 快约 1.56x（Pipeline 时间少 35.9%）。
+作为对照，Cache-DiT 开启 `prefetch_limit=True` 时，同样的 `transfer_buckets=4` 会被限制为
+8 个 leaf target，结果是 10.280 s 和 31.23 GiB。改为与 4 个 block 等价的字节窗口后，
+Cache-DiT 的 Pipeline 时间缩短 21.8%，峰值显存增加 0.16 GiB。Cache-DiT 和 TeleFuser 的
+输出都与 no-offload 输出在全部 5,290,752 个 RGB 通道值上逐像素一致
+（`max_abs_diff=0`）。这是单次 H100 对比，target 粒度和配置细节是结果的一部分。
 
 ### 固定内存
 
@@ -355,19 +374,21 @@ class AsyncOffloadManager:
         offload_ratio: float = 1,
         prefetch_size: int = 1,
         lazy_gpu_cache: bool = False,
-    ) -> None
+    ) -> None:
+        ...
     
     def allocate_gpu_cache(self) -> None:
         """手动分配 GPU 缓存。"""
-        
+        ...
     def cleanup_gpu_cache(self) -> None:
         """释放 GPU 缓存。"""
-        
+        ...
     def disable_offload(self) -> None:
         """禁用卸载并加载所有层。"""
-        
+        ...
     def enable_offload(self) -> None:
         """重新启用卸载。"""
+        ...
 ```
 
 ## 顺序 CPU 卸载 (Sequential CPU Offload)
@@ -544,30 +565,38 @@ if hasattr(module, 'state'):
 ```python
 def enable_sequential_cpu_offload(
     model: torch.nn.Module,
-    module_map: dict,
-    module_config: dict,
+    module_map: dict[type, type],
+    module_config: dict[str, object],
     max_num_param: int | None = None,
-    overflow_module_config: dict | None = None,
+    overflow_module_config: dict[str, object] | None = None,
     vram_limit: float | None = None,
-) -> None
+) -> None:
+    ...
 
 class AutoWrappedLinear(torch.nn.Linear, AutoTorchModule):
     def __init__(
         self,
         module: torch.nn.Linear,
-        offload_dtype,
-        offload_device,
-        onload_dtype,
-        onload_device,
-        computation_dtype,
-        computation_device,
-        vram_limit,
+        offload_dtype: torch.dtype,
+        offload_device: torch.device | str,
+        onload_dtype: torch.dtype,
+        onload_device: torch.device | str,
+        computation_dtype: torch.dtype,
+        computation_device: torch.device | str,
+        vram_limit: float | None,
         name: str = "",
-    )
+        **kwargs: object,
+    ) -> None:
+        ...
     
     def offload(self) -> None:   # 切换到 state 0
+        ...
+
     def onload(self) -> None:    # 切换到 state 1
+        ...
+
     def keep(self) -> None:      # 切换到 state 2
+        ...
 ```
 
 ## 参考

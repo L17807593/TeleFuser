@@ -87,6 +87,17 @@ telefuser/distributed/
 - 适合中等长度序列
 - 需要头数能被 GPU 数整除
 
+在 PyTorch 2.11 及以上版本中，TeleFuser 优先使用 PyTorch Symmetric Memory 分配并 rendezvous 成组 Q/K/V
+scatter 的对端 target buffer，再由源码编译的 `tf-kernel` Copy Engine 算子通过一条高优先级 stream 直接
+写入这些由 PyTorch 管理的映射。Q、K、V 保持独立提交以保留 projection overlap，同时共享一次 grouped
+handshake。communicator 及其缓存 buffer 由模型持有，因此模型 offload 或销毁时即可释放资源，无需 worker
+在 process-group teardown 阶段执行额外 collective。
+
+主包仍支持 `torch>=2.6.0`：能力检测采用延迟方式，较旧 PyTorch 会优先回退到源码编译的 CUDA IPC backend，
+不可用时再回退到 PyTorch/NCCL。单次 collective 和 output gather 继续使用实测更快的 PyTorch/NCCL 路径。
+设计、执行时间线、H100 测量、限制和 Related Work 见
+[CUDA IPC Ulysses 技术文章](blog/cuda_ipc_ulysses.md)。
+
 ### Ring Attention
 
 基于 P2P 通信的序列并行：
@@ -144,9 +155,9 @@ config = ParallelConfig(
 
 ```python
 # 发起异步 All-to-All
-q_wait = ulysses_scatter_heads(q, group)
-k_wait = ulysses_scatter_heads(k, group)
-v_wait = ulysses_scatter_heads(v, group)
+q_wait = ulysses_scatter_heads(q, group, tag="q", barrier=False)
+k_wait = ulysses_scatter_heads(k, group, tag="k", barrier=False)
+v_wait = ulysses_scatter_heads(v, group, tag="v")
 
 # 等待完成
 q = q_wait()
@@ -264,26 +275,26 @@ start_idx, end_idx = comm.get_stage_indices(num_layers)
 ### PP Forward 实现
 
 ```python
-def pp_forward(self, x, timestep, context, ...):
+def pp_forward(self, x, timestep, context, latent_shape, **kwargs):
     # 第一阶段：Embedding + 首批层
     if self.is_pp_first_stage:
         x = self.patch_embedding(x)
         x, grid_size = self.patchify(x)
-        x = self.forward_blocks_pp(x, ...)  # 处理本阶段的层
+        x = self.forward_blocks_pp(x, timestep, context, **kwargs)
         self.pp_comm.send_latent(x)
         return None
     
     # 中间阶段：接收 + 处理 + 发送
     elif not self.is_pp_last_stage:
-        x = self.pp_comm.recv_latent(...)
-        x = self.forward_blocks_pp(x, ...)
+        x = self.pp_comm.recv_latent(shape=latent_shape)
+        x = self.forward_blocks_pp(x, timestep, context, **kwargs)
         self.pp_comm.send_latent(x)
         return None
     
     # 最后阶段：接收 + 处理 + 输出
     else:
-        x = self.pp_comm.recv_latent(...)
-        x = self.forward_blocks_pp(x, ...)
+        x = self.pp_comm.recv_latent(shape=latent_shape)
+        x = self.forward_blocks_pp(x, timestep, context, **kwargs)
         x = self.head(x)
         return x
 ```
@@ -390,7 +401,7 @@ model = parallelize_module(model, device_mesh, tp_plan)
 
 ### 注意事项
 
-- SP 和 TP 不能同时启用
+- 在所选 pipeline 支持时，SP 和 TP 可以作为独立的 device mesh 维度同时启用
 - 需要确保头数能被 TP 度数整除
 
 ## Worker 实现
@@ -607,20 +618,42 @@ strategy = get_attention_strategy(device_mesh)
 
 ### FSDP vs TP 选择
 
-在多 GPU 推理场景下，选择 FSDP 还是 TP 取决于显存和通信条件：
+FSDP 和 TP 以不同方式切分模型权重，推理通信的扩展规律也不同。FSDP 会 all-gather 参数单元，TP 会在
+张量并行算子后归约激活张量；不能只根据模型大小或 sequence 长度判断哪一种更快。
 
-| 条件 | 推荐策略 | 原因 |
-|------|---------|------|
-| 单卡显存可容纳单层 Layer | **FSDP** | TP 对通信带宽要求更高，FSDP 通信开销更低 |
-| 单卡显存无法容纳单层 Layer | **TP** | 必须使用 TP 将张量切分到多卡 |
-| 多机/低带宽网络 | **FSDP** | TP 需要高带宽低延迟的 GPU 互联 |
-| 单机 NVLink/InfiniBand | **TP** | 高带宽互联下 TP 效率更高 |
+| 条件 | 候选策略 | 原因 |
+|------|----------|------|
+| 最大 FSDP wrapping unit 加激活可放入单卡 | **FSDP 可行** | FSDP 在 all-gather 时必须完整 materialize 一个 wrapped unit。 |
+| 单卡无法放下一个 wrapped unit | **需要 TP 或 PP** | 仅切分 FSDP 常驻 shard 并不能消除完整单元的 all-gather 峰值。 |
+| 参数 all-gather 主导暴露通信时间 | **TP** | TP 让参数 shard 常驻，转而通信激活。 |
+| 激活归约主导暴露通信时间，尤其 `B * S * H` 较大时 | **FSDP 或 TP + SP** | FSDP 参数流量大多与 sequence 长度无关；SP 会降低 TP 的局部 sequence，但自身也会引入通信。 |
+| TP group 位于高速 NVLink/NVSwitch 域内 | **TP 值得优先评估** | 大量对延迟敏感的激活 collective 可受益于低延迟、高带宽互联。 |
 
-**选择建议**：
-- 优先评估单卡显存是否能容纳单层 Layer（包括激活值）
-- 如果可以，优先选择 FSDP，因为它对通信要求更低
-- 仅当单卡显存不足时，才考虑使用 TP
-- FSDP 可与 PP、SP 等策略组合使用
+第一轮可以按每张卡、每个 denoising step 估算通信字节数。设 FSDP degree 为 `f`，每个 wrapped unit
+的完整参数字节数为 `P_u`，每个请求的 all-gather 次数为 `r_u`：
+
+```text
+V_fsdp ~= sum_u(r_u * P_u * (f - 1) / f)
+```
+
+设 TP degree 为 `t`、SP degree 为 `s`、激活元素字节数为 `e_a`，一次 TP collective `j` 处理的激活
+形状近似为 `[B, S / s, H]`：
+
+```text
+V_tp ~= sum_j(2 * (t - 1) / t * B * (S / s) * H * e_a)
+```
+
+该求和通常包括每个 Transformer block 中的 row-parallel reduction。Ulysses 或 Ring 流量必须单独加入；
+SP 虽然降低 TP 的局部激活大小，但并不是免费的。应在目标拓扑上把字节数转换成实际决策：
+
+```text
+T_comm ~= N_collectives * latency + V_wire / effective_bandwidth
+T_step ~= T_compute + exposed(T_comm after overlap)
+```
+
+在实际模型、sequence 长度、dtype、denoising step 数和 mesh degree 下，采集 p50/p95 step time、原始和
+暴露通信时间、collective 次数及每卡峰值 HBM。FSDP 可与 PP、SP 组合；所选 pipeline 已实现并校验时，TP 和
+SP 也可以组合。
 
 ### 通信优化
 
@@ -644,13 +677,6 @@ RuntimeError: device num 4 and world size 2 not match
 
 **解决方案**：确保 `len(device_ids) == dp * cfg * sp_ring * sp_ulysses * pp * tp`
 
-### SP 和 TP 冲突
-
-```
-ValueError: Not allowed to enable sequence parallel and tensor parallel together
-```
-
-**解决方案**：SP 和 TP 不能同时启用，选择其中一种。
 
 ### Ring Attention 需要 LSE
 

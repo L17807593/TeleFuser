@@ -242,6 +242,7 @@ def test_livekit_worker_runs_pipeline_and_forwards_control() -> None:
         assert room.disconnected is True
         assert sink.pipeline_sessions == [("session-1", "pipeline-session-1")]
         assert room.statuses[-1]["total_chunks"] == 2
+        assert room.statuses[-1]["published_frames"] == 2
         assert sink.finished == [("worker-0", "session-1", None)]
 
     asyncio.run(_run())

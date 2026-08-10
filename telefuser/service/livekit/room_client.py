@@ -15,6 +15,8 @@ from .token_service import LiveKitDependencyError
 DataMessageHandler = Callable[[bytes | str | dict[str, Any], str, str], None]
 _VIDEO_MAX_BITRATE = 8_000_000
 
+_VIDEO_ENCODER_MIN_MAX_FRAMERATE = 30.0
+
 
 class RoomClient(Protocol):
     """Minimal room operations required by a TeleFuser LiveKit worker."""
@@ -97,7 +99,7 @@ class LiveKitRoomClient:
             source=rtc.TrackSource.SOURCE_CAMERA,
             simulcast=False,
             video_encoding=rtc.VideoEncoding(
-                max_framerate=fps,
+                max_framerate=max(fps, _VIDEO_ENCODER_MIN_MAX_FRAMERATE),
                 max_bitrate=_VIDEO_MAX_BITRATE,
             ),
             video_codec=rtc.VideoCodec.VP8,

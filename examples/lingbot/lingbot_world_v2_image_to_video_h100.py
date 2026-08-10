@@ -5,6 +5,8 @@ Single GPU:
 
 Four GPUs with Ulysses sequence parallelism:
     python examples/lingbot/lingbot_world_v2_image_to_video_h100.py --gpu_num 4
+Four GPUs with SP2 + TP2 DiT parallelism:
+    python examples/lingbot/lingbot_world_v2_image_to_video_h100.py --gpu_num 4 --tp_degree 2
 Six GPUs with five-way DiT parallelism and one dedicated VAE GPU:
     python examples/lingbot/lingbot_world_v2_image_to_video_h100.py --gpu_num 6
 Multi-GPU runs configure the VAE worker and DiT SP group independently in PPL_CONFIG.
@@ -68,6 +70,7 @@ PPL_CONFIG = dict(
         )
         for index in range(1, 9)
     ],
+    tp_degree=1,
     parallelism=1,
     vae_encode_device_id=0,
     vae_decode_device_id=0,
@@ -138,9 +141,14 @@ def get_pipeline(
     parallelism: int = PPL_CONFIG["parallelism"],
     model_root: str | None = None,
     v2_model_root: str | None = None,
+    tp_degree: int = 1,
 ) -> LingBotWorldV2Pipeline:
     """Load LingBot-World v2 for offline chunked generation."""
+
     dit_device_ids, vae_encode_device, vae_decode_device_ids = _resolve_stage_devices(parallelism)
+    if tp_degree < 1 or len(dit_device_ids) % tp_degree:
+        raise ValueError(f"tp_degree must divide the DiT worker count {len(dit_device_ids)}, got {tp_degree}")
+    dit_sp_degree = len(dit_device_ids) // tp_degree
 
     model_root_path = Path(model_root).expanduser() if model_root else None
     v2_model_root_path = Path(v2_model_root).expanduser() if v2_model_root else None
@@ -205,7 +213,8 @@ def get_pipeline(
                 attention_config=AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"]),
                 parallel_config=ParallelConfig(
                     device_ids=dit_device_ids if len(dit_device_ids) > 1 else None,
-                    sp_ulysses_degree=len(dit_device_ids),
+                    sp_ulysses_degree=dit_sp_degree,
+                    tp_degree=tp_degree,
                     enable_fsdp=PPL_CONFIG["enable_fsdp"] and len(dit_device_ids) > 1,
                 ),
                 compile_config=PPL_CONFIG["compile_config"],
@@ -215,9 +224,9 @@ def get_pipeline(
     return pipeline
 
 
-def get_service(gpu_num: int = PPL_CONFIG["parallelism"]) -> LingBotWorldFastService:
+def get_service(gpu_num: int = PPL_CONFIG["parallelism"], tp_degree: int | None = None) -> LingBotWorldFastService:
     """Build the service loaded by the TeleFuser stream server."""
-    pipeline = get_pipeline(parallelism=gpu_num)
+    pipeline = get_pipeline(parallelism=gpu_num, tp_degree=PPL_CONFIG["tp_degree"] if tp_degree is None else tp_degree)
     return _LingBotWorldV2Service(
         pipeline,
         default_fps=PPL_CONFIG["target_fps"],
@@ -292,6 +301,12 @@ def run(
     type=int,
     help="Total GPUs; selects the LingBot VAE and DiT placement strategy",
 )
+@click.option(
+    "--tp_degree",
+    default=PPL_CONFIG["tp_degree"],
+    type=click.IntRange(min=1),
+    help="DiT tensor-parallel degree; use 2 with --gpu_num 4 for SP2+TP2",
+)
 @click.option("--image_path", default=DEFAULT_IMAGE_PATH, type=click.Path(exists=True))
 @click.option("--action_path", default=DEFAULT_ACTION_PATH, type=click.Path(exists=True, file_okay=False))
 @click.option(
@@ -322,6 +337,7 @@ def run(
 @click.option("--output", default=None, type=click.Path(dir_okay=False), help="Output video path")
 def main(
     gpu_num: int,
+    tp_degree: int,
     image_path: str,
     action_path: str,
     intrinsics_path: str,
@@ -344,7 +360,7 @@ def main(
     )
     print(f"Requested frames: {PPL_CONFIG['frame_num']}")
     print(f"Effective frames: {effective_frame_num}")
-    pipeline = get_pipeline(gpu_num, model_root, v2_model_root)
+    pipeline = get_pipeline(gpu_num, model_root, v2_model_root, tp_degree)
     try:
         image = Image.open(image_path).convert("RGB")
 

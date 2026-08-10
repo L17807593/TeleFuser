@@ -43,6 +43,7 @@ if FP4_AVAILABLE:
     )
 
 from tf_kernel.memory import set_kv_buffer_kernel, weak_ref_tensor
+from tf_kernel.ulysses import AsyncUlyssesHandle, CudaIpcUlyssesGroup
 from tf_kernel.sageattn2 import (sageattn, sageattn_qk_int8_pv_fp8_cuda,
                                  sageattn_qk_int8_pv_fp8_cuda_sm90,
                                  sageattn_qk_int8_pv_fp16_cuda,

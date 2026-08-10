@@ -37,6 +37,7 @@ runtime path, supported workloads, and reproducible real-time gate.
   chunk-boundary time slicing, reconnect-friendly browser transport, and server-push/bidirectional contracts.
 - ✨ **2026-07-22**: Added [**LingBot-Video**](examples/lingbot_video/README.md) support for Dense and MoE T2I/T2V/TI2V generation, native four-GPU CFG/SP execution, and in-memory MoE refinement.
 - ✨ **2026-07-15**: Added [**LingBot-World v2**](https://github.com/Robbyant/lingbot-world-v2) support for offline generation, interactive WebRTC streaming, and multi-GPU inference.
+- ✨ **2026-08-06**: Added [**ABot-World-0-5B-LF**](docs/en/abot_world.md) single-GPU browser interaction with persistent causal KV state and bounded RoPE positions.
 
 - ✨ **2026-07-06**: Added external **CacheSeek** latent cache integration for service-mode cross-request reuse. Cache hits can skip the first N denoising steps; the Wan2.2 cache-enabled service example snapshots `[5, 10, 15, 20, 25]` by default. See [docs/en/latent_cache.md](docs/en/latent_cache.md).
 
@@ -177,8 +178,8 @@ python examples/stream_server/livekit_bidirectional_demo.py \
   --server-url http://127.0.0.1:8088 --port 8092 --no-open
 ```
 
-For VS Code Remote SSH, forward remote TCP ports `8092`, `7880`, and `3478` to the same local ports; `8088` does not
-need forwarding because the page proxies the TeleFuser API. Open `http://127.0.0.1:8092`, select an initial image,
+For VS Code Remote SSH, forward remote TCP ports `8092`, `7880`, `3478`, and the TURN relay range
+`49160-49200` to the same local ports; `8088` does not need forwarding because the page proxies the TeleFuser API. Open `http://127.0.0.1:8092`, select an initial image,
 click **Start**, and use the on-page controls or `W/A/S/D` and arrow keys. A successful connection shows a video
 track plus `control_state`, generation-stage, and chunk status messages.
 
@@ -233,6 +234,7 @@ telefuser/
 | Pipeline | Task | Notes |
 |----------|------|-------|
 | `LingBot-World v2` | Bidirectional world-model streaming | LiveKit control loop via [examples/lingbot/lingbot_world_v2_image_to_video_h100.py](examples/lingbot/lingbot_world_v2_image_to_video_h100.py) |
+| `ABot-World-0-5B-LF` | Single-GPU interactive world model | Direct HTTP or shared LiveKit controller via [examples/abot_world/README.md](examples/abot_world/README.md) |
 | `LiveAct` | S2V | Speech-driven talking head generation via [examples/liveact/liveact_s2v_h100.py](examples/liveact/liveact_s2v_h100.py) |
 | `FlashVSR` | VSR | Streaming video super-resolution via [examples/flashvsr/README.md](examples/flashvsr/README.md) |
 
@@ -241,7 +243,6 @@ telefuser/
 | Pipeline | Task | Notes |
 |----------|------|-------|
 | `WanVideo` (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Main video generation family, including async and service examples in [examples/wan_video/README.md](examples/wan_video/README.md) |
-| `HunyuanVideo` | T2V, I2V | Supported via [examples/hunyuan_video/README.md](examples/hunyuan_video/README.md) |
 | `LTX Video` | I2V + Audio | Unified audio-video generation via [examples/ltx_video/README.md](examples/ltx_video/README.md) |
 | `MiniMax H3` | T2VA, FL2VA, Ref2VA + Audio | Local 768p joint audio-video generation via [examples/minimax_h3/README.md](examples/minimax_h3/README.md) |
 | `LongCat-Video` | T2V, I2V, VC | Long-form generation and continuation via [examples/longcat_video/README.md](examples/longcat_video/README.md) |
@@ -259,6 +260,7 @@ See [examples/README.md](examples/README.md) for the example runner and baseline
 
 ## Documentation
 
+- [docs/en/blog/index.md](docs/en/blog/index.md): optimization design, profiling evidence, results, and related work
 - [docs/en/service.md](docs/en/service.md): REST serving, task APIs, OpenAI-compatible APIs
 - [docs/en/stream_server.md](docs/en/stream_server.md): LiveKit streaming, session APIs, data topics, and deployment
 - [docs/en/stream_scheduler.md](docs/en/stream_scheduler.md): actor-based stage scheduling, backpressure, lifecycle, metrics, and LingBot placement
@@ -271,13 +273,14 @@ See [examples/README.md](examples/README.md) for the example runner and baseline
 - [docs/en/torch_compile_compatibility.md](docs/en/torch_compile_compatibility.md): compile-related constraints
 - [docs/en/adding_new_model.md](docs/en/adding_new_model.md): integrating new models
 - [docs/en/adding_new_example.md](docs/en/adding_new_example.md): authoring examples and pipeline contracts
+- [docs/en/abot_world.md](docs/en/abot_world.md): ABot-World single-GPU interactive pipeline, controls, and tests
 
 ## Known Limitations
 
 - `AdaTaylorCache` is only calibrated for selected model families.
 - `torch.compile` support is still experimental in parts of the stack.
 - Some optimized paths require specific GPU architectures and CUDA versions.
-- World-model examples such as `LingBot-World v2` require external checkpoints and environment setup.
+- World-model examples such as `LingBot-World v2` and `ABot-World` require external checkpoints and environment setup.
 - Multi-machine deployment exists in the architecture but may require project-specific integration and validation.
 
 ## Development
@@ -288,7 +291,7 @@ pre-commit install
 pytest tests/
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution workflow and [AGENTS.md](AGENTS.md) for project-specific agent guidance.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution workflow and [CLAUDE.md](CLAUDE.md) for repository guidance.
 
 ## License
 

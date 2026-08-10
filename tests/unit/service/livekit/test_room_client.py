@@ -156,7 +156,7 @@ def test_livekit_room_client_uses_sdk_room_publish_and_video_source(monkeypatch)
         assert captured["source"] == (3, 2)
         assert video_options.simulcast is False
         assert video_options.video_codec == "VP8"
-        assert video_options.video_encoding.max_framerate == 16
+        assert video_options.video_encoding.max_framerate == 30
         assert video_options.video_encoding.max_bitrate == 8_000_000
         assert captured["frame"]["buffer_type"] == "RGB24"
         assert captured["audio_source"] == (48_000, 1)

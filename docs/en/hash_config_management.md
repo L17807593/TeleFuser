@@ -108,13 +108,11 @@ model = mm.fetch_module("wan_video_dit")  # Auto-detected by hash!
 
 **Summary**: TeleFuser's hash-based recognition prioritizes **correctness and reliability** over convenience, making it suitable for production environments where loading the wrong model could cause significant issues.
 
-## Configuration Location
+## Registration Location
 
-All model hash configurations are stored in:
-
-```
-telefuser/core/model_config.py
-```
+Hash registrations live in the model module that owns the corresponding checkpoint format. Add a
+module-level `register_model_config()` call beside the model class; `ModelRegistry` autodiscovers those modules on
+first use. The registry implementation is `telefuser/core/model_registry.py`, not a centralized configuration file.
 
 ## Core Tool: Weight Viewer
 
@@ -164,20 +162,19 @@ model
       ...
 ```
 
-## Configuration Format
+## Registration Format
 
 ```python
-model_loader_configs = [
-    # Format: (keys_hash, keys_hash_with_shape, model_names, model_classes, model_resource)
-    (
-        None,                                      # keys_hash (non-strict matching)
-        "4c3523c69fb7b24cf2db147a715b277f",       # keys_hash_with_shape (strict matching)
-        ["wan_video_decoder"],                     # model_names
-        [TAEHV],                                   # model_classes
-        "official",                                 # model_resource
-    ),
-    # ... more configurations
-]
+from telefuser.core.model_registry import register_model_config
+
+# Format: (keys_hash, keys_hash_with_shape, model_names, model_classes, model_resource)
+register_model_config(
+    None,                                      # keys_hash (non-strict matching)
+    "4c3523c69fb7b24cf2db147a715b277f",       # keys_hash_with_shape (strict matching)
+    ["wan_video_decoder"],                    # model_names
+    [TAEHV],                                   # model_classes
+    "official",                               # model_resource
+)
 ```
 
 ## Configuration Management Workflow
@@ -209,25 +206,21 @@ python tools/viewer/weight_viewer.py "/path/to/models/model.safetensors" --max-d
 
 Review the exported JSON file, analyze key naming patterns, and write the converter.
 
-#### 4. Add to Configuration
+#### 4. Register the Model
 
-Edit `telefuser/core/model_config.py` to add model configuration:
+Add the registration in the module that defines `MyModel`:
 
 ```python
-from ..models.my_model import MyModel
+from telefuser.core.model_registry import register_model_config
 
-model_loader_configs = [
-    # ... existing configurations ...
-    
-    # MyModel - Standard version (from weight_viewer output)
-    (
-        None,  # Non-strict hash (optional)
-        "4c3523c69fb7b24cf2db147a715b277f",  # Hash from weight_viewer
-        ["my_model"],
-        [MyModel],
-        "official",  # or "diffusers"
-    ),
-]
+# MyModel - Standard version (from weight_viewer output)
+register_model_config(
+    None,  # Non-strict hash (optional)
+    "4c3523c69fb7b24cf2db147a715b277f",  # Hash from weight_viewer
+    ["my_model"],
+    [MyModel],
+    "official",  # or "diffusers"
+)
 ```
 
 #### 5. Verify Configuration
@@ -242,7 +235,7 @@ from telefuser.core.module_manager import ModuleManager
 mm = ModuleManager(device='cpu')
 mm.load_model('/path/to/models/model.safetensors')
 print('✓ Model loaded successfully!')
-print('Available models:', mm.module_name)
+print('Available models:', mm.module_names)
 "
 ```
 
@@ -329,6 +322,7 @@ Usage:
 
 import argparse
 import json
+import sys
 
 from telefuser.utils.model_weight import hash_state_dict_keys
 
@@ -353,18 +347,20 @@ def generate_template(model_path, model_name, model_class, resource="official"):
     hash_with_shape = hash_state_dict_keys(all_weights, with_shape=True)
     hash_without_shape = hash_state_dict_keys(all_weights, with_shape=False)
     
-    # Generate configuration
-    config = f'''    # {model_name}
-    (
-        "{hash_without_shape}",  # keys_hash (non-strict matching)
-        "{hash_with_shape}",    # keys_hash_with_shape
-        ["{model_name}"],
-        [{model_class}],
-        "{resource}",
-    ),'''
+    # Generate a module-level registration.
+    config = f'''from telefuser.core.model_registry import register_model_config
+
+# {model_name}
+register_model_config(
+    "{hash_without_shape}",  # keys_hash (non-strict matching)
+    "{hash_with_shape}",    # keys_hash_with_shape
+    ["{model_name}"],
+    [{model_class}],
+    "{resource}",
+)'''
     
     print("\n" + "="*60)
-    print("Generated Configuration Template")
+    print("Generated Registration Template")
     print("="*60)
     print(config)
     print("\n" + "="*60)
@@ -412,15 +408,16 @@ python tools/generate_config_template.py \
 #!/usr/bin/env python3
 # tools/verify_configs.py
 
-from telefuser.core.model_config import model_loader_configs
+from telefuser.core.model_registry import ModelRegistry
 
 def verify():
     """Verify configurations"""
-    print(f"Total configurations: {len(model_loader_configs)}\n")
+    configs = ModelRegistry.instance().get_configs()
+    print(f"Total registrations: {len(configs)}\n")
     
     # Check for duplicates
     seen_hashes = {}
-    for i, config in enumerate(model_loader_configs):
+    for i, config in enumerate(configs):
         keys_hash, keys_hash_with_shape, names, classes, resource = config
         
         if keys_hash_with_shape in seen_hashes:
@@ -438,19 +435,17 @@ if __name__ == "__main__":
 
 ## Configuration Organization Recommendations
 
-### Group by Model Family
+### Keep Registrations with Their Model Families
 
 ```python
-model_loader_configs = [
-    # ==================== WanVideo ====================
-    (None, "9269f8db9040a9d860eaca435be61814", ["wan_video_dit"], [WanModel], "official"),
-    (None, "1378ea763357eea97acdef78e65d6d96", ["wan_video_vae"], [WanVideoVAE], "official"),
-    
-    # ==================== QwenImage ====================
-    (None, "7a32c4aa3de140d48a5899ca505944b9", ["qwen_image_dit"], [QwenImageDiT], "official"),
-    
-    # ...
-]
+# telefuser/models/wan_video_dit.py
+register_model_config(None, "9269f8db9040a9d860eaca435be61814", ["wan_video_dit"], [WanModel], "official")
+
+# telefuser/models/wan_video_vae.py
+register_model_config(None, "1378ea763357eea97acdef78e65d6d96", ["wan_video_vae"], [WanVideoVAE], "official")
+
+# telefuser/models/qwen_image_dit.py
+register_model_config(None, "7a32c4aa3de140d48a5899ca505944b9", ["qwen_image_dit"], [QwenImageDiT], "official")
 ```
 
 ### Comment Conventions
@@ -459,13 +454,13 @@ model_loader_configs = [
 # Wan2.1 I2V 14B - 720P (from weight_viewer)
 # Source: modelscope/Wan2.1-I2V-14B-720P
 # Parameters: 14.02B
-(
+register_model_config(
     None,
     "9269f8db9040a9d860eaca435be61814",
     ["wan_video_dit"],
     [WanModel],
     "official",
-),
+)
 ```
 
 ## FAQ
@@ -483,18 +478,18 @@ For models supporting multiple resolutions, use non-strict matching:
 
 ```python
 # Use keys_hash (without shape)
-(
+register_model_config(
     "q7r8s9t0u1v2w3x4y5z6a7b8c9d0e1f2",  # Only key hash
     None,  # Don't use shape hash
     ["flexible_model"],
     [FlexibleModel],
     "official",
-),
+)
 ```
 
 ### Q: How to batch add multiple model variants?
 
-Create a script to iterate directory and generate configurations:
+Create a script to iterate a directory and generate registrations:
 
 ```bash
 for f in /models/*.safetensors; do
@@ -511,7 +506,7 @@ done
 python tools/viewer/weight_viewer.py "/path/to/model-*.safetensors" --quiet
 ```
 
-Ensure to use this merged hash in configuration.
+Register this merged hash beside the model class.
 
 ## Related Documentation
 

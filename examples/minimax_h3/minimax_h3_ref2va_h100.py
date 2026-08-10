@@ -10,6 +10,8 @@ from examples.minimax_h3.common import (
     MINIMAX_H3_DEFAULT_REF2VA_AUDIO,
     MINIMAX_H3_DEFAULT_REF2VA_VIDEO,
     load_minimax_h3_pipeline,
+    load_minimax_h3_request,
+    run_minimax_h3_request,
     save_generation,
 )
 from telefuser.pipelines.minimax_h3.pipeline import MiniMaxH3Generation, MiniMaxH3Pipeline
@@ -34,6 +36,7 @@ PPL_CONFIG: dict[str, Any] = {
     "device": "cuda:0",
     "enable_fsdp": None,
     "online_adaln_cache": True,
+    "quantization": None,
 }
 
 PIPELINE_MANIFEST = build_pipeline_manifest(
@@ -89,6 +92,7 @@ def get_pipeline(
     num_inference_steps: int = PPL_CONFIG["num_inference_steps"],
     enable_fsdp: bool | None = PPL_CONFIG["enable_fsdp"],
     online_adaln_cache: bool = PPL_CONFIG["online_adaln_cache"],
+    quantization: str | None = PPL_CONFIG["quantization"],
 ) -> MiniMaxH3Pipeline:
     """Load the Ref2VA checkpoint partition for one, two, or four GPUs."""
     tp_degree = 2 if parallelism == 4 else 1
@@ -102,6 +106,7 @@ def get_pipeline(
         text_encoder_tp_degree=parallelism,
         enable_fsdp=enable_fsdp,
         online_adaln_cache=online_adaln_cache,
+        quantization=quantization,
     )
 
 
@@ -184,6 +189,21 @@ def run(
     )
 
 
+def run_request(
+    pipeline: MiniMaxH3Pipeline,
+    request_path: str | Path,
+    *,
+    num_inference_steps: int | None = None,
+) -> MiniMaxH3Generation:
+    """Run an ordered Ref2VA JSON request without changing its condition order."""
+    return run_minimax_h3_request(
+        pipeline,
+        request_path,
+        num_inference_steps=num_inference_steps,
+        expected_partition=PPL_CONFIG["partition"],
+    )
+
+
 def run_with_file(
     pipeline: MiniMaxH3Pipeline,
     prompt: str = PPL_CONFIG["prompt"],
@@ -222,6 +242,9 @@ def main() -> None:
     parser.add_argument("--video", action="append", default=[])
     parser.add_argument("--audio", action="append", default=[])
     parser.add_argument("--material", action="append", default=None, metavar="TYPE=URI")
+    parser.add_argument(
+        "--request", type=Path, help="JSON request; its prompt, conditions, and target are authoritative"
+    )
     parser.add_argument("--prompt", default=PPL_CONFIG["prompt"])
     parser.add_argument(
         "--target-video-length",
@@ -231,7 +254,7 @@ def main() -> None:
         default=PPL_CONFIG["target_video_length"],
     )
     parser.add_argument("--seed", type=int, default=PPL_CONFIG["seed"])
-    parser.add_argument("--steps", type=int, default=PPL_CONFIG["num_inference_steps"])
+    parser.add_argument("--steps", type=int, help="Override the configured request step count")
     parser.add_argument(
         "--aspect-ratio",
         choices=("auto", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"),
@@ -240,36 +263,65 @@ def main() -> None:
     parser.add_argument("--flow-shift", type=float, default=PPL_CONFIG["flow_shift"])
     parser.add_argument("--audio-flow-shift", type=float, default=PPL_CONFIG["audio_flow_shift"])
     parser.add_argument("--device", default=PPL_CONFIG["device"])
+    parser.add_argument("--quantization", choices=("torchao-fp8", "tf-kernel-fp8", "bnb-nf4"))
     parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4), default=1)
     fsdp_group = parser.add_mutually_exclusive_group()
     fsdp_group.add_argument("--enable-fsdp", dest="enable_fsdp", action="store_true")
     fsdp_group.add_argument("--disable-fsdp", dest="enable_fsdp", action="store_false")
     parser.set_defaults(enable_fsdp=PPL_CONFIG["enable_fsdp"])
+    cache_group = parser.add_mutually_exclusive_group()
+    cache_group.add_argument("--online-adaln-cache", dest="online_adaln_cache", action="store_true")
+    cache_group.add_argument("--no-online-adaln-cache", dest="online_adaln_cache", action="store_false")
+    parser.set_defaults(online_adaln_cache=None)
     parser.add_argument("--output-path", "--output", dest="output_path", default="minimax_h3_ref2va.mp4")
     args = parser.parse_args()
 
-    conditions = build_ref2va_conditions(
-        images=args.image, videos=args.video, audios=args.audio, materials=args.material
-    )
+    if args.request is not None and (args.image or args.video or args.audio or args.material):
+        parser.error("--request cannot be combined with --image, --video, --audio, or --material")
+
+    if args.request is not None:
+        request_steps = args.steps
+        if request_steps is None:
+            request_steps = int(
+                load_minimax_h3_request(args.request).get("num_inference_steps", PPL_CONFIG["num_inference_steps"])
+            )
+        conditions = None
+    else:
+        request_steps = PPL_CONFIG["num_inference_steps"] if args.steps is None else args.steps
+        conditions = build_ref2va_conditions(
+            images=args.image, videos=args.video, audios=args.audio, materials=args.material
+        )
+
+    online_adaln_cache = args.online_adaln_cache
+    if online_adaln_cache is None:
+        online_adaln_cache = False if args.request is not None else PPL_CONFIG["online_adaln_cache"]
+
     pipeline = get_pipeline(
         args.gpu_num,
         args.model_root,
         device=args.device,
-        num_inference_steps=args.steps,
+        num_inference_steps=request_steps,
         enable_fsdp=args.enable_fsdp,
+        online_adaln_cache=online_adaln_cache,
+        quantization=args.quantization,
     )
     try:
-        result = run_with_file(
-            pipeline,
-            prompt=args.prompt,
-            conditions=conditions or None,
-            seed=args.seed,
-            output_path=args.output_path,
-            aspect_ratio=args.aspect_ratio,
-            target_video_length=args.target_video_length,
-            flow_shift=args.flow_shift,
-            audio_flow_shift=args.audio_flow_shift,
-        )
+        if args.request is not None:
+            generation = run_request(pipeline, args.request, num_inference_steps=args.steps)
+            save_generation(generation, args.output_path)
+            result = {"output_path": str(Path(args.output_path))}
+        else:
+            result = run_with_file(
+                pipeline,
+                prompt=args.prompt,
+                conditions=conditions or None,
+                seed=args.seed,
+                output_path=args.output_path,
+                aspect_ratio=args.aspect_ratio,
+                target_video_length=args.target_video_length,
+                flow_shift=args.flow_shift,
+                audio_flow_shift=args.audio_flow_shift,
+            )
         print("Output saved to {}".format(result["output_path"]))
     finally:
         pipeline.stop()

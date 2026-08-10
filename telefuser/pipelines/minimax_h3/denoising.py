@@ -125,6 +125,20 @@ class MiniMaxH3DenoisingStage(BaseStage):
         self.model_names = ["transformer"]
         self._request_serial = 0
 
+    def _ensure_online_quantized(self) -> None:
+        quant_config = self.model_runtime_config.quant_config
+        if not quant_config.enabled:
+            return
+        if self.transformer.quant_type == quant_config.quant_type:
+            return
+        if self.transformer.quant_type is not None:
+            raise RuntimeError(
+                f"MiniMax H3 DiT is already quantized as {self.transformer.quant_type}, "
+                f"cannot apply {quant_config.quant_type}"
+            )
+        self.transformer.enable_quant(quant_config)
+        current_platform.empty_cache()
+
     def parallel_models(self) -> None:
         parallel_config = self.model_runtime_config.parallel_config
         unsupported = {
@@ -222,6 +236,7 @@ class MiniMaxH3DenoisingStage(BaseStage):
         num_inference_steps: int,
         _transport_video: bool = False,
     ) -> MiniMaxH3DenoiseResult:
+        self._ensure_online_quantized()
         if isinstance(text, dict):
             text = MiniMaxH3TextCondition(**text)
         conditions = [
@@ -318,9 +333,6 @@ class MiniMaxH3DenoisingStage(BaseStage):
         device = next(self.transformer.parameters()).device
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
-        reset_communication_metrics = getattr(self.transformer, "reset_communication_metrics", None)
-        if callable(reset_communication_metrics):
-            reset_communication_metrics()
         denoising_started = time.perf_counter()
         video_rows = torch.zeros(len(packed["img_pos"]), 96, dtype=torch.float32, device=device)
         audio_rows = torch.zeros(len(packed["audio_pos"]), 32, dtype=torch.float32, device=device)
@@ -534,13 +546,10 @@ class MiniMaxH3DenoisingStage(BaseStage):
         else:
             peak_allocated = 0
             peak_reserved = 0
-        get_communication_seconds = getattr(self.transformer, "communication_seconds", None)
-        communication_seconds = float(get_communication_seconds()) if callable(get_communication_seconds) else 0.0
         runtime_metrics: dict[str, float | int] = {
             "denoising_seconds": time.perf_counter() - denoising_started,
             "peak_allocated_bytes": peak_allocated,
             "peak_reserved_bytes": peak_reserved,
-            "communication_seconds": communication_seconds,
         }
         feature_cache = getattr(self.transformer, "feature_cache", None)
         get_compute_steps = getattr(feature_cache, "get_compute_steps", None)

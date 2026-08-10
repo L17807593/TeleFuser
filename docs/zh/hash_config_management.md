@@ -108,13 +108,11 @@ model = mm.fetch_module("wan_video_dit")  # Hash 自动识别！
 
 **总结**：TeleFuser 的 hash 识别机制优先考虑**正确性和可靠性**，适合加载错误模型可能导致严重问题的生产环境。
 
-## 配置位置
+## 注册位置
 
-所有模型 hash 配置存储在：
-
-```
-telefuser/core/model_config.py
-```
+模型 hash 注册与拥有相应 checkpoint 格式的模型模块放在一起。在模型类旁添加模块级
+`register_model_config()` 调用；`ModelRegistry` 首次使用时会自动发现这些模块。注册表实现位于
+`telefuser/core/model_registry.py`，不再使用集中的配置文件。
 
 ## 核心工具：Weight Viewer
 
@@ -164,20 +162,19 @@ model
       ...
 ```
 
-## 配置格式
+## 注册格式
 
 ```python
-model_loader_configs = [
-    # 格式: (keys_hash, keys_hash_with_shape, model_names, model_classes, model_resource)
-    (
-        None,                                      # keys_hash (非严格匹配)
-        "4c3523c69fb7b24cf2db147a715b277f",       # keys_hash_with_shape (严格匹配)
-        ["wan_video_decoder"],                     # model_names
-        [TAEHV],                                   # model_classes
-        "official",                                 # model_resource
-    ),
-    # ... 更多配置
-]
+from telefuser.core.model_registry import register_model_config
+
+# 格式: (keys_hash, keys_hash_with_shape, model_names, model_classes, model_resource)
+register_model_config(
+    None,                                      # keys_hash（非严格匹配）
+    "4c3523c69fb7b24cf2db147a715b277f",       # keys_hash_with_shape（严格匹配）
+    ["wan_video_decoder"],                    # model_names
+    [TAEHV],                                   # model_classes
+    "official",                               # model_resource
+)
 ```
 
 ## 配置管理流程
@@ -209,25 +206,21 @@ python tools/viewer/weight_viewer.py "/path/to/models/model.safetensors" --max-d
 
 查看导出的 JSON 文件，分析 key 的命名规律，编写转换器。
 
-#### 4. 添加到配置
+#### 4. 注册模型
 
-编辑 `telefuser/core/model_config.py`，添加模型配置：
+在定义 `MyModel` 的模块中添加注册：
 
 ```python
-from ..models.my_model import MyModel
+from telefuser.core.model_registry import register_model_config
 
-model_loader_configs = [
-    # ... 现有配置 ...
-    
-    # MyModel - Standard version (from weight_viewer output)
-    (
-        None,  # 非严格 hash（可选）
-        "4c3523c69fb7b24cf2db147a715b277f",  # 从 weight_viewer 获取的 hash
-        ["my_model"],
-        [MyModel],
-        "official",  # 或 "diffusers"
-    ),
-]
+# MyModel - Standard version（来自 weight_viewer 输出）
+register_model_config(
+    None,  # 非严格 hash（可选）
+    "4c3523c69fb7b24cf2db147a715b277f",  # 从 weight_viewer 获取的 hash
+    ["my_model"],
+    [MyModel],
+    "official",  # 或 "diffusers"
+)
 ```
 
 #### 5. 验证配置
@@ -242,7 +235,7 @@ from telefuser.core.module_manager import ModuleManager
 mm = ModuleManager(device='cpu')
 mm.load_model('/path/to/models/model.safetensors')
 print('✓ Model loaded successfully!')
-print('Available models:', mm.module_name)
+print('Available models:', mm.module_names)
 "
 ```
 
@@ -329,6 +322,7 @@ Usage:
 
 import argparse
 import json
+import sys
 
 from telefuser.utils.model_weight import hash_state_dict_keys
 
@@ -353,18 +347,20 @@ def generate_template(model_path, model_name, model_class, resource="official"):
     hash_with_shape = hash_state_dict_keys(all_weights, with_shape=True)
     hash_without_shape = hash_state_dict_keys(all_weights, with_shape=False)
     
-    # 生成配置
-    config = f'''    # {model_name}
-    (
-        "{hash_without_shape}",  # keys_hash (非严格匹配)
-        "{hash_with_shape}",    # keys_hash_with_shape
-        ["{model_name}"],
-        [{model_class}],
-        "{resource}",
-    ),'''
+    # 生成模块级注册。
+    config = f'''from telefuser.core.model_registry import register_model_config
+
+# {model_name}
+register_model_config(
+    "{hash_without_shape}",  # keys_hash（非严格匹配）
+    "{hash_with_shape}",    # keys_hash_with_shape
+    ["{model_name}"],
+    [{model_class}],
+    "{resource}",
+)'''
     
     print("\n" + "="*60)
-    print("Generated Configuration Template")
+    print("Generated Registration Template")
     print("="*60)
     print(config)
     print("\n" + "="*60)
@@ -412,15 +408,16 @@ python tools/generate_config_template.py \
 #!/usr/bin/env python3
 # tools/verify_configs.py
 
-from telefuser.core.model_config import model_loader_configs
+from telefuser.core.model_registry import ModelRegistry
 
 def verify():
     """验证配置"""
-    print(f"Total configurations: {len(model_loader_configs)}\n")
+    configs = ModelRegistry.instance().get_configs()
+    print(f"Total registrations: {len(configs)}\n")
     
     # 检查重复
     seen_hashes = {}
-    for i, config in enumerate(model_loader_configs):
+    for i, config in enumerate(configs):
         keys_hash, keys_hash_with_shape, names, classes, resource = config
         
         if keys_hash_with_shape in seen_hashes:
@@ -438,19 +435,17 @@ if __name__ == "__main__":
 
 ## 配置组织建议
 
-### 按模型家族分组
+### 将注册和模型家族放在一起
 
 ```python
-model_loader_configs = [
-    # ==================== WanVideo ====================
-    (None, "9269f8db9040a9d860eaca435be61814", ["wan_video_dit"], [WanModel], "official"),
-    (None, "1378ea763357eea97acdef78e65d6d96", ["wan_video_vae"], [WanVideoVAE], "official"),
-    
-    # ==================== QwenImage ====================
-    (None, "7a32c4aa3de140d48a5899ca505944b9", ["qwen_image_dit"], [QwenImageDiT], "official"),
-    
-    # ...
-]
+# telefuser/models/wan_video_dit.py
+register_model_config(None, "9269f8db9040a9d860eaca435be61814", ["wan_video_dit"], [WanModel], "official")
+
+# telefuser/models/wan_video_vae.py
+register_model_config(None, "1378ea763357eea97acdef78e65d6d96", ["wan_video_vae"], [WanVideoVAE], "official")
+
+# telefuser/models/qwen_image_dit.py
+register_model_config(None, "7a32c4aa3de140d48a5899ca505944b9", ["qwen_image_dit"], [QwenImageDiT], "official")
 ```
 
 ### 注释规范
@@ -459,13 +454,13 @@ model_loader_configs = [
 # Wan2.1 I2V 14B - 720P (from weight_viewer)
 # Source: modelscope/Wan2.1-I2V-14B-720P
 # Parameters: 14.02B
-(
+register_model_config(
     None,
     "9269f8db9040a9d860eaca435be61814",
     ["wan_video_dit"],
     [WanModel],
     "official",
-),
+)
 ```
 
 ## 常见问题
@@ -483,18 +478,18 @@ model_loader_configs = [
 
 ```python
 # 使用 keys_hash（不包含 shape）
-(
+register_model_config(
     "q7r8s9t0u1v2w3x4y5z6a7b8c9d0e1f2",  # 仅 key hash
     None,  # 不使用 shape hash
     ["flexible_model"],
     [FlexibleModel],
     "official",
-),
+)
 ```
 
 ### Q: 如何批量添加多个模型变体？
 
-创建一个脚本遍历目录并生成配置：
+创建一个脚本遍历目录并生成注册：
 
 ```bash
 for f in /models/*.safetensors; do
@@ -511,7 +506,7 @@ done
 python tools/viewer/weight_viewer.py "/path/to/model-*.safetensors" --quiet
 ```
 
-确保在配置中使用这个合并后的 hash。
+在模型类旁注册这个合并后的 hash。
 
 ## 相关文档
 

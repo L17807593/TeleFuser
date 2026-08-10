@@ -79,6 +79,8 @@ class SelfAttention(nn.Module):
         self.norm_q = RMSNorm(dim, eps=eps)
         self.norm_k = RMSNorm(dim, eps=eps)
 
+        self.ulysses_communicator = None
+
         self.local_attn_mask = None
 
     def async_usp_forward(
@@ -112,15 +114,15 @@ class SelfAttention(nn.Module):
         sp_group = get_ulysses_group(device_mesh=device_mesh)
         v = self.v(x)
         v_4d = rearrange(v, "b s (h d) -> b s h d", h=self.num_heads)
-        v_wait = ulysses_scatter_heads(v_4d, sp_group)
+        v_wait = ulysses_scatter_heads(v_4d, sp_group, tag="v", barrier=False, communicator=self.ulysses_communicator)
         q = self.norm_q(self.q(x))
         q = rope_apply(q, freqs, self.num_heads)
         q_4d = rearrange(q, "b s (h d) -> b s h d", h=self.num_heads)
-        q_wait = ulysses_scatter_heads(q_4d, sp_group)
+        q_wait = ulysses_scatter_heads(q_4d, sp_group, tag="q", barrier=False, communicator=self.ulysses_communicator)
         k = self.norm_k(self.k(x))
         k = rope_apply(k, freqs, self.num_heads)
         k_4d = rearrange(k, "b s (h d) -> b s h d", h=self.num_heads)
-        k_wait = ulysses_scatter_heads(k_4d, sp_group)
+        k_wait = ulysses_scatter_heads(k_4d, sp_group, tag="k", communicator=self.ulysses_communicator)
         q_4d = q_wait()
         k_4d = k_wait()
         v_4d = v_wait()
@@ -569,6 +571,12 @@ class FlashVSRModel(BaseModel):
 
     def enable_usp(self):
         self.usp_flag = True
+        from telefuser.distributed.device_mesh import get_ulysses_group
+
+        group = get_ulysses_group(self.device_mesh)
+        communicator = self._configure_ulysses_communicator(group)
+        for block in self.blocks:
+            block.self_attn.ulysses_communicator = communicator
         SelfAttention.usp_flag = True
 
     @staticmethod

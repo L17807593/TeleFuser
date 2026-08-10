@@ -4,10 +4,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from telefuser.core.config import AttentionConfig, AttnImplType, QuantConfig, QuantKernelBackend, QuantType
 from telefuser.models.minimax_h3_dit import (
     MINIMAX_H3_FP32_BUFFER_NAMES,
     MINIMAX_H3_FP32_PARAM_NAMES,
     MiniMaxH3AdaLNCache,
+    MiniMaxH3Attention,
     MiniMaxH3DiT,
     MiniMaxH3DiTConfig,
     _reorder_grouped_qkv_to_qkv,
@@ -136,6 +138,90 @@ def test_grouped_qkv_reorder_matches_sglang_vector() -> None:
     torch.testing.assert_close(actual, expected)
 
 
+def test_sage_attention_runs_h3_live_prefix_and_zeros_alignment_padding() -> None:
+    module = MiniMaxH3Attention(_small_config()).eval()
+    hidden = torch.randn(64, 32, dtype=torch.bfloat16)
+
+    def sage_output(query: torch.Tensor, *_: torch.Tensor, **__: object) -> torch.Tensor:
+        return query.clone()
+
+    with patch("telefuser.models.minimax_h3_dit.attention", side_effect=sage_output) as sage:
+        output = module(
+            hidden,
+            sequence_lengths=[61, 3],
+            rope_cos_sin_cache=None,
+            attention_config=AttentionConfig.dense_attention(AttnImplType.SAGE_ATTN_2_8_8_SM90),
+            cu_seqlens=torch.tensor([0, 61, 64], dtype=torch.int32),
+        )
+
+    assert sage.call_args.args[0].shape == (1, 61, 4, 8)
+    assert "sequence_lengths" not in sage.call_args.kwargs
+    assert torch.count_nonzero(output[61:]) == 0
+
+
+def test_ulysses_overlaps_strided_value_scatter_with_qk_preprocessing() -> None:
+    module = MiniMaxH3Attention(_small_config()).eval()
+    module.ulysses_group = MagicMock()
+    hidden = torch.randn(8, 32, dtype=torch.bfloat16)
+    events: list[tuple[object, ...]] = []
+    q_norm = module.q_norm.forward
+    k_norm = module.k_norm.forward
+
+    def scatter(
+        tensor: torch.Tensor,
+        _group: object,
+        *,
+        tag: str,
+        barrier: bool = True,
+        communicator: object | None = None,
+    ) -> object:
+        events.append(("submit", tag, barrier, tensor.is_contiguous()))
+
+        def wait() -> torch.Tensor:
+            events.append(("wait", tag))
+            return tensor
+
+        return wait
+
+    def record_q_norm(tensor: torch.Tensor) -> torch.Tensor:
+        events.append(("norm", "q"))
+        return q_norm(tensor)
+
+    def record_k_norm(tensor: torch.Tensor) -> torch.Tensor:
+        events.append(("norm", "k"))
+        return k_norm(tensor)
+
+    with (
+        patch("telefuser.models.minimax_h3_dit.dist.get_world_size", return_value=2),
+        patch("telefuser.models.minimax_h3_dit.ulysses_scatter_heads", side_effect=scatter),
+        patch(
+            "telefuser.models.minimax_h3_dit.ulysses_gather_heads_destination_major",
+            side_effect=lambda tensor, *_args, **_kwargs: lambda: tensor,
+        ),
+        patch("telefuser.models.minimax_h3_dit.attention", side_effect=lambda query, *_args, **_kwargs: query),
+        patch.object(module.q_norm, "forward", side_effect=record_q_norm),
+        patch.object(module.k_norm, "forward", side_effect=record_k_norm),
+    ):
+        output = module(
+            hidden,
+            sequence_lengths=[8],
+            rope_cos_sin_cache=None,
+            attention_config=AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA),
+        )
+
+    assert output.shape == hidden.shape
+    assert events == [
+        ("submit", "v", False, False),
+        ("norm", "q"),
+        ("norm", "k"),
+        ("submit", "q", False, True),
+        ("submit", "k", True, True),
+        ("wait", "q"),
+        ("wait", "k"),
+        ("wait", "v"),
+    ]
+
+
 def test_enable_tp_shards_fused_projections_by_logical_section() -> None:
     model = MiniMaxH3DiT(_small_config())
     block = model.blocks[0]
@@ -215,6 +301,17 @@ def _small_packed_inputs() -> dict[str, object]:
         "img_pos_for_infer_output_info": {"position_ids": video_positions},
         "packed_seq_params": {"cu_seqlens_q": torch.tensor([0, sequence], dtype=torch.int32)},
     }
+
+
+def test_noop_feature_cache_does_not_update_residuals() -> None:
+    torch.manual_seed(0)
+    model = MiniMaxH3DiT(_small_config()).eval()
+    cache = model.feature_cache
+
+    with patch.object(cache, "update", wraps=cache.update) as update:
+        model(**_small_packed_inputs())
+
+    update.assert_not_called()
 
 
 def test_feature_cache_skips_joint_blocks_and_keeps_both_output_modalities() -> None:
@@ -398,6 +495,70 @@ def test_inference_only_adaln_cache_matches_live_projections_and_releases_weight
     model.to("cpu")
 
 
+def test_load_inference_only_adaln_validates_fingerprint_once(tmp_path) -> None:
+    model = MiniMaxH3DiT(_small_config()).eval()
+    cache = model.prepare_adaln_cache(torch.tensor([0.5]))
+    cache.save(tmp_path)
+
+    with patch.object(model, "adaln_fingerprint", wraps=model.adaln_fingerprint) as fingerprint:
+        model.load_inference_only_adaln(tmp_path)
+
+    assert fingerprint.call_count == 1
+    assert model.time_embedder is None
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_inference_only_adaln_cache_resolves_indices_on_device() -> None:
+    config = _small_config()
+    cache = MiniMaxH3AdaLNCache(
+        timesteps=torch.tensor([0.25, 0.5, 0.75]),
+        block_outputs=tuple(
+            torch.randn(3, config.adaln_out_features, dtype=torch.bfloat16) for _ in range(config.num_layers)
+        ),
+        final_output=torch.randn(3, config.final_adaln_out_features, dtype=torch.bfloat16),
+        config=config,
+        model_fingerprint="test",
+    )
+    device = torch.device("cuda", torch.cuda.current_device())
+    cached_timesteps, block_outputs, final_output = cache._outputs_for_device(device)
+
+    with patch.object(cache, "_cpu_indices_for", side_effect=AssertionError("unexpected CPU lookup")):
+        indices = cache._indices_for(
+            torch.tensor([0.75, 0.25], device=device),
+            device,
+            cached_timesteps,
+        )
+
+    assert indices.tolist() == [2, 0]
+    assert all(output.device == device for output in block_outputs)
+    assert final_output.device == device
+    assert cache._outputs_for_device(device)[0] is cached_timesteps
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_online_adaln_cache_defers_device_synchronization_until_finalize() -> None:
+    config = _small_config()
+    device = torch.device("cuda", torch.cuda.current_device())
+    model = MiniMaxH3DiT(config).eval().to(device)
+    model.enable_online_adaln_cache()
+    timesteps = torch.tensor([0.25, 0.5], device=device)
+    adaln_input = torch.randn(2, config.time_embed_dim, device=device, dtype=torch.bfloat16)
+
+    with patch(
+        "telefuser.models.minimax_h3_dit.torch.cuda.synchronize",
+        wraps=torch.cuda.synchronize,
+    ) as synchronize:
+        model._record_online_adaln(timesteps, adaln_input)
+        synchronize.assert_not_called()
+        assert all(tensor.is_pinned() for tensor in model._online_adaln_batches[0])
+
+        assert model.finalize_online_adaln_cache() is True
+
+    assert synchronize.call_count == 1
+
+
 def test_inference_only_adaln_cache_rejects_weight_mismatch_and_missing_timestep(tmp_path) -> None:
     torch.manual_seed(0)
     source = MiniMaxH3DiT(_small_config()).eval()
@@ -444,9 +605,12 @@ def test_online_adaln_cache_finalizes_after_first_forward_and_reuses_outputs() -
     expected_video, expected_audio = model(**inputs)
     assert model._adaln_cache is None
     assert model.time_embedder is not None
-    assert model._online_adaln_rows
+    assert model._online_adaln_batches
 
-    assert model.finalize_online_adaln_cache() is True
+    with patch.object(model, "adaln_fingerprint", wraps=model.adaln_fingerprint) as fingerprint:
+        assert model.finalize_online_adaln_cache() is True
+
+    assert fingerprint.call_count == 1
     assert model._adaln_cache is not None
     assert model.time_embedder is None
     assert all(block.adaln_proj.linear is None for block in model.blocks)
@@ -480,3 +644,77 @@ def test_online_adaln_cache_supports_tensor_parallelism() -> None:
 
     torch.testing.assert_close(actual_video, expected_video)
     torch.testing.assert_close(actual_audio, expected_audio)
+
+
+@pytest.mark.parametrize(
+    ("quant_type", "helper_path", "count_attribute"),
+    [
+        (
+            QuantType.TORCHAO_FP8,
+            "telefuser.ops.torchao_fp8_linear.replace_linear_layers_with_torchao_fp8",
+            "torchao_fp8_replaced_linear",
+        ),
+        (
+            QuantType.BNB_NF4,
+            "telefuser.ops.bnb_nf4_linear.replace_linear_layers_with_bnb_nf4",
+            "bnb_nf4_replaced_linear",
+        ),
+    ],
+)
+def test_online_quantization_selects_only_transformer_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+    quant_type: QuantType,
+    helper_path: str,
+    count_attribute: str,
+) -> None:
+    model = MiniMaxH3DiT(_small_config())
+    calls = []
+
+    def fake_replace(module: torch.nn.Module, **kwargs: object) -> int:
+        calls.append((module, kwargs))
+        return 15
+
+    monkeypatch.setattr(helper_path, fake_replace)
+    model.enable_quant(QuantConfig(enabled=True, quant_type=quant_type))
+
+    assert calls[0][0] is model
+    assert calls[0][1]["include_names"] == ("blocks.",)
+    assert getattr(model, count_attribute) == 15
+    assert model.quant_type == quant_type
+
+
+def test_tf_kernel_fp8_quantization_uses_filtered_linear_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = MiniMaxH3DiT(_small_config())
+    calls: list[tuple[str, object]] = []
+
+    def fake_count(module: torch.nn.Module, **kwargs: object) -> int:
+        calls.append(("count", kwargs["module_filter"]))
+        return 15
+
+    def fake_enable(module: torch.nn.Module, **kwargs: object) -> torch.nn.Module:
+        calls.append(("enable", kwargs))
+        return module
+
+    monkeypatch.setattr("telefuser.ops.fp8_gemm.count_linear_layers", fake_count)
+    monkeypatch.setattr("telefuser.ops.fp8_gemm.enable_fp8_gemm", fake_enable)
+
+    model.enable_quant(
+        QuantConfig(
+            enabled=True,
+            quant_type=QuantType.FP8,
+            kernel_backend=QuantKernelBackend.TF_KERNEL,
+        )
+    )
+
+    assert calls[0][0] == "count"
+    assert calls[1][0] == "enable"
+    options = calls[1][1]["options"]
+    assert options.fp16_weight_storage == "discard"
+    assert getattr(model, "tf_kernel_fp8_replaced_linear") == 15
+    assert model.quant_type == QuantType.FP8
+
+
+def test_online_quantization_rejects_unsupported_type() -> None:
+    model = MiniMaxH3DiT(_small_config())
+    with pytest.raises(ValueError, match="does not support"):
+        model.enable_quant(QuantConfig(enabled=True, quant_type=QuantType.INT8))

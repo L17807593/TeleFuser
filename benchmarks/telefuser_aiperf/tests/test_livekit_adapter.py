@@ -373,3 +373,49 @@ async def test_adapter_maps_control_ack_and_next_frame(tmp_path: Path) -> None:
     assert result.control_events[0].next_frame_latency_ms is not None
     room = _ControlLiveKitRoom.instances[0]
     assert room.published[0][1:] == ("tf.control", True)
+
+
+class _IncompleteDeliveryRoom(_FakeLiveKitRoom):
+    async def connect(
+        self,
+        url: str,
+        token: str,
+        *,
+        timeout_s: float,
+        on_data: Callable[[bytes | str, str, str], None],
+        on_video_frame: Callable[[], None],
+        on_event: Callable[[str, Mapping[str, Any]], None],
+    ) -> None:
+        self.connected = (url, token)
+        on_data(
+            orjson.dumps({"type": "chunk", "data": {"stage": "worker_running"}}),
+            "tf.status",
+            "telefuser-worker-0",
+        )
+        on_video_frame()
+        on_video_frame()
+        on_data(
+            orjson.dumps({"type": "done", "session_id": "livekit-session", "published_frames": 3}),
+            "tf.status",
+            "telefuser-worker-0",
+        )
+
+
+@pytest.mark.asyncio
+async def test_adapter_fails_when_client_does_not_receive_target_published_frames(tmp_path: Path) -> None:
+    _IncompleteDeliveryRoom.instances.clear()
+    adapter = TeleFuserLiveKitAdapter(
+        contract=_contract(),
+        config=_config(tmp_path),
+        artifacts_dir=tmp_path,
+        room_client_factory=_IncompleteDeliveryRoom,
+        http_client=_FakeHttpClient(),
+    )
+
+    result = await adapter.run_session(_plan())
+
+    assert result.success is False
+    assert result.frames_received == 2
+    assert result.done_received is True
+    assert result.error is not None
+    assert "2/3" in result.error

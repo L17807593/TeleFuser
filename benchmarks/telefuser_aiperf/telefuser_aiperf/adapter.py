@@ -70,12 +70,16 @@ class _LiveKitSession:
         self.connected = False
         self.target_ready = False
         self.active_event = asyncio.Event()
+        self.target_done_event = asyncio.Event()
+        self.delivery_complete_event = asyncio.Event()
         self.first_frame_event = asyncio.Event()
         self.done_event = asyncio.Event()
         self.control_task: asyncio.Task[None] | None = None
+        self.delivery_ack_task: asyncio.Task[None] | None = None
         self.pending_control_acks: deque[int] = deque()
         self.pending_control_frames: deque[int] = deque()
         self.control_sent_at: dict[int, float] = {}
+        self.expected_published_frames: int | None = None
 
     def _active_start(self) -> float:
         if self.active_started_at is None:
@@ -104,7 +108,31 @@ class _LiveKitSession:
             self.events.record("first_frame")
         self.last_frame_at = now
         self._mark_control_frame(now)
+        self._mark_delivery_complete()
         self._try_start_active_window()
+
+    def _mark_delivery_complete(self) -> None:
+        if self.expected_published_frames is None or self.result.frames_received < self.expected_published_frames:
+            return
+        if not self.result.done_received:
+            return
+        if self.delivery_ack_task is None:
+            self.delivery_ack_task = asyncio.create_task(self._send_delivery_ack())
+
+    async def _send_delivery_ack(self) -> None:
+        if self.expected_published_frames is None:
+            return
+        try:
+            await self.room.publish_data(
+                {"type": "delivery_ack", "published_frames": self.expected_published_frames},
+                topic=_CONTROL_TOPIC,
+                reliable=True,
+            )
+            self.events.record("delivery_ack_sent", published_frames=self.expected_published_frames)
+        except Exception as exc:  # noqa: BLE001 - delivery transport errors are benchmark data
+            self.result.error = redact_string(f"delivery acknowledgement failed: {exc}")
+        finally:
+            self.delivery_complete_event.set()
 
     def _mark_control_frame(self, now: float) -> None:
         if not self.pending_control_frames:
@@ -121,6 +149,7 @@ class _LiveKitSession:
         self.events.record(event, **dict(payload))
         if event == "disconnected":
             self.done_event.set()
+            self.target_done_event.set()
 
     def _handle_data_message(
         self,
@@ -146,8 +175,15 @@ class _LiveKitSession:
             return
         if payload.get("type") == "done":
             self.result.done_received = True
+            published_frames = payload.get("published_frames")
+            if isinstance(published_frames, int) and published_frames >= 0:
+                self.expected_published_frames = published_frames
+            self._mark_delivery_complete()
+            if self.expected_published_frames is None:
+                self.delivery_complete_event.set()
+            self.target_done_event.set()
             self.done_event.set()
-            self.events.record("done_message", topic=topic)
+            self.events.record("done_message", topic=topic, published_frames=self.expected_published_frames)
             return
         data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
         self._record_transport_profile(data)
@@ -155,6 +191,8 @@ class _LiveKitSession:
             error = data.get("error") or payload.get("error")
             self.result.error = redact_string(str(error))
             self.done_event.set()
+            self.target_done_event.set()
+            self.delivery_complete_event.set()
         stage = data.get("stage")
         if stage is not None:
             self._handle_status_stage(str(stage), data, now)
@@ -314,9 +352,21 @@ class _LiveKitSession:
             0.0,
         )
         try:
-            await asyncio.wait_for(self.done_event.wait(), timeout=remaining)
+            await asyncio.wait_for(self.target_done_event.wait(), timeout=remaining)
         except asyncio.TimeoutError:
             self.events.record("session_duration_elapsed")
+            return
+        if self.expected_published_frames is not None:
+            try:
+                await asyncio.wait_for(
+                    self.delivery_complete_event.wait(),
+                    timeout=float(self.adapter.options.shutdown_timeout_s),
+                )
+            except asyncio.TimeoutError as exc:
+                raise TimeoutError(
+                    "Target completed publishing but the client did not receive all frames "
+                    f"({self.result.frames_received}/{self.expected_published_frames})"
+                ) from exc
 
     async def run(self) -> SessionResult:
         self.started_at = time.perf_counter()

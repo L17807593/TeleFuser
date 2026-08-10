@@ -19,6 +19,7 @@
     "sample_shift": 10.0,
     "control_mode": "cam",
     "show_control_hud": false,
+    "delivery_mode": "lossless",
     "benchmark_metrics": true
   },
   "transport": {

@@ -269,6 +269,7 @@ class WanSelfAttention(nn.Module):
         self.sp_flag = False
         self.device_mesh = None
         self.ulysses_group = None
+        self.ulysses_communicator: Any | None = None
 
         # Attention config - defaults to SAGE_ATTN for best performance
         self._attn_config = AttentionConfig(attn_impl=AttnImplType.SAGE_ATTN_2_8_8)
@@ -372,13 +373,17 @@ class WanSelfAttention(nn.Module):
 
         # QKV projection [B, S/N, H, D]
         q = self.norm_q(self.q(x)).view(b, s, n, d)
+        q_wait = ulysses_scatter_heads(
+            q, self.ulysses_group, tag="q", barrier=False, communicator=self.ulysses_communicator
+        )
         k = self.norm_k(self.k(x)).view(b, s, n, d)
+        k_wait = ulysses_scatter_heads(
+            k, self.ulysses_group, tag="k", barrier=False, communicator=self.ulysses_communicator
+        )
         v = self.v(x).view(b, s, n, d)
 
         # Ulysses scatter heads: [B, S/N, H, D] -> [B, S, H/N, D]
-        q_wait = ulysses_scatter_heads(q, self.ulysses_group)
-        k_wait = ulysses_scatter_heads(k, self.ulysses_group)
-        v_wait = ulysses_scatter_heads(v, self.ulysses_group)
+        v_wait = ulysses_scatter_heads(v, self.ulysses_group, tag="v", communicator=self.ulysses_communicator)
         q = q_wait()
         k = k_wait()
         v = v_wait()
@@ -1154,12 +1159,14 @@ class LiveActDiT(BaseModel):
 
         self.usp_flag = True
         ulysses_group = get_ulysses_group(device_mesh)
+        communicator = self._configure_ulysses_communicator(ulysses_group)
         sp_rank = get_ulysses_rank(device_mesh)
 
         for block in self.blocks:
             block.self_attn.sp_flag = True
             block.self_attn.device_mesh = device_mesh
             block.self_attn.ulysses_group = ulysses_group
+            block.self_attn.ulysses_communicator = communicator
 
             block.audio_cross_attn.sp_flag = True
             block.audio_cross_attn.sp_rank = sp_rank

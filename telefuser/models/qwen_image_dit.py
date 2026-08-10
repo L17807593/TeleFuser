@@ -317,6 +317,7 @@ class QwenDoubleStreamAttention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
+        self.ulysses_communicator = None
 
         self.to_q = nn.Linear(dim_a, dim_a)
         self.to_k = nn.Linear(dim_a, dim_a)
@@ -351,7 +352,9 @@ class QwenDoubleStreamAttention(nn.Module):
         img_value = img_value.unflatten(-1, (self.num_heads, -1))
         txt_value = txt_value.unflatten(-1, (self.num_heads, -1))
         joint_value = torch.cat([txt_value, img_value], dim=1)
-        joint_value_wait = ulysses_scatter_heads(joint_value, group)
+        joint_value_wait = ulysses_scatter_heads(
+            joint_value, group, tag="v", barrier=False, communicator=self.ulysses_communicator
+        )
 
         img_query = self.to_q(image)
         txt_query = self.add_q_proj(text)
@@ -366,7 +369,9 @@ class QwenDoubleStreamAttention(nn.Module):
             img_query = apply_rotary_emb_qwen(img_query, img_freqs)
             txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs)
         joint_query = torch.cat([txt_query, img_query], dim=1)
-        joint_query_wait = ulysses_scatter_heads(joint_query, group)
+        joint_query_wait = ulysses_scatter_heads(
+            joint_query, group, tag="q", barrier=False, communicator=self.ulysses_communicator
+        )
 
         img_key = self.to_k(image)
         txt_key = self.add_k_proj(text)
@@ -381,7 +386,7 @@ class QwenDoubleStreamAttention(nn.Module):
             img_key = apply_rotary_emb_qwen(img_key, img_freqs)
             txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs)
         joint_key = torch.cat([txt_key, img_key], dim=1)
-        joint_key_wait = ulysses_scatter_heads(joint_key, group)
+        joint_key_wait = ulysses_scatter_heads(joint_key, group, tag="k", communicator=self.ulysses_communicator)
 
         joint_value = joint_value_wait()
         joint_query = joint_query_wait()
@@ -572,7 +577,7 @@ class QwenImageTransformerBlock(nn.Module):
 class QwenImageDiT(BaseModel):
     """Diffusion Transformer for Qwen-Image generation."""
 
-    def __init__(self, num_layers: int = 60):
+    def __init__(self, num_layers: int = 60, prequantized_fp8: bool = False):
         super().__init__()
 
         self.pos_embed = QwenEmbedRope(theta=10000, axes_dim=[16, 56, 56], scale_rope=True)
@@ -597,6 +602,15 @@ class QwenImageDiT(BaseModel):
         self.proj_out = nn.Linear(3072, 64)
         self.layer_name_list = ["transformer_blocks"]
         self.async_offload_manager = None
+
+        # Pre-quantized Lightning checkpoints contain FP8 block weights and
+        # per-output-channel ``weight_scale`` tensors. Construct matching
+        # modules before loading so those scale tensors are not rejected as
+        # unexpected state-dict entries.
+        if prequantized_fp8:
+            from telefuser.ops.quantized_linear import replace_linear_layers
+
+            replace_linear_layers(self.transformer_blocks, torch.float8_e4m3fn)
 
     def enable_quant(self, quant_type: str | torch.dtype):
         """Enable quantization for transformer blocks."""
@@ -648,6 +662,10 @@ class QwenImageDiT(BaseModel):
         logger.info("enable usp for qwen image dit")
         self.usp_flag = True
         QwenDoubleStreamAttention.usp_flag = True
+        group = get_ulysses_group(self.device_mesh)
+        communicator = self._configure_ulysses_communicator(group)
+        for block in self.transformer_blocks:
+            block.attn.ulysses_communicator = communicator
 
     def forward(
         self,
@@ -800,10 +818,14 @@ class QwenImageDitStateDictConverter:
     def __init__(self):
         pass
 
-    def from_diffusers(self, state_dict: dict) -> dict:
+    def from_diffusers(self, state_dict: dict) -> dict | tuple[dict, dict]:
+        if any(key.endswith("weight_scale") for key in state_dict):
+            return state_dict, {"prequantized_fp8": True}
         return state_dict
 
-    def from_official(self, state_dict: dict) -> dict:
+    def from_official(self, state_dict: dict) -> dict | tuple[dict, dict]:
+        if any(key.endswith("weight_scale") for key in state_dict):
+            return state_dict, {"prequantized_fp8": True}
         return state_dict
 
 

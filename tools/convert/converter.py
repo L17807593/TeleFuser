@@ -473,8 +473,6 @@ def convert_weights(args):
         logger.info(f"Loading weights from: {file_path}")
         if file_path.endswith(".pt") or file_path.endswith(".pth"):
             weights = torch.load(file_path, map_location=args.device, weights_only=True)
-            if args.model_type == "hunyuan_dit":
-                weights = weights["module"]
         elif file_path.endswith(".safetensors"):
             # Use lazy loading for safetensors to reduce memory usage
             with safe_open(file_path, framework="pt") as f:
@@ -768,7 +766,6 @@ def main():
         "--model_type",
         choices=[
             "wan_dit",
-            "hunyuan_dit",
             "wan_t5",
             "wan_clip",
             "wan_animate_dit",
@@ -882,24 +879,6 @@ def main():
                 "key_idx": 2,
                 "target_keys": ["self_attn", "cross_attn", "ffn"],
                 "adapter_keys": ["linear1_kv", "linear1_q", "linear2"],
-                "ignore_key": None,
-            },
-            "hunyuan_dit": {
-                "key_idx": 2,
-                "target_keys": [
-                    "img_mod",
-                    "img_attn_q",
-                    "img_attn_k",
-                    "img_attn_v",
-                    "img_attn_proj",
-                    "img_mlp",
-                    "txt_mod",
-                    "txt_attn_q",
-                    "txt_attn_k",
-                    "txt_attn_v",
-                    "txt_attn_proj",
-                    "txt_mlp",
-                ],
                 "ignore_key": None,
             },
             "wan_t5": {

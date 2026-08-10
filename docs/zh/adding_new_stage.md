@@ -227,7 +227,7 @@ Stage 使用的模型需要先添加到 TeleFuser 系统。详细步骤请参考
 1. **实现模型类**：创建继承 `BaseModel` 的模型类
 2. **实现 StateDictConverter**：处理权重格式转换
 3. **计算模型 Hash**：使用 `weight_viewer.py` 工具
-4. **添加配置**：在 `telefuser/core/model_config.py` 中注册
+4. **注册模型检测信息**：在定义模型类、拥有该 checkpoint 格式的模块中调用 `register_model_config()`
 
 ```bash
 # 计算模型 hash

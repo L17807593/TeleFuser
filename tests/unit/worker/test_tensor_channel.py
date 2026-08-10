@@ -187,6 +187,22 @@ def test_tensor_channel_validates_bindings_and_rank() -> None:
         WorkerTensorChannel(consumer_world_size=1, cuda_ipc_slots=0)
 
 
+def test_tensor_channel_releases_producer_pools_with_local_ipc_state() -> None:
+    channel = WorkerTensorChannel(consumer_world_size=1, timeout=1)
+    channel._cuda_pools[("profile",)] = object()
+    channel._cuda_storage_cache[(b"storage", 0)] = object()
+
+    try:
+        channel._ensure_local_cuda_ipc_finalizer()
+        channel.release_local_cuda_ipc()
+
+        assert channel._cuda_pools == {}
+        assert channel._cuda_storage_cache == {}
+        assert channel._cuda_ipc_finalizer is None
+    finally:
+        channel.close()
+
+
 def test_tensor_channel_transfers_between_independent_spawned_processes() -> None:
     context = mp.get_context("spawn")
     channel = WorkerTensorChannel(consumer_world_size=1, timeout=10)

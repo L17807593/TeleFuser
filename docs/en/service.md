@@ -113,7 +113,6 @@ lease, GPU placement, lifecycle, and complete local stack.
 | Pipeline | Task | Notes |
 |----------|------|-------|
 | `WanVideo` (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Main video generation family |
-| `HunyuanVideo` | T2V, I2V | Supported via service examples |
 | `LTX Video` | I2V + Audio | Unified audio-video generation |
 | `LingBot-Video` | T2I, T2V, TI2V, MoE refiner | Dense/MoE generation with native CFG/SP and in-memory refinement; see `examples/lingbot_video/README.md` |
 

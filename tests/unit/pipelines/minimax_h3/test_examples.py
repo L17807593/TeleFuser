@@ -5,13 +5,14 @@ import pytest
 
 from examples.minimax_h3 import minimax_h3_fl2va_h100 as fl2va_example
 from examples.minimax_h3 import minimax_h3_ref2va_h100 as ref2va_example
-from examples.minimax_h3 import minimax_h3_request_h100 as request_example
 from examples.minimax_h3.common import (
     MINIMAX_H3_DEFAULT_FL2VA_IMAGE,
     MINIMAX_H3_DEFAULT_REF2VA_AUDIO,
     MINIMAX_H3_DEFAULT_REF2VA_VIDEO,
+    load_minimax_h3_pipeline,
     load_minimax_h3_request,
     minimax_h3_adaln_cache_timesteps,
+    minimax_h3_quant_config,
     partition_for_minimax_h3_request,
 )
 from examples.minimax_h3.minimax_h3_cache_calibrate import _apply_cache_profile
@@ -21,7 +22,7 @@ from examples.minimax_h3.minimax_h3_ref2va_h100 import (
     default_ref2va_conditions,
     parse_ref2va_ordered_materials,
 )
-from telefuser.core.config import AttnImplType, FeatureCacheConfig
+from telefuser.core.config import AttnImplType, FeatureCacheConfig, QuantKernelBackend, QuantType
 from telefuser.pipelines.minimax_h3.task_profiles import MINIMAX_H3_FINITE_ASPECT_RATIOS
 from telefuser.service.core.pipeline_contract import PipelineContract
 
@@ -73,7 +74,7 @@ def test_ref2va_ordered_cli_materials_preserve_mixed_reference_order() -> None:
 
 
 def test_examples_expose_standard_pipeline_service_entrypoints() -> None:
-    for example in (fl2va_example, ref2va_example, request_example):
+    for example in (fl2va_example, ref2va_example):
         assert example.PPL_CONFIG["model_root"]
         assert callable(example.get_pipeline)
         assert callable(example.run)
@@ -139,6 +140,7 @@ def test_standard_get_pipeline_forwards_parallel_runtime_options(monkeypatch: py
                     n_derivatives=1,
                     taylor_threshold=2,
                 ),
+                "quantization": None,
             },
         )
     ]
@@ -157,6 +159,66 @@ def test_cache_calibration_applies_validated_h3_profile(tmp_path: Path) -> None:
 
     params = json.loads(output_path.read_text(encoding="utf-8"))
     assert params == {"K": 2, "retention_ratio": 0.2, "thresh": 0.03}
+
+
+@pytest.mark.parametrize(
+    ("name", "quant_type", "backend"),
+    [
+        ("torchao-fp8", QuantType.TORCHAO_FP8, QuantKernelBackend.TORCHAO),
+        ("torchao_fp8", QuantType.TORCHAO_FP8, QuantKernelBackend.TORCHAO),
+        ("tf-kernel-fp8", QuantType.FP8, QuantKernelBackend.TF_KERNEL),
+        ("bnb-nf4", QuantType.BNB_NF4, QuantKernelBackend.BITSANDBYTES),
+    ],
+)
+def test_quantization_names_resolve_to_runtime_config(
+    name: str,
+    quant_type: QuantType,
+    backend: QuantKernelBackend,
+) -> None:
+    config = minimax_h3_quant_config(name)
+    assert config.enabled is True
+    assert config.quant_type == quant_type
+    assert config.kernel_backend == backend
+
+
+def test_quantization_rejects_unsupported_parallel_and_cpu_profiles(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="single-GPU"):
+        load_minimax_h3_pipeline(
+            tmp_path,
+            partition="FL2VA",
+            ulysses_degree=2,
+            quantization="torchao-fp8",
+        )
+
+    (tmp_path / "FL2VA").mkdir()
+    with pytest.raises(ValueError, match="CUDA"):
+        load_minimax_h3_pipeline(
+            tmp_path,
+            partition="FL2VA",
+            device="cpu",
+            quantization="bnb-nf4",
+        )
+
+
+@pytest.mark.parametrize("quantization", ["torchao-fp8", "tf-kernel-fp8", "bnb-nf4"])
+def test_standard_example_forwards_selected_quantization(
+    monkeypatch: pytest.MonkeyPatch,
+    quantization: str,
+) -> None:
+    calls = []
+    sentinel = object()
+
+    def fake_get_pipeline(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        return sentinel
+
+    monkeypatch.setattr(fl2va_example, "load_minimax_h3_pipeline", fake_get_pipeline)
+    assert fl2va_example.get_pipeline(1, "/models/h3", device="cuda:1", quantization=quantization) is sentinel
+    assert len(calls) == 1
+    assert calls[0][0] == ("/models/h3",)
+    assert calls[0][1]["device"] == "cuda:1"
+    assert calls[0][1]["quantization"] == quantization
+    assert fl2va_example.PIPELINE_MANIFEST["pipeline_name"] == fl2va_example.PPL_CONFIG["name"]
 
 
 def test_fl2va_run_maps_standard_service_tasks_to_model_conditions() -> None:
@@ -200,6 +262,37 @@ def test_ref2va_run_preserves_ordered_service_conditions() -> None:
     assert ref2va_example.run(Pipeline(), conditions=conditions) is marker
     assert calls[0]["conditions"] is conditions
     assert calls[0]["task"] == "ref2va"
+
+
+def test_ref2va_run_request_preserves_ordered_json_conditions(tmp_path: Path) -> None:
+    request_path = tmp_path / "request.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "task": "ref2va",
+                "prompt": "preserve order",
+                "conditions": [
+                    {"type": "audio", "role": "reference", "uri": "voice.mp3"},
+                    {"type": "image", "role": "reference", "uri": "subject.png"},
+                ],
+                "target": {"short_edge": 768, "aspect_ratio": "16:9", "duration_seconds": 5},
+                "num_inference_steps": 50,
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+    marker = object()
+
+    class Pipeline:
+        def __call__(self, **kwargs: object) -> object:
+            calls.append(kwargs)
+            return marker
+
+    assert ref2va_example.run_request(Pipeline(), request_path, num_inference_steps=20) is marker
+    assert [condition["type"] for condition in calls[0]["conditions"]] == ["audio", "image"]
+    assert calls[0]["conditions"][0]["uri"] == str(tmp_path / "voice.mp3")
+    assert calls[0]["num_inference_steps"] == 20
 
 
 def test_run_with_file_returns_service_artifact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

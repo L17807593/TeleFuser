@@ -65,13 +65,13 @@ Reusable stages, model configs, schedulers, and pipeline orchestration.
 |-------|-------|-------------|
 | LingBot-World v2 | Bidirectional streaming | Camera-controlled interactive world model via LiveKit |
 | LingBot-World-Fast | Bidirectional streaming | Legacy/causal-fast model via LiveKit reliable data messages |
+| ABot-World-0-5B-LF | Single-GPU interactive generation | Direct HTTP or LiveKit browser control with persistent causal KV state; see the [ABot guide](abot_world/) |
 
 ### Video Generation
 
 | Model | Tasks | Description |
 |-------|-------|-------------|
 | WanVideo (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Video generation and editing |
-| HunyuanVideo | T2V, I2V | Video generation |
 | LTX Video | I2V + Audio | Video generation with audio |
 | MiniMax H3 | T2VA, FL2VA, Ref2VA + Audio | Local 768p joint audio-video generation |
 | FlashVSR | VSR | Video super-resolution |
@@ -110,6 +110,7 @@ telefuser stream-serve examples/lingbot/lingbot_world_fast_image_to_video_h100.p
 <a href="stream_server/"><strong>Stream Server</strong><span>LiveKit sessions, retained capacity, LingBot time slicing, and bidirectional control.</span></a>
 <a href="stream_scheduler/"><strong>Stream Scheduler</strong><span>Actor ownership, bounded dataflow, lifecycle, metrics, and GPU placement.</span></a>
 <a href="benchmark_aiperf/"><strong>AIPerf Benchmark</strong><span>Batch video and LingBot LiveKit workflows.</span></a>
+<a href="blog/"><strong>Technical Blog</strong><span>Optimization design, profiling evidence, results, and related work.</span></a>
 <a href="configuration/"><strong>Configuration</strong><span>Runtime, attention, quantization, and offload settings.</span></a>
 <a href="tf_kernel/"><strong>TF-Kernel</strong><span>Install, build, verify, and use the optional CUDA extension.</span></a>
 <a href="parallel/"><strong>Parallel Inference</strong><span>Distributed processing strategies.</span></a>

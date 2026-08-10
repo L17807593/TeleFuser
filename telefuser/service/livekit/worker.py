@@ -23,6 +23,9 @@ from .token_service import LiveKitTokenService
 
 _ROOM_DISCONNECT_TIMEOUT_SECONDS = 5.0
 _CONTROLLER_JOIN_TIMEOUT_SECONDS = 60.0
+_VIDEO_DRAIN_GRACE_SECONDS = 0.5
+_DELIVERY_ACK_TIMEOUT_SECONDS = 15.0
+_VIDEO_TRACK_SUBSCRIPTION_GRACE_SECONDS = 2.0
 
 
 class WorkerEventSink(Protocol):
@@ -79,6 +82,7 @@ class LiveKitWorker:
         self.gpu_num = gpu_num
         self._active_session_id: str | None = None
         self._pipeline_session_id: str | None = None
+        self._delivery_ack_event = asyncio.Event()
         self._stop_event = asyncio.Event()
 
     async def start(self, *, skip_validation: bool = False) -> None:
@@ -98,6 +102,7 @@ class LiveKitWorker:
         if self._active_session_id is not None:
             raise RuntimeError(f"Worker {self.worker_id} is already running a session")
 
+        self._delivery_ack_event.clear()
         self._active_session_id = record.session_id
         self._stop_event.clear()
         error: str | None = None
@@ -142,7 +147,11 @@ class LiveKitWorker:
                     },
                 ).model_dump(mode="json")
             )
-            await self._publish_pipeline_chunks(record.session_id, chunks)
+            await self._publish_pipeline_chunks(
+                record.session_id,
+                chunks,
+                wait_for_delivery_ack=record.config.get("delivery_mode") == "lossless",
+            )
         except asyncio.CancelledError:
             error = "cancelled"
             raise
@@ -195,6 +204,10 @@ class LiveKitWorker:
         except Exception as exc:
             logger.warning(f"LiveKit control message rejected: session={record.session_id} error={exc}")
             return
+        if chunk.get("type") == "delivery_ack":
+            self._delivery_ack_event.set()
+            return
+
         self.pipeline_adapter.push_chunk(self._pipeline_session_id, chunk)
         if chunk.get("type") == "stop":
             self._stop_event.set()
@@ -203,8 +216,11 @@ class LiveKitWorker:
         self,
         session_id: str,
         chunks: AsyncGenerator[dict, None],
+        *,
+        wait_for_delivery_ack: bool,
     ) -> None:
         chunk_count = 0
+        published_frames = 0
         next_frame_at: float | None = None
         async for chunk in chunks:
             if self._stop_event.is_set():
@@ -223,6 +239,10 @@ class LiveKitWorker:
             if fps <= 0:
                 fps = float(self.config.default_fps)
             frame_interval = 1.0 / fps
+            if frames and published_frames == 0 and wait_for_delivery_ack:
+                height, width = frames[0].shape[:2]
+                await self.room_client.publish_video_track("telefuser-output", width, height, fps=fps)
+                await asyncio.sleep(_VIDEO_TRACK_SUBSCRIPTION_GRACE_SECONDS)
 
             for frame in frames:
                 if self._stop_event.is_set():
@@ -235,6 +255,7 @@ class LiveKitWorker:
                     await asyncio.sleep(delay)
                 await self.room_client.publish_video_frame(frame, fps=fps)
                 next_frame_at += frame_interval
+                published_frames += 1
 
             if audio is not None:
                 await self.room_client.publish_audio_frame(
@@ -266,8 +287,20 @@ class LiveKitWorker:
                 )
                 await self.room_client.publish_status(message.model_dump(mode="json"))
 
-        done = StreamDoneMessage(session_id=session_id, total_chunks=chunk_count).model_dump(mode="json")
+        done = StreamDoneMessage(
+            session_id=session_id,
+            total_chunks=chunk_count,
+            published_frames=published_frames,
+        ).model_dump(mode="json")
         await self.room_client.publish_status(done)
+        if wait_for_delivery_ack and published_frames and not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._delivery_ack_event.wait(), timeout=_DELIVERY_ACK_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                logger.warning(f"LiveKit delivery acknowledgement timed out: session={session_id}")
+        elif published_frames and not self._stop_event.is_set():
+            # VideoSource accepts frames before the underlying RTP sender has drained them.
+            await asyncio.sleep(_VIDEO_DRAIN_GRACE_SECONDS)
 
     async def _close_active_session(self) -> None:
         pipeline_session_id = self._pipeline_session_id
@@ -280,7 +313,7 @@ class LiveKitWorker:
                 self.room_client.disconnect(),
                 timeout=_ROOM_DISCONNECT_TIMEOUT_SECONDS,
             )
-        except TimeoutError:
+        except asyncio.TimeoutError:
             logger.warning(
                 f"LiveKit room disconnect timed out after {_ROOM_DISCONNECT_TIMEOUT_SECONDS:g}s: "
                 f"worker={self.worker_id}"

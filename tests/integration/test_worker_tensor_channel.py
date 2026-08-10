@@ -123,6 +123,9 @@ def test_discard_waits_for_every_consumer_rank() -> None:
 
     try:
         abandoned = producer.reduce(torch.arange(4, dtype=torch.float32), sync=True)
+        assert abandoned._cuda_payloads is not None
+        ref_counters = {(payload.handle[4], payload.handle[5]) for payload in abandoned._cuda_payloads}
+        assert len(ref_counters) == 2
         thread = threading.Thread(target=discard)
         thread.start()
         assert channel.rank_one_started.wait(timeout=10)

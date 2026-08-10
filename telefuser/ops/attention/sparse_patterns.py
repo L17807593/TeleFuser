@@ -128,7 +128,7 @@ def get_window_width(
 ) -> float:
     """Compute attention window width for frame pair (i, j)."""
     assert sparse_type in ["radial"], f"Unknown sparse type: {sparse_type}"
-    assert model_type in ["wan", "hunyuan"], f"Unknown model type: {model_type}"
+    assert model_type == "wan", f"Unknown model type: {model_type}"
 
     dist = abs(i - j)
     if dist <= 1:
@@ -499,7 +499,7 @@ def radial_attention(
         sparsity_type: "dense" or "radial".
         block_size: Block size (128 or 64).
         decay_factor: Window decay factor.
-        model_type: "wan" or "hunyuan".
+        model_type: Model architecture. Only `"wan"` is supported.
         pre_defined_mask: Text attention mask.
         use_sage_attention: Use SageAttention backend.
 
@@ -573,7 +573,7 @@ def sparse_attention(
         mask_map: Cached mask map.
         numeral_timestep: Current denoising timestep.
         layer_idx: Current transformer layer.
-        model_type: Model architecture ("wan" or "hunyuan").
+        model_type: Model architecture. Only `"wan"` is supported.
 
     Returns:
         Attention output tensor [B, S, H*D].

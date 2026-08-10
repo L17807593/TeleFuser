@@ -228,8 +228,6 @@ python examples/wan_video/wan21_1_3b_text_to_video_ada_taylor_cache.py \
 |----------|--------|------------|
 | Wan2.1 T2V 1.3B | `examples/wan_video/wan21_1_3b_text_to_video_cache_calibrate.py` | Wan2.1-T2V-1.3B |
 | Wan2.2 I2V A14B | `examples/wan_video/wan22_14b_image_to_video_cache_calibrate.py` | Wan2.2-I2V-A14B |
-| HunyuanVideo T2V | `examples/hunyuan_video/hunyuan_video_t2v_cache_calibrate.py` | HunyuanVideo-T2V |
-| HunyuanVideo I2V | `examples/hunyuan_video/hunyuan_video_i2v_cache_calibrate.py` | HunyuanVideo-I2V |
 | Qwen-Image T2I | `examples/qwen_image/qwen_image_cache_calibrate.py` | Qwen-Image |
 | Qwen-Image Edit | `examples/qwen_image/qwen_image_edit_plus_cache_calibrate.py` | Qwen-Image-Edit-Plus |
 | MiniMax H3 FL2VA | `examples/minimax_h3/minimax_h3_cache_calibrate.py` | MiniMax-H3-Base |

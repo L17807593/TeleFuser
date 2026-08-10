@@ -33,13 +33,13 @@ these versions before attributing a difference to code changes.
 | GPU | 4 x NVIDIA H100 80 GB HBM3 (SM90) |
 | NVIDIA driver | `590.48.01` |
 | Python | `3.11.13` |
-| PyTorch | `2.11.0+cu130` |
-| PyTorch CUDA runtime | `13.0` |
+| PyTorch | `2.11.0+cu128` |
+| PyTorch CUDA runtime | `12.8` |
 | FlashAttention 4 | `flash-attn-4==4.0.0b19` |
 | CUTLASS DSL | `nvidia-cutlass-dsl==4.6.0` |
 | CUDA Python | `cuda-python==13.3.1` |
 
-Create an isolated Python 3.11 environment and install the CUDA 13.0 PyTorch build from the wheel index used by
+Create an isolated Python 3.11 environment and install the CUDA 12.8 PyTorch build from the wheel index used by
 your deployment. Install PyTorch before TeleFuser so optional CUDA packages resolve against the intended ABI:
 
 ```bash
@@ -47,17 +47,16 @@ python3.11 -m venv .venv-lingbot
 source .venv-lingbot/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 
-# Install torch==2.11.0+cu130 from your CUDA 13.0 PyTorch wheel index first.
+# Install torch==2.11.0+cu128 from your CUDA 12.8 PyTorch wheel index first.
 python -m pip install -e ".[dev]"
 python -m pip install \
-  "flash-attn-4[cu13]==4.0.0b19" \
+  "flash-attn-4==4.0.0b19" \
   "nvidia-cutlass-dsl==4.6.0" \
   "cuda-python==13.3.1"
 ```
 
-The `cu13` extra installs FA4's CUDA 13 dependency variant. For a CUDA 12.8 PyTorch environment, install
-`flash-attn-4==4.0.0b19` without that extra and use matching CUDA 12.x dependencies; do not mix cu128 and cu130
-interpreters in one distributed run.
+The current AIPerf validation uses the CUDA 12.8 PyTorch build above. For a CUDA 13.0 PyTorch environment, install
+`flash-attn-4[cu13]==4.0.0b19` and matching CUDA 13 dependencies; do not mix cu128 and cu130 interpreters in one distributed run.
 
 Verify both the package versions and TeleFuser's runtime backend selection before benchmarking:
 
@@ -89,6 +88,7 @@ PY
 | Continuous chunked generation | ✔️ |
 | Single-GPU inference | ✔️ |
 | Ulysses Sequence Parallel | ✔️ |
+| Tensor Parallel (v2 DiT) | Configurable through `--tp_degree` offline or `PPL_CONFIG["tp_degree"]` for stream service |
 | FSDP | Configurable through PPL_CONFIG |
 | H100 optimized attention | v2: FA4, then FA3/SageAttention; v1: SageAttention |
 
@@ -125,25 +125,59 @@ python examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
     --v2_model_root "${TF_MODEL_ZOO_PATH}/lingbot/lingbot-world-v2-14b-causal-fast/transformers"
 ```
 
+### LingBot-World v2 Tensor Parallel
+
+For four H100 GPUs, the default v2 layout is `SP4 TP1`: all four DiT workers participate in Ulysses sequence parallelism and no DiT tensor sharding is applied. Use `--tp_degree 2` to run `SP2 TP2`, matching the MiniMax-H3 style 2-way sequence parallel plus 2-way tensor parallel layout. `tp_degree` must divide the DiT worker count selected by `--gpu_num`.
+
+```bash
+python examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
+    --gpu_num 4 \
+    --tp_degree 2 \
+    --model_root "${TF_MODEL_ZOO_PATH}/Wan2.2-I2V-A14B" \
+    --v2_model_root "${TF_MODEL_ZOO_PATH}/lingbot/lingbot-world-v2-14b-causal-fast/transformers"
+```
+
+The stream-server loader only passes `gpu_num` into `get_service()`. To serve with TP, set `PPL_CONFIG["tp_degree"] = 2` in this example or call `get_service(gpu_num=4, tp_degree=2)` from an explicit wrapper. This keeps the shared stream service API unchanged.
+
+The following direct pipeline-service benchmark uses 77 frames, five chunks, 832x480, BF16 DiT, FP32 VAE, FlashAttention 4, and excludes chunk 0 from the steady summary. `steady_compute_fps` includes target-side condition handling, DiT, clean-KV update, spatial VAE decode, GPU-to-CPU transfer, and frame conversion. `steady_denoise_gpu_fps` isolates the DiT denoise GPU span reported by the denoise worker.
+
+| DiT layout | Steady compute FPS | Steady denoise GPU FPS | Steady DMD step FPS | Denoise peak allocated | Denoise peak reserved |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `SP4 TP1` | 18.25 | 24.57 | 30.39 | 50.7 GiB | 57.1 GiB |
+| `SP2 TP2` | 16.22 | 20.93 | 25.71 | 34.9 GiB | 41.2 GiB |
+
+`SP2 TP2` reduces denoise peak allocated memory by about 31% and peak reserved memory by about 28%, with an 11% drop in steady service chunk FPS on this 77-frame run.
+
+Reproduce the same steady TP comparison with the benchmark harness:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+python tools/validation/benchmark_lingbot_world_v2_tp.py \
+    --tp-degree 2 \
+    --frame-num 77 \
+    --output work_dirs/lingbot_world_v2_sp2_tp2_steady.json \
+    --model-root "${TF_MODEL_ZOO_PATH}/Wan2.2-I2V-A14B" \
+    --v2-model-root "${TF_MODEL_ZOO_PATH}/lingbot/lingbot-world-v2-14b-causal-fast/transformers"
+```
+
 ### Validated Four-H100 Real-Time Gate
 
-Commit `540b579` was validated on 2026-08-03 with four H100 80 GB GPUs, PyTorch 2.11.0+cu128,
+The direct pipeline-service path was validated with four H100 80 GB GPUs, PyTorch 2.11.0+cu128,
 FlashAttention-4, BF16 DiT, FP32 VAE, disabled FSDP, and disabled `torch.compile`. The default 832x480
 request generated all 77 frames in five chunks at a 16 FPS playback target.
 
-| Metric | Result |
-| --- | ---: |
-| Steady compute FPS | **17.14** |
-| Steady chunk mean / p50 / p90 | 0.9335 / 0.9409 / 0.9410 s |
-| Slowest steady chunk | 1.0058 s |
-| Generated frames / chunks | 77 / 5 |
+| Revision / communication path | Steady compute FPS | Steady chunk mean / p50 / p90 | Slowest steady chunk | Generated frames / chunks |
+| --- | ---: | ---: | ---: | ---: |
+| `540b579` (2026-08-03) | 17.14 | 0.9335 / 0.9409 / 0.9410 s | 1.0058 s | 77 / 5 |
+| Current source, tagged Q/K/V Copy Engine Ulysses (2026-08-06) | **19.08** | **0.8385 / 0.8415 / 0.8706 s** | **0.9040 s** | 77 / 5 |
 
 The steady summary excludes chunk 0 and covers four 16-frame chunks. `compute_seconds` synchronizes all target CUDA
 devices and includes condition handling, DiT, clean-KV update, spatial VAE decode, GPU-to-CPU transfer, and frame
 conversion. It excludes model loading, runtime creation, LiveKit pacing/encoding, network delivery, and client
-rendering. The average therefore clears the 16 FPS target-side real-time gate, while the slowest chunk exceeds its
-one-second budget by 5.8 ms; treat this as a validated configuration, not a guarantee for other hardware, resolutions,
-durations, concurrent sessions, or transport conditions.
+rendering. The current source measurement used the local SM90 `tf-kernel` build with the CUDA IPC Copy Engine backend;
+its V transfer is issued before Q projection, Q before K projection, and K is the completion barrier. The current
+result clears the 16 FPS target-side real-time gate, but remains a point measurement rather than a guarantee for other
+hardware, resolutions, durations, concurrent sessions, or transport conditions.
 
 Reproduce the measured direct pipeline-service path without LiveKit or codec time:
 
@@ -161,6 +195,33 @@ python tools/validation/benchmark_lingbot_world_v2_direct.py \
 The offline CLI was also validated to produce an H.264 832x480 video containing all 77 frames. Use the
 [AIPerf benchmark guide](../../docs/en/benchmark_aiperf.md) for the one-minute workload, client delivery metrics,
 and comparisons that require identical environments.
+
+### Validated One-Minute AIPerf Replay
+
+The standard `stream_lingbot_world_v2_1min.json` workload was run on 2026-08-06 with the current source tree,
+AIPerf 0.11.0 at `e977ffbb1648510acec431b2a3fbd1a0f7bb8a35`, four H100 80 GB GPUs, and the tagged Q/K/V
+Copy Engine Ulysses path. The workload requests `delivery_mode=lossless`: target output uses FIFO backpressure,
+the sender declares its published-frame count, and the client confirms receipt before the LiveKit track closes. It
+requests 957 generated frames across 60 chunks (59.75 seconds of media), excludes chunk 0, and retains the
+28,080-token KV capacity from `local_attn_size=18` and `sink_size=6`.
+
+| Metric | AIPerf result |
+| --- | ---: |
+| Successful sessions | 1 / 1 |
+| Generated target frames / chunks | 957 / 60 |
+| Steady target frames / chunks after warmup | 944 / 59 |
+| Steady target compute time / FPS | 53.6901 s / **17.5824** |
+| Chunk compute mean / p50 / p90 / p99 / max | 0.9100 / 0.9088 / 0.9177 / 0.9751 / 1.0549 s |
+| LiveKit declared / decoded client frames | 958 / 961 |
+| Client callback FPS after first frame | 15.2313 |
+| First client frame / session runtime | 5.9822 / 79.2523 s |
+| Runtime creation | 1.4279 s |
+| Artifact | `20260806_132517_46419f8f` |
+
+The target-side compute rate clears the average 16 FPS gate. Lossless delivery completed after the client confirmed
+all 958 declared frames; the three additional decoder callbacks are transport-level callbacks and are separate
+from the 957 generated target frames.
+
 
 ## Usage
 

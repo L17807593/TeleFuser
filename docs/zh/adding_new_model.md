@@ -52,10 +52,10 @@ class MyCustomDiT(BaseModel):
 模型可以可选地实现 `from_pretrained` 类方法，以便在 pipeline 示例中方便地加载模型。该方法提供统一的模型加载接口：
 
 ```python
-# telefuser/models/hunyuan_video_text_encoder.py
+# telefuser/models/my_text_encoder.py
 
 class TextEncoder(nn.Module):
-    """Text encoder using LLM for HunyuanVideo."""
+    """Text encoder using LLM for MyVideo."""
 
     def __init__(
         self,
@@ -110,10 +110,10 @@ class TextEncoder(nn.Module):
 #### VAE 模型示例
 
 ```python
-# telefuser/models/hunyuan_video_vae.py
+# telefuser/models/my_video_vae.py
 
-class HunyuanVideoVAE(nn.Module):
-    """HunyuanVideo VAE for video encoding/decoding."""
+class MyVideoVAE(nn.Module):
+    """MyVideo VAE for video encoding/decoding."""
 
     @classmethod
     def from_pretrained(
@@ -121,8 +121,8 @@ class HunyuanVideoVAE(nn.Module):
         pretrained_model_name_or_path: str,
         torch_dtype: torch.dtype = torch.bfloat16,
         **kwargs,
-    ) -> "HunyuanVideoVAE":
-        """Load HunyuanVideoVAE from pretrained checkpoint.
+    ) -> "MyVideoVAE":
+        """Load MyVideoVAE from pretrained checkpoint.
 
         Args:
             pretrained_model_name_or_path: VAE 检查点目录路径
@@ -130,7 +130,7 @@ class HunyuanVideoVAE(nn.Module):
             **kwargs: 忽略未知参数以保持兼容性
 
         Returns:
-            加载完成的 HunyuanVideoVAE 实例
+            加载完成的 MyVideoVAE 实例
         """
         # 从 JSON 加载配置
         config_path = os.path.join(pretrained_model_name_or_path, "config.json")
@@ -246,11 +246,11 @@ python tools/viewer/weight_viewer.py /path/to/your/model.safetensors \
 python tools/viewer/weight_viewer.py "/path/to/model-*.safetensors" --quiet
 ```
 
-**注意**：在添加到 `model_config.py` 时，确保 hash 是基于**合并后的完整权重**计算的。
+**注意**：应在拥有该 checkpoint 格式的模型类旁注册基于**合并后的完整权重**计算的 hash。
 
-### 步骤 4：添加模型配置
+### 步骤 4：注册模型检测信息
 
-编辑 `telefuser/core/model_config.py`，添加模型配置。
+在定义 `MyCustomDiT` 的模块中添加注册。`ModelRegistry` 会自动发现该模块，因此不要把注册放进集中的列表，也不需要在 `telefuser.models.__init__` 中手动导入模型。
 
 首先，从 weight_viewer 输出中获取信息：
 
@@ -262,24 +262,21 @@ Files: 1
 hash with shape: a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
 ```
 
-然后添加配置：
+然后添加注册：
 
 ```python
-from ..models.my_custom_dit import MyCustomDiT
+# telefuser/models/my_custom_dit.py
+from telefuser.core.model_registry import register_model_config
 
-model_loader_configs = [
-    # ... 现有配置 ...
-    
-    # MyCustomDiT - Standard version (from weight_viewer: hash=a1b2c3d4...)
-    # Parameters: 6.91B
-    (
-        None,                                  # hash without shape (可选，用于非严格匹配)
-        "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",   # hash with shape（来自 weight_viewer）
-        ["my_custom_dit"],                     # model_name（用于 fetch_module）
-        [MyCustomDiT],                         # model_class
-        "official",                             # model_resource: "official" 或 "diffusers"
-    ),
-]
+# MyCustomDiT - Standard version (from weight_viewer: hash=a1b2c3d4...)
+# Parameters: 6.91B
+register_model_config(
+    None,                                  # hash without shape（可选，用于非严格匹配）
+    "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",   # hash with shape（来自 weight_viewer）
+    ["my_custom_dit"],                     # model name（用于 fetch_module()）
+    [MyCustomDiT],                         # model class
+    "official",                           # source format: "official" 或 "diffusers"
+)
 ```
 
 #### 添加多个变体
@@ -295,32 +292,20 @@ Files: 1
 hash with shape: b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7  # 不同的 hash！
 ```
 
-添加到配置：
+在模型类旁为每个变体注册：
 
 ```python
-    # MyCustomDiT - Standard version (hash: a1b2c3d4...)
-    (
-        None,
-        "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
-        ["my_custom_dit"],
-        [MyCustomDiT],
-        "official",
-    ),
-    
-    # MyCustomDiT - FP8 version (hash: b2c3d4e5...) 
-    # Note: FP8 quantized weights
-    (
-        None,
-        "b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7",
-        ["my_custom_dit"],
-        [MyCustomDiT],
-        "official",
-    ),
+# MyCustomDiT - Standard version (hash: a1b2c3d4...)
+register_model_config(None, "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6", ["my_custom_dit"], [MyCustomDiT], "official")
+
+# MyCustomDiT - FP8 version (hash: b2c3d4e5...)
+# Note: FP8 quantized weights
+register_model_config(None, "b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7", ["my_custom_dit"], [MyCustomDiT], "official")
 ```
 
 **提示**：如果变体的 tensor shape 不同（如 pruned 模型），考虑使用非严格匹配（仅使用 `keys_hash`）。
 
-配置字段说明：
+注册字段说明：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -335,7 +320,7 @@ hash with shape: b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7  # 不同的 hash！
 创建测试脚本验证模型加载：
 
 ```python
-# tests/test_my_custom_model_loading.py
+# tests/unit/models/test_my_custom_model_loading.py
 import torch
 import pytest
 from telefuser.core.module_manager import ModuleManager
@@ -367,7 +352,7 @@ if __name__ == "__main__":
 运行测试：
 
 ```bash
-pytest tests/test_my_custom_model_loading.py -v
+pytest tests/unit/models/test_my_custom_model_loading.py -v
 ```
 
 ## 在 Pipeline 示例中使用模型
@@ -381,8 +366,8 @@ import os
 import torch
 from telefuser.utils.logging import logger
 from telefuser.core.module_manager import ModuleManager
-from telefuser.models.hunyuan_video_vae import HunyuanVideoVAE
-from telefuser.models.hunyuan_video_text_encoder import HunyuanVideoTextEncoder
+from telefuser.models.my_video_vae import MyVideoVAE
+from telefuser.models.my_text_encoder import MyTextEncoder
 
 def get_pipeline(model_root: str = "/path/to/models"):
     """创建并初始化包含所有模型的 pipeline。"""
@@ -391,21 +376,21 @@ def get_pipeline(model_root: str = "/path/to/models"):
     # 1. 使用 from_pretrained 加载 VAE
     vae_path = os.path.join(model_root, "vae")
     logger.info(f"Loading VAE from {vae_path}")
-    vae = HunyuanVideoVAE.from_pretrained(vae_path, torch_dtype=torch.bfloat16)
+    vae = MyVideoVAE.from_pretrained(vae_path, torch_dtype=torch.bfloat16)
     module_manager.add_module(vae, name="vae")
 
     # 2. 使用 from_pretrained 加载 TextEncoder
     text_encoder_path = os.path.join(model_root, "text_encoder", "llm")
     logger.info(f"Loading TextEncoder from {text_encoder_path}")
-    text_encoder = HunyuanVideoTextEncoder.from_pretrained(text_encoder_path, torch_dtype=torch.bfloat16)
+    text_encoder = MyTextEncoder.from_pretrained(text_encoder_path, torch_dtype=torch.bfloat16)
     module_manager.add_module(text_encoder, name="text_encoder")
 
     # 3. 其他模型类似加载...
-    # transformer = HunyuanVideoDiT.from_pretrained(transformer_path, torch_dtype=torch.bfloat16)
-    # module_manager.add_module(transformer, name="hunyuan_video_dit")
+    # transformer = MyCustomDiT.from_pretrained(transformer_path, torch_dtype=torch.bfloat16)
+    # module_manager.add_module(transformer, name="my_custom_dit")
 
     # 4. 创建并初始化 pipeline
-    # pipe = HunyuanVideo15Pipeline(device="cuda", torch_dtype=torch.bfloat16)
+    # pipe = MyVideoPipeline(device="cuda", torch_dtype=torch.bfloat16)
     # pipe.init(module_manager, pipe_config)
 
     return pipe
@@ -415,18 +400,18 @@ def get_pipeline(model_root: str = "/path/to/models"):
 
 1. **所有模型使用 `from_pretrained` 加载** - 提供一致的接口
 2. **只对外暴露模型路径** - 所有其他参数应为内部默认值
-3. **使用有意义的名称调用 `add_module`** - 如 `"vae"`、`"text_encoder"`、`"hunyuan_video_dit"` 等，pipeline stages 使用这些名称获取模块
+3. **使用有意义的名称调用 `add_module`** - 如 `"vae"`、`"text_encoder"`、`"my_custom_dit"` 等，pipeline stages 使用这些名称获取模块
 4. **由 stage 处理运行时设置** - 分块、切片等运行时配置应由 pipeline stage 处理，而非模型初始化时
 
 ### 模块命名规范
 
 | 模块类型 | 推荐名称 | 使用方 |
 |---------|---------|--------|
-| VAE | `"vae"` | `HunyuanVideoVAEStage` |
-| Text Encoder | `"text_encoder"` | `HunyuanVideoTextEncodingStage` |
-| DiT/Transformer | `"hunyuan_video_dit"` | `HunyuanVideoDenoisingStage` |
-| Vision Encoder (I2V) | `"vision_encoder"` | `HunyuanVideoImageEncodingStage` |
-| Upsampler (SR) | `"upsampler"` | `HunyuanVideoUpsamplerStage` |
+| VAE | `"vae"` | `MyVideoVAEStage` |
+| Text Encoder | `"text_encoder"` | `MyVideoTextEncodingStage` |
+| DiT/Transformer | `"my_custom_dit"` | `MyVideoDenoisingStage` |
+| Vision Encoder (I2V) | `"vision_encoder"` | `MyVideoImageEncodingStage` |
+| Upsampler (SR) | `"upsampler"` | `MyVideoUpsamplerStage` |
 | Scheduler | `"scheduler"` | Pipeline init |
 
 ## 特殊情况处理
@@ -514,8 +499,8 @@ python tools/viewer/weight_viewer.py /path/to/model.safetensors --export model_i
 ### 2. 检查 hash 匹配过程
 
 ```python
-from telefuser.utils.model_weight import load_state_dict, hash_state_dict_keys
-from telefuser.core.model_config import model_loader_configs
+from telefuser.core.model_registry import ModelRegistry
+from telefuser.utils.model_weight import hash_state_dict_keys, load_state_dict
 
 sd = load_state_dict("/path/to/model.safetensors")
 hash_with_shape = hash_state_dict_keys(sd, with_shape=True)
@@ -524,9 +509,9 @@ hash_without_shape = hash_state_dict_keys(sd, with_shape=False)
 print(f"Model hash (with shape): {hash_with_shape}")
 print(f"Model hash (without shape): {hash_without_shape}")
 
-# 检查是否在配置中
+# 检查自动发现的注册是否匹配
 found = False
-for config in model_loader_configs:
+for config in ModelRegistry.instance().get_configs():
     keys_hash, keys_hash_with_shape, model_names, model_classes, resource = config
     if keys_hash_with_shape == hash_with_shape:
         print(f"✓ Found match (strict): {model_names}")
@@ -536,9 +521,9 @@ for config in model_loader_configs:
         found = True
 
 if not found:
-    print("✗ No matching configuration found!")
-    print(f"Add this to model_config.py:")
-    print(f'    (None, "{hash_with_shape}", ["your_model_name"], [YourModelClass], "official"),')
+    print("✗ No matching registration found!")
+    print("Add this beside the model class:")
+    print(f'register_model_config(None, "{hash_with_shape}", ["your_model_name"], [YourModelClass], "official")')
 ```
 
 ### 3. 验证转换器输出
@@ -569,15 +554,15 @@ from telefuser.core.module_manager import ModuleManager
 mm = ModuleManager(device='cpu')
 mm.load_model('/path/to/your/model.safetensors')
 print('✓ Configuration is correct!')
-print(f'Loaded models: {mm.module_name}')
+print(f'Loaded models: {mm.module_names}')
 "
 ```
 
 ## 最佳实践
 
-1. **保持配置有序**
-   - 按模型类型分组
-   - 同一模型的不同变体放在一起
+1. **将注册和模型类放在一起**
+   - 每个 `register_model_config()` 调用都应位于拥有相应类的模块中
+   - 将同一 checkpoint 格式的变体放在一起
    - 添加注释说明版本差异
 
 2. **使用严格匹配优先**
@@ -588,13 +573,13 @@ print(f'Loaded models: {mm.module_name}')
    ```python
      # Wan2.1 T2V 14B - FP8 per-channel quantized
      # Note: This version has scaled weights for FP8 inference
-     (
+     register_model_config(
          None,
          "4cf556355bc7e9b6545b38f4930f60b1",
          ["wan_video_dit"],
          [WanModel],
          "official",
-     ),
+     )
    ```
 
 4. **测试所有变体**
@@ -623,7 +608,7 @@ print(f'Loaded models: {mm.module_name}')
 参考以下文件了解完整实现：
 
 - 模型实现：`telefuser/models/wan_video_dit.py`
-- 配置定义：`telefuser/core/model_config.py`（WanModel 相关配置）
+- 模型注册：`telefuser/models/wan_video_dit.py` 末尾的 `register_model_config()` 调用
 - 使用示例：`examples/wan_video/wan21_14b_image_to_video_h100.py`
 
 ## 优化模型推理

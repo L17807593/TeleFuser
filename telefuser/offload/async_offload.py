@@ -6,7 +6,6 @@ Provides non-blocking H2D transfers and GPU buffer pooling.
 
 from __future__ import annotations
 
-import math
 from itertools import chain
 from typing import Any, Dict, List, Set, Tuple
 
@@ -42,20 +41,24 @@ class AsyncOffloadManager:
         self.layers = layers
         self.num_layers = len(layers)
         self.pin_cpu_memory = pin_cpu_memory
-        self.prefetch_size = min(max(1, prefetch_size), self.num_layers)
-        self.num_resident_layers = min(
-            max(self.prefetch_size, int(self.num_layers * (1 - offload_ratio))), self.num_layers
-        )
+        self.prefetch_size = min(max(1, prefetch_size), self.num_layers) if self.num_layers else 0
+        offload_ratio = min(max(float(offload_ratio), 0.0), 1.0)
+        self.num_resident_layers = min(max(0, int(self.num_layers * (1 - offload_ratio))), self.num_layers)
+        self._resident_layers = self._build_resident_layers()
+        self._resident_layer_set = set(self._resident_layers)
+        self._nonresident_layers = [i for i in range(self.num_layers) if i not in self._resident_layer_set]
         self.lazy_gpu_cache = lazy_gpu_cache
 
-        self.enabled = bool(enabled and torch.cuda.is_available())
-        if not self.enabled:
-            return
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.copy_stream = torch.cuda.Stream() if self.device.type == "cuda" else None
+        self.enabled = bool(enabled and torch.cuda.is_available())
+        if self.device.type != "cuda":
+            self.enabled = False
+        self.copy_stream = torch.cuda.Stream(device=self.device) if self.enabled else None
 
         # layer_idx -> {dtype: consolidated_pinned_cpu_tensor}
         self._consolidated_cpu_weights: Dict[int, Dict[torch.dtype, torch.Tensor]] = {}
+        # dtype -> one contiguous CPU allocation containing all layer segments
+        self._packed_cpu_weights: Dict[torch.dtype, torch.Tensor] = {}
         # layer_idx -> {name: {dtype, offset, numel, shape}}
         self._weight_metadata: Dict[int, Dict[str, Dict[str, Any]]] = {}
         # layer indices that are already in gpu
@@ -72,8 +75,26 @@ class AsyncOffloadManager:
         self._named_parameters: Dict[str, torch.nn.Parameter] = {}
         self._named_buffers: Dict[str, torch.Tensor] = {}
         self._forward_hooks: List[Any] = []
+        self._empty_weight_placeholders: Dict[torch.dtype, torch.Tensor] = {}
+        self._allow_unbounded_gpu_alloc = False
+        self._active = False
 
-        self._initialize()
+        if self.enabled:
+            self._initialize()
+
+    def _build_resident_layers(self) -> list[int]:
+        """Select resident layers uniformly across the execution order."""
+        if self.num_resident_layers == 0:
+            return []
+        if self.num_resident_layers == self.num_layers:
+            return list(range(self.num_layers))
+        if self.num_resident_layers == 1:
+            return [0]
+
+        indices = {
+            round(i * (self.num_layers - 1) / (self.num_resident_layers - 1)) for i in range(self.num_resident_layers)
+        }
+        return sorted(indices)
 
     @torch.compiler.disable
     def _initialize(self) -> None:
@@ -106,15 +127,28 @@ class AsyncOffloadManager:
                 except ValueError:
                     continue
 
-        # 2. concat and offload (in pinned memory)
+        # 2. Pack each dtype into one contiguous pinned CPU allocation. Each
+        # layer remains addressable through a view for compatibility with the
+        # existing sync and inspection APIs.
+        dtype_totals: Dict[torch.dtype, int] = {}
+        for dtype_to_params in layer_groups.values():
+            for dtype, weights in dtype_to_params.items():
+                dtype_totals[dtype] = dtype_totals.get(dtype, 0) + sum(t.numel() for _, t in weights)
+
+        for dtype, total_numel in dtype_totals.items():
+            self._packed_cpu_weights[dtype] = torch.empty(total_numel, dtype=dtype, pin_memory=self.pin_cpu_memory)
+            self._empty_weight_placeholders[dtype] = torch.empty((1,), device=self.device, dtype=dtype)
+
+        dtype_offsets = {dtype: 0 for dtype in dtype_totals}
         for layer_idx, dtype_to_params in layer_groups.items():
             self._consolidated_cpu_weights[layer_idx] = {}
             self._weight_metadata[layer_idx] = {}
 
             for dtype, weights in dtype_to_params.items():
                 total_numel = sum(t.numel() for _, t in weights)
-
-                cpu_buffer = torch.empty(total_numel, dtype=dtype, pin_memory=self.pin_cpu_memory)
+                layer_offset = dtype_offsets[dtype]
+                cpu_buffer = self._packed_cpu_weights[dtype][layer_offset : layer_offset + total_numel]
+                self._consolidated_cpu_weights[layer_idx][dtype] = cpu_buffer
 
                 current_offset = 0
                 for name, weight in weights:
@@ -125,20 +159,27 @@ class AsyncOffloadManager:
                         "offset": current_offset,
                         "numel": numel,
                         "shape": weight.shape,
+                        "stride": weight.stride(),
+                        "target": weight,
                     }
-
-                    weight.data = torch.empty((1,), device=self.device, dtype=dtype)
-
+                    weight.data = self._empty_weight_placeholders[dtype]
                     current_offset += numel
 
-                self._consolidated_cpu_weights[layer_idx][dtype] = cpu_buffer
+                dtype_offsets[dtype] += total_numel
 
         # Initialize GPU buffer pool
         if not self.lazy_gpu_cache:
             self._initialize_gpu_buffer_pool()
 
-        # prefetch the first layer for warm-up
-        self.prepare_for_next_req(non_blocking=False)
+        # Lazy mode keeps the reusable pool and first non-resident window
+        # unallocated until the first forward.
+        if self.lazy_gpu_cache:
+            for layer_idx in self._resident_layers:
+                self.prefetch_layer(layer_idx, non_blocking=False)
+            if self.copy_stream is not None:
+                torch.cuda.current_stream(self.device).wait_stream(self.copy_stream)
+        else:
+            self.prepare_for_next_req(non_blocking=False)
 
         self.register_forward_hooks()
         logger.info(
@@ -151,20 +192,25 @@ class AsyncOffloadManager:
         if not self.enabled or self.device is None or self.device.type != "cuda":
             return
 
+        if self._gpu_buffer_pool:
+            return
+
         buffer_sizes_by_dtype: Dict[torch.dtype, int] = {}
 
-        for layer_idx in range(self.num_layers):
+        for layer_idx in self._nonresident_layers:
             if layer_idx in self._consolidated_cpu_weights:
                 for dtype, cpu_buffer in self._consolidated_cpu_weights[layer_idx].items():
                     current_max = buffer_sizes_by_dtype.get(dtype, 0)
                     buffer_sizes_by_dtype[dtype] = max(current_max, cpu_buffer.numel())
+
+        pool_slots = min(2 * self.prefetch_size, len(self._nonresident_layers))
 
         for dtype, max_size in buffer_sizes_by_dtype.items():
             if max_size > 0:
                 self._gpu_buffer_pool[dtype] = []
                 self._gpu_buffer_sizes[dtype] = []
 
-                for _ in range(2 * self.prefetch_size):
+                for _ in range(pool_slots):
                     buffer = torch.empty(max_size, dtype=dtype, device=self.device)
                     self._gpu_buffer_pool[dtype].append(buffer)
                     self._gpu_buffer_sizes[dtype].append(max_size)
@@ -187,10 +233,12 @@ class AsyncOffloadManager:
 
     def prepare_for_next_req(self, non_blocking: bool = True) -> None:
         """Prepare for the next round of denoising loop with prefetching."""
-        for i in range(self.num_resident_layers):
+        for i in self._resident_layers:
+            self.prefetch_layer(i, non_blocking=non_blocking)
+        for i in self._nonresident_layers[: self.prefetch_size]:
             self.prefetch_layer(i, non_blocking=non_blocking)
         if not non_blocking and self.copy_stream is not None:
-            torch.cuda.current_stream().wait_stream(self.copy_stream)
+            torch.cuda.current_stream(self.device).wait_stream(self.copy_stream)
 
     def get_target_with_name(self, name: str) -> torch.Tensor:
         """Get the target model weight/buffer to be replaced."""
@@ -217,16 +265,22 @@ class AsyncOffloadManager:
         if layer_idx not in self._consolidated_cpu_weights:
             return
 
-        self._ensure_gpu_buffer_pool_initialized()
+        if layer_idx not in self._resident_layer_set:
+            self._ensure_gpu_buffer_pool_initialized()
 
         gpu_buffers: Dict[torch.dtype, torch.Tensor] = {}
         with torch.cuda.stream(self.copy_stream):
             for dtype, cpu_buffer in self._consolidated_cpu_weights[layer_idx].items():
-                if layer_idx < self.num_resident_layers:
+                if layer_idx in self._resident_layer_set:
                     gpu_buffer = torch.empty(cpu_buffer.shape, dtype=dtype, device=self.device)
                 else:
                     gpu_buffer, ready_event = self._get_gpu_buffer(dtype, cpu_buffer.numel())
                     if gpu_buffer is None:
+                        if not self._allow_unbounded_gpu_alloc:
+                            raise RuntimeError(
+                                "Async offload GPU ring is exhausted; the layer execution order exceeded "
+                                "the configured prefetch window"
+                            )
                         gpu_buffer = torch.empty(cpu_buffer.shape, dtype=dtype, device=self.device)
                     elif ready_event is not None:
                         self.copy_stream.wait_event(ready_event)
@@ -238,10 +292,12 @@ class AsyncOffloadManager:
                     gpu_buffer_slice.copy_(cpu_buffer, non_blocking=non_blocking)
                 gpu_buffers[dtype] = gpu_buffer
 
-                if layer_idx >= self.num_resident_layers:
+                if layer_idx not in self._resident_layer_set:
                     self._layer_to_gpu_buffer.setdefault(layer_idx, {})[dtype] = gpu_buffer
 
-        event = torch.cuda.Event()
+        event = self._prefetch_events.get(layer_idx)
+        if event is None:
+            event = torch.cuda.Event()
         event.record(self.copy_stream)
         self._prefetch_events[layer_idx] = event
 
@@ -249,7 +305,7 @@ class AsyncOffloadManager:
             dtype = meta["dtype"]
             gpu_buffer = gpu_buffers[dtype]
 
-            target = self.get_target_with_name(name)
+            target = meta["target"]
             target.data = gpu_buffer[meta["offset"] : meta["offset"] + meta["numel"]].view(meta["shape"])
 
         self._gpu_layers.add(layer_idx)
@@ -260,24 +316,23 @@ class AsyncOffloadManager:
         if not self.enabled or self.device is None:
             return
 
-        self._prefetch_events.pop(layer_idx, None)
-
-        if layer_idx < self.num_resident_layers:
+        if layer_idx in self._resident_layer_set:
             return
 
         if layer_idx not in self._gpu_layers:
             return
 
-        if layer_idx >= self.num_resident_layers and layer_idx in self._layer_to_gpu_buffer:
-            for dtype, gpu_buffer in self._layer_to_gpu_buffer[layer_idx].items():
-                compute_done = torch.cuda.Event()
-                compute_done.record(torch.cuda.current_stream(self.device))
+        if layer_idx in self._layer_to_gpu_buffer:
+            layer_buffers = self._layer_to_gpu_buffer[layer_idx]
+            compute_done = torch.cuda.Event()
+            compute_done.record(torch.cuda.current_stream(self.device))
+            for dtype, gpu_buffer in layer_buffers.items():
                 self._return_gpu_buffer(dtype, gpu_buffer, ready_event=compute_done)
             del self._layer_to_gpu_buffer[layer_idx]
 
         for name, meta in self._weight_metadata.get(layer_idx, {}).items():
-            target = self.get_target_with_name(name)
-            target.data = torch.empty((1,), device=self.device, dtype=meta["dtype"])
+            target = meta["target"]
+            target.data = self._empty_weight_placeholders[meta["dtype"]]
 
         self._gpu_layers.discard(layer_idx)
 
@@ -315,10 +370,10 @@ class AsyncOffloadManager:
         if not self.enabled or self.device is None:
             return
         if self.copy_stream is not None:
-            torch.cuda.current_stream().wait_stream(self.copy_stream)
+            torch.cuda.current_stream(self.device).wait_stream(self.copy_stream)
 
         for layer_idx in list(self._gpu_layers):
-            if layer_idx >= self.num_resident_layers:
+            if layer_idx not in self._resident_layer_set:
                 self.release_layer(layer_idx)
 
         for layer_idx in list(self._layer_to_gpu_buffer.keys()):
@@ -331,11 +386,15 @@ class AsyncOffloadManager:
         if not self.enabled or self.device is None:
             return
         if self.copy_stream is not None:
-            torch.cuda.current_stream().wait_stream(self.copy_stream)
+            torch.cuda.current_stream(self.device).wait_stream(self.copy_stream)
 
-        for layer_idx in range(self.num_layers):
-            if layer_idx not in self._gpu_layers:
-                self.prefetch_layer(layer_idx, non_blocking=False)
+        self._allow_unbounded_gpu_alloc = True
+        try:
+            for layer_idx in range(self.num_layers):
+                if layer_idx not in self._gpu_layers:
+                    self.prefetch_layer(layer_idx, non_blocking=False)
+        finally:
+            self._allow_unbounded_gpu_alloc = False
 
     @torch.compiler.disable
     def sync_layer_to_cpu(self, layer_idx: int) -> None:
@@ -346,10 +405,10 @@ class AsyncOffloadManager:
             return
 
         if self.copy_stream is not None:
-            torch.cuda.current_stream().wait_stream(self.copy_stream)
+            torch.cuda.current_stream(self.device).wait_stream(self.copy_stream)
 
         for name, meta in self._weight_metadata.get(layer_idx, {}).items():
-            target = self.get_target_with_name(name)
+            target = meta["target"]
             gpu_weight = target.data.flatten().cpu()
 
             dtype = meta["dtype"]
@@ -364,26 +423,42 @@ class AsyncOffloadManager:
         if not self.enabled or self.device is None:
             return
         if self.copy_stream is not None:
-            torch.cuda.current_stream().wait_stream(self.copy_stream)
+            torch.cuda.current_stream(self.device).wait_stream(self.copy_stream)
 
         for layer_idx in list(self._gpu_layers):
-            if layer_idx >= self.num_resident_layers:
-                self.sync_layer_to_cpu(layer_idx)
+            self.sync_layer_to_cpu(layer_idx)
+
+    def _next_nonresident_layers(self, layer_idx: int) -> list[int]:
+        """Return the next non-resident prefetch window in execution order."""
+        if not self._nonresident_layers or not self.prefetch_size:
+            return []
+
+        result: list[int] = []
+        for distance in range(1, self.num_layers + 1):
+            candidate = (layer_idx + distance) % self.num_layers
+            if candidate in self._resident_layer_set:
+                continue
+            result.append(candidate)
+            if len(result) == self.prefetch_size:
+                break
+        return result
 
     def register_forward_hooks(self) -> None:
         """Register forward hooks for automatic prefetch/release."""
         if not self.enabled:
             return
+        if self._forward_hooks:
+            self.remove_forward_hooks()
 
         def make_pre_hook(i: int):
             def hook(module: torch.nn.Module, input: tuple[Any, ...]) -> None:
+                if i not in self._gpu_layers:
+                    self.prefetch_layer(i, non_blocking=True)
                 if i in self._prefetch_events:
-                    torch.cuda.current_stream().wait_event(self._prefetch_events[i])
+                    torch.cuda.current_stream(self.device).wait_event(self._prefetch_events[i])
 
-                if i % self.prefetch_size == 0:
-                    for j in range(i + self.prefetch_size, i + 2 * self.prefetch_size):
-                        layer_to_prefetch = j % self.num_layers
-                        self.prefetch_layer(layer_to_prefetch, non_blocking=True)
+                for layer_to_prefetch in self._next_nonresident_layers(i):
+                    self.prefetch_layer(layer_to_prefetch, non_blocking=True)
 
             return hook
 
@@ -393,24 +468,26 @@ class AsyncOffloadManager:
 
             return hook
 
-        self._forward_hooks.clear()
         for i, layer in enumerate(self.layers):
             pre_hook_handle = layer.register_forward_pre_hook(make_pre_hook(i))
-            post_hook_handle = layer.register_forward_hook(make_post_hook(i))
+            post_hook_handle = layer.register_forward_hook(make_post_hook(i), always_call=True)
             self._forward_hooks.extend([pre_hook_handle, post_hook_handle])
+        self._active = True
 
     def remove_forward_hooks(self) -> None:
         """Remove all registered forward hooks."""
         for hook_handle in self._forward_hooks:
             hook_handle.remove()
         self._forward_hooks.clear()
+        self._active = False
 
     def disable_offload(self) -> None:
         """Disable layerwise offload: load all layers to GPU and remove hooks."""
-        if self.enabled:
-            self.remove_forward_hooks()
-            self.load_all_layers()
-            self._cleanup_gpu_buffer_pool()
+        if not self.enabled or not self._active:
+            return
+        self.remove_forward_hooks()
+        self.load_all_layers()
+        self._cleanup_gpu_buffer_pool()
 
     def _cleanup_gpu_buffer_pool(self) -> None:
         """Clean up GPU buffer pool."""
@@ -421,7 +498,11 @@ class AsyncOffloadManager:
 
     def enable_offload(self) -> None:
         """Re-enable layerwise offload."""
-        if self.enabled:
-            self.sync_all_layers_to_cpu()
-            self.release_all()
-            self.register_forward_hooks()
+        if not self.enabled or self._active:
+            return
+        self.sync_all_layers_to_cpu()
+        self.release_all()
+        if not self.lazy_gpu_cache:
+            self._initialize_gpu_buffer_pool()
+        self.prepare_for_next_req(non_blocking=False)
+        self.register_forward_hooks()

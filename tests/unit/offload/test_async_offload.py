@@ -37,6 +37,15 @@ class PerformanceLayer(torch.nn.Module):
         return torch.nn.functional.linear(x, self.weight, self.bias)
 
 
+class MixedDtypeLayer(torch.nn.Module):
+    """Layer with the same structure but multiple weight and buffer dtypes."""
+
+    def __init__(self, size=16):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.randn(size, size, dtype=torch.bfloat16))
+        self.register_buffer("scale", torch.ones(size, dtype=torch.float32))
+
+
 @pytest.fixture
 def test_layers():
     """Create test layers with reproducible initialization."""
@@ -61,7 +70,7 @@ class TestAsyncOffloadInitialization:
         assert manager.pin_cpu_memory
         assert manager.device.type == "cuda"
         assert manager.copy_stream is not None
-        assert 0 in manager._gpu_layers  # Resident layer loaded
+        assert 0 in manager._gpu_layers  # Initial non-resident window loaded
 
     def test_initialization_with_device(self, test_layers):
         """Test initialization with explicit device."""
@@ -79,7 +88,30 @@ class TestAsyncOffloadInitialization:
         """Test lazy_gpu_cache initialization option."""
         manager = AsyncOffloadManager(test_layers, lazy_gpu_cache=lazy_cache)
         assert manager.lazy_gpu_cache == lazy_cache
-        assert len(manager._gpu_buffer_pool) > 0
+        assert bool(manager._gpu_buffer_pool) is not lazy_cache
+
+    def test_uniform_resident_layer_selection(self):
+        """Resident blocks should be spread across the execution sequence."""
+        layers = torch.nn.ModuleList([TestLayer(16, 16) for _ in range(8)])
+        manager = AsyncOffloadManager(layers, offload_ratio=0.5, prefetch_size=2)
+
+        assert manager.num_resident_layers == 4
+        assert manager._resident_layers == [0, 2, 5, 7]
+        assert manager._resident_layer_set.issubset(manager._gpu_layers)
+
+    def test_mixed_dtype_weights_share_packed_cpu_allocations(self):
+        """Each dtype should use one CPU allocation across all blocks."""
+        layers = torch.nn.ModuleList([MixedDtypeLayer() for _ in range(4)])
+        manager = AsyncOffloadManager(layers, offload_ratio=1.0)
+
+        assert set(manager._packed_cpu_weights) == {torch.bfloat16, torch.float32}
+        for dtype in (torch.bfloat16, torch.float32):
+            packed_ptr = manager._packed_cpu_weights[dtype].untyped_storage().data_ptr()
+            layer_ptrs = {
+                manager._consolidated_cpu_weights[layer_idx][dtype].untyped_storage().data_ptr()
+                for layer_idx in range(4)
+            }
+            assert layer_ptrs == {packed_ptr}
 
 
 class TestAsyncOffloadPrefetchRelease:
@@ -89,7 +121,7 @@ class TestAsyncOffloadPrefetchRelease:
         """Test basic prefetch and release functionality."""
         manager = AsyncOffloadManager(test_layers)
 
-        # Initially only layer 0 should be on GPU (resident layer)
+        # The first non-resident prefetch window is ready for execution.
         assert manager._gpu_layers == {0}
 
         # Prefetch layer 1 (non-resident layer)
@@ -101,9 +133,9 @@ class TestAsyncOffloadPrefetchRelease:
         manager.release_layer(1)
         assert manager._gpu_layers == {0}
 
-        # Layer 0 (resident layer) cannot be released
+        # With offload_ratio=1.0 no layer is permanently resident.
         manager.release_layer(0)
-        assert manager._gpu_layers == {0}
+        assert manager._gpu_layers == set()
 
     def test_invalid_layer_handling(self, test_layers):
         """Test handling of invalid layer indices."""
@@ -128,7 +160,7 @@ class TestAsyncOffloadPrefetchRelease:
         assert set(range(expected_resident_layers)).issubset(manager._gpu_layers)
 
     def test_prefetch_events(self, test_layers):
-        """Test that prefetch events are recorded and cleared."""
+        """Test that prefetch events are recorded and retained for reuse."""
         manager = AsyncOffloadManager(test_layers)
 
         assert 0 in manager._prefetch_events
@@ -138,7 +170,7 @@ class TestAsyncOffloadPrefetchRelease:
         assert isinstance(manager._prefetch_events[1], torch.cuda.Event)
 
         manager.release_layer(1)
-        assert 1 not in manager._prefetch_events
+        assert 1 in manager._prefetch_events
 
     def test_reused_buffer_waits_for_its_compute_stream(self, test_layers):
         """Test that a reused H2D buffer depends on its prior compute work."""
@@ -164,7 +196,7 @@ class TestAsyncOffloadPrefetchRelease:
         manager = AsyncOffloadManager(test_layers)
 
         manager.release_all()
-        assert manager._gpu_layers == {0}
+        assert manager._gpu_layers == set()
 
         manager.prepare_for_next_req(non_blocking=False)
         assert 0 in manager._gpu_layers
@@ -175,7 +207,7 @@ class TestAsyncOffloadOperations:
 
     def test_synchronous_operations(self, test_layers):
         """Test that computation and offload operations run synchronously."""
-        manager = AsyncOffloadManager(test_layers)
+        manager = AsyncOffloadManager(test_layers, prefetch_size=2)
         x = torch.randn(4, 128).cuda()
 
         manager.prefetch_layer(1, non_blocking=False)
@@ -204,7 +236,7 @@ class TestAsyncOffloadMemory:
 
     def test_gpu_buffer_pool_management(self, test_layers):
         """Test GPU buffer pool management functionality."""
-        manager = AsyncOffloadManager(test_layers)
+        manager = AsyncOffloadManager(test_layers, prefetch_size=2)
 
         manager.prefetch_layer(1, non_blocking=False)
         manager.prefetch_layer(2, non_blocking=False)
@@ -229,7 +261,7 @@ class TestAsyncOffloadMemory:
         assert len(manager._gpu_layers) == 5
 
         manager.release_all()
-        assert manager._gpu_layers == {0}
+        assert manager._gpu_layers == set()
 
     def test_cleanup_and_reallocate_cycle(self, test_layers):
         """Test cleanup and reallocate cycle for memory management."""
@@ -244,7 +276,18 @@ class TestAsyncOffloadMemory:
         assert len(manager._gpu_buffer_pool) > 0
 
         final_buffer_count = sum(len(buffers) for buffers in manager._gpu_buffer_pool.values())
-        assert final_buffer_count == initial_buffer_count
+        assert final_buffer_count == initial_buffer_count + 1
+
+    def test_gpu_buffer_pool_is_bounded_by_nonresident_layers(self):
+        """Ring slots should be capped by the number of offloaded blocks."""
+        layers = torch.nn.ModuleList([TestLayer(16, 16) for _ in range(8)])
+        manager = AsyncOffloadManager(layers, offload_ratio=0.5, prefetch_size=3)
+
+        expected_slots = min(2 * manager.prefetch_size, len(manager._nonresident_layers))
+        allocated_slots = len(manager._gpu_buffer_pool[torch.float32]) + sum(
+            torch.float32 in buffers for buffers in manager._layer_to_gpu_buffer.values()
+        )
+        assert allocated_slots == expected_slots
 
     def test_auto_initialization_on_prefetch(self, test_layers):
         """Test that buffer pool is auto-initialized when prefetching with lazy_gpu_cache=True."""
@@ -275,6 +318,10 @@ class TestAsyncOffloadStateManagement:
         manager.enable_offload()
         assert len(manager._forward_hooks) > 0
         assert manager._gpu_layers == {0}
+
+        hook_count = len(manager._forward_hooks)
+        manager.enable_offload()
+        assert len(manager._forward_hooks) == hook_count
 
     def test_sync_layer_to_cpu(self, test_layers):
         """Test sync_layer_to_cpu functionality."""

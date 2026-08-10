@@ -66,7 +66,7 @@ DP -> CFG -> SP (ring, ulysses) -> PP -> TP
 When Ring and Ulysses are both enabled, SP is a two-dimensional `(ring, ulysses)` submesh. Accessors such as
 `get_cfg_group()`, `get_ring_group()`, `get_ulysses_group()`, and `get_pp_group()` prevent models from reconstructing
 rank lists independently. The configured world size must equal the product of all enabled degrees. SP and TP are
-currently mutually exclusive.
+combined as independent mesh dimensions when the selected pipeline supports the combination.
 
 ## Shared Collective Primitives
 
