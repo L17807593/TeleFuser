@@ -263,9 +263,13 @@ def attention(
     current_layout = input_layout
 
     if input_layout == "BSND" and attn_impl in BNSD_IMPLS:
-        q = q.transpose(1, 2).contiguous()
-        k = k.transpose(1, 2).contiguous()
-        v = v.transpose(1, 2).contiguous()
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+        if attn_impl != AttnImplType.TORCH_SDPA:
+            q = q.contiguous()
+            k = k.contiguous()
+            v = v.contiguous()
         current_layout = "BNSD"
     elif (
         input_layout == "BNSD"
@@ -437,9 +441,9 @@ def attention(
             _warned_attn_fallback.add(msg)
             logger.warning(msg)
         if current_layout == "BSND":
-            q = q.transpose(1, 2).contiguous()
-            k = k.transpose(1, 2).contiguous()
-            v = v.transpose(1, 2).contiguous()
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
             current_layout = "BNSD"
 
         if sequence_lengths is None:
@@ -452,7 +456,9 @@ def attention(
 
     # Handle output layout conversion - output matches current_layout, may need to convert to output_layout
     if current_layout != output_layout:
-        output = output.transpose(1, 2).contiguous()
+        output = output.transpose(1, 2)
+        if attn_impl != AttnImplType.TORCH_SDPA:
+            output = output.contiguous()
 
     if return_lse:
         return output, lse
