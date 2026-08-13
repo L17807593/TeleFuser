@@ -67,6 +67,25 @@ python examples/minimax_h3/minimax_h3_fl2va_h100.py \
 For compatibility, omitting `--mode` infers T2VA, first-frame, last-frame, or first-last from `--image` and
 `--last-image`. Explicit modes are preferable in reproducible commands.
 
+## Turbo LoRA
+
+LightX2V's released MiniMax H3 Turbo LoRA is available through the H100 example. It uses the FL2VA
+checkpoint, the checkpoint metadata alpha, the training-Euler update, and nine scheduler points (eight denoising
+updates). The LoRA file is expected at `lightx2v/Minimax-h3-Turbo/minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors`
+unless overridden.
+
+```bash
+python examples/minimax_h3/minimax_h3_turbo_lora_h100.py \
+  --gpu-num 4 \
+  --model-root /hhb-data/aigc/model_zoo/MiniMaxAI_MiniMax-H3 \
+  --lora-path /data/zuoxin/workspace/TeleFuser/work_dirs/models/lightx2v/Minimax-h3-Turbo/minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors \
+  --duration 5 \
+  --output outputs/minimax_h3_turbo_lora.mp4
+```
+
+The example supports one, two, or four GPUs. Four GPUs use tensor plus Ulysses parallelism; LoRA is merged before
+parallel sharding.
+
 ## Feature Cache
 
 MiniMax H3 uses AdaTaylorCache around the complete joint audio-video DiT block stack. Calibrate once on one H100

@@ -86,3 +86,30 @@ def test_scheduler_rejects_timestep_sigma_mismatch() -> None:
             sigma_curr=0.4,
             sigma_next=0.0,
         )
+
+
+def test_training_euler_matches_h3_turbo_back_simulation() -> None:
+    adapter = MiniMaxH3EulerAncestralEta0SchedulerAdapter(step_update="training_euler")
+    visual = torch.ones(2, 3)
+    audio = torch.ones(4, 2) * 2
+    visual_velocity = torch.ones_like(visual) * 3
+    audio_velocity = -torch.ones_like(audio)
+
+    result = adapter.step_denoising(
+        input_visual_latent=visual,
+        input_audio_latent=audio,
+        timestep=torch.tensor(0.25),
+        video_timestep=torch.tensor(0.25),
+        audio_timestep=torch.tensor(0.75),
+        noise_pred_visual=visual_velocity,
+        noise_pred_audio=audio_velocity,
+        sigma_curr=0.75,
+        sigma_next=0.5,
+        video_sigma_curr=0.75,
+        video_sigma_next=0.5,
+        audio_sigma_curr=0.25,
+        audio_sigma_next=0.125,
+    )
+
+    torch.testing.assert_close(result["output_visual_latent"], visual + 0.25 * visual_velocity)
+    torch.testing.assert_close(result["output_audio_latent"], audio + 0.125 * audio_velocity)

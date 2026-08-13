@@ -17,6 +17,7 @@ SERVICE_PARITY_EXAMPLES = {
     "lingbot_video/lingbot_video_moe_30b.py",
     "minimax_h3/minimax_h3_fl2va_h100.py",
     "minimax_h3/minimax_h3_ref2va_h100.py",
+    "minimax_h3/minimax_h3_turbo_lora_h100.py",
 }
 
 
@@ -84,6 +85,19 @@ def test_minimax_h3_four_gpu_regression_contract() -> None:
     assert pipeline.use_run_with_file is True
     assert pipeline.require_audio is True
     assert pipeline.ppl_config_overrides["num_inference_steps"] == 50
+
+
+def test_minimax_h3_turbo_lora_regression_contract() -> None:
+    pipeline = load_config().pipelines["minimax_h3_turbo_lora_4gpu"]
+
+    assert pipeline.script == "minimax_h3/minimax_h3_turbo_lora_h100.py"
+    assert pipeline.gpu_count == 4
+    assert pipeline.seed == 0
+    assert pipeline.resolution == "768p"
+    assert pipeline.target_video_length == 5
+    assert pipeline.use_run_with_file is True
+    assert pipeline.require_audio is True
+    assert pipeline.ppl_config_overrides["num_inference_steps"] == 9
 
 
 def test_all_declared_service_examples_have_cpu_parity_coverage() -> None:

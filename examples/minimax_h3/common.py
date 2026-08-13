@@ -16,6 +16,7 @@ from telefuser.core.config import (
     AttentionConfig,
     AttnImplType,
     FeatureCacheConfig,
+    LoraConfig,
     ModelRuntimeConfig,
     OffloadConfig,
     ParallelConfig,
@@ -175,6 +176,8 @@ def load_minimax_h3_pipeline(
     adaln_cache_path: str | Path | None = None,
     online_adaln_cache: bool = False,
     quantization: str | QuantType | None = None,
+    lora_path: str | Path | None = None,
+    lora_strength: float = 1.0,
 ) -> MiniMaxH3Pipeline:
     if adaln_cache_path is not None and online_adaln_cache:
         raise ValueError("Choose either adaln_cache_path or online_adaln_cache, not both.")
@@ -253,6 +256,7 @@ def load_minimax_h3_pipeline(
         attention_config=AttentionConfig.dense_attention(attn_impl),
         feature_cache_config=feature_cache_config or FeatureCacheConfig(),
         quant_config=quant_config,
+        lora_configs=[LoraConfig(path=str(lora_path), strength=lora_strength)] if lora_path else [],
         parallel_config=ParallelConfig(
             device_ids=list(range(world_size)),
             sp_ulysses_degree=ulysses_degree,

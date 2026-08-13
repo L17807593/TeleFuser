@@ -14,6 +14,7 @@ from telefuser.core.config import ModelRuntimeConfig, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
 from telefuser.distributed.device_mesh import create_device_mesh_from_config, get_ulysses_rank, get_ulysses_world_size
 from telefuser.distributed.fsdp import shard_model_fsdp2_inference
+from telefuser.models.minimax_h3_lora import MiniMaxH3LoraAdapter
 from telefuser.platforms import current_platform
 from telefuser.utils.logging import logger
 
@@ -116,12 +117,19 @@ class MiniMaxH3DenoiseRemainder:
 
 
 class MiniMaxH3DenoisingStage(BaseStage):
-    def __init__(self, module_manager: ModuleManager, model_runtime_config: ModelRuntimeConfig) -> None:
+    def __init__(
+        self,
+        module_manager: ModuleManager,
+        model_runtime_config: ModelRuntimeConfig,
+    ) -> None:
         super().__init__("minimax_h3_denoising", model_runtime_config)
         self.transformer = module_manager.fetch_module("minimax_h3_transformer")
         if self.transformer is None:
             raise ValueError("ModuleManager must contain 'minimax_h3_transformer'")
-        self.scheduler = MiniMaxH3EulerAncestralEta0SchedulerAdapter()
+        if model_runtime_config.lora_configs:
+            MiniMaxH3LoraAdapter.apply(self.transformer, model_runtime_config.lora_configs)
+        step_update = "training_euler" if model_runtime_config.lora_configs else "reference_blend"
+        self.scheduler = MiniMaxH3EulerAncestralEta0SchedulerAdapter(step_update=step_update)
         self.model_names = ["transformer"]
         self._request_serial = 0
 
@@ -450,7 +458,10 @@ class MiniMaxH3DenoisingStage(BaseStage):
             torch.arange(audio_update_cpu.numel()) >= target_audio_row_start,
         )
         optimized_update = (
-            video_mask_is_suffix and audio_mask_is_suffix and "step_denoising" not in self.scheduler.__dict__
+            video_mask_is_suffix
+            and audio_mask_is_suffix
+            and self.scheduler.step_update == "reference_blend"
+            and "step_denoising" not in self.scheduler.__dict__
         )
         video_denoised_scratch = torch.empty_like(video_rows[video_target_slice])
         audio_denoised_scratch = torch.empty_like(audio_rows[audio_target_slice])

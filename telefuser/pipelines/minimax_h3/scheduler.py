@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import math
-from typing import Any
 
 import torch
 
@@ -130,9 +129,10 @@ def _minimax_h3_euler_eta0_step(
 
 
 class MiniMaxH3EulerAncestralEta0SchedulerAdapter:
-    def __init__(self, **config: Any) -> None:
-        if config:
-            raise ValueError(f"{type(self).__name__} does not accept config fields: {sorted(config)}")
+    def __init__(self, *, step_update: str = "reference_blend") -> None:
+        if step_update not in {"reference_blend", "training_euler"}:
+            raise ValueError("MiniMax H3 step_update must be 'reference_blend' or 'training_euler'")
+        self.step_update = step_update
 
     def step_denoising(
         self,
@@ -173,6 +173,13 @@ class MiniMaxH3EulerAncestralEta0SchedulerAdapter:
         )
         visual_sigma_next = _validate_sigma(visual_sigma_next, "video_sigma_next")
         audio_sigma_next = _validate_sigma(audio_sigma_next, "audio_sigma_next")
+
+        if self.step_update == "training_euler":
+            return {
+                "output_visual_latent": input_visual_latent
+                + (visual_sigma_curr - visual_sigma_next) * noise_pred_visual,
+                "output_audio_latent": input_audio_latent + (audio_sigma_curr - audio_sigma_next) * noise_pred_audio,
+            }
 
         denoised_visual = _minimax_h3_rf_v_to_x0(
             input_visual_latent,
