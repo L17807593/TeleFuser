@@ -212,3 +212,40 @@ def test_pipeline_offload_policy_controls_phase_release() -> None:
     resident_module = _TrackingModule()
     pipeline._release(resident_module)
     assert resident_module.devices == []
+
+
+def test_pipeline_reuses_streamed_transformer_for_cpu_offload(monkeypatch) -> None:
+    pipeline = object.__new__(LTX25DistilledPipeline)
+    pipeline.device = torch.device("cuda")
+    pipeline.torch_dtype = torch.bfloat16
+    pipeline.paths = LTX25ModelPaths(*(Path("unused") for _ in range(7)))
+    pipeline.config = LTX25DistilledConfig(model_root="unused", device="cpu", offload="cpu")
+    pipeline._streamed_transformer = None
+    pipeline._transformer_offload_manager = None
+    transformer = _Transformer()
+    transformer.velocity_model = torch.nn.Module()
+    transformer.velocity_model.transformer_blocks = torch.nn.ModuleList()
+    loads = 0
+
+    def load(*args: object, **kwargs: object) -> _Transformer:
+        nonlocal loads
+        loads += 1
+        assert kwargs["device"] == "cpu"
+        return transformer
+
+    class _Manager:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+            self.released = False
+
+        def release_all(self) -> None:
+            self.released = True
+
+    monkeypatch.setattr("telefuser.pipelines.ltx25_distilled.pipeline.LTX25AVTransformer.from_checkpoint", load)
+    monkeypatch.setattr("telefuser.pipelines.ltx25_distilled.pipeline.AsyncOffloadManager", _Manager)
+
+    assert pipeline._load_transformer() is transformer
+    assert pipeline._load_transformer() is transformer
+    assert loads == 1
+    pipeline._release_transformer(transformer)
+    assert pipeline._transformer_offload_manager.released
