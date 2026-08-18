@@ -30,6 +30,7 @@ from telefuser.models.ltx25.sampler import (
     LTX25_STAGE2_DISTILLED_SIGMAS,
 )
 from telefuser.models.ltx25.spatial_upsampler import load_video_latent_statistics
+from telefuser.offload import AsyncOffloadManager
 
 from .core import LTX25SimpleDenoiser, euler_ancestral_denoising_loop, euler_denoising_loop
 from .image import default_image_crf, preprocess_ltx25_image
@@ -86,6 +87,8 @@ class LTX25DistilledPipeline(BasePipeline):
         super().__init__(device=device, torch_dtype=config.torch_dtype)
         self.config = config
         self.paths = LTX25ModelPaths.from_model_root(config.model_root)
+        self._streamed_transformer: LTX25AVTransformer | None = None
+        self._transformer_offload_manager: AsyncOffloadManager | None = None
 
     @classmethod
     def from_model_root(
@@ -141,9 +144,7 @@ class LTX25DistilledPipeline(BasePipeline):
         stage_1_video = _noised_state(stage_1_video, 1.0, generator)
         stage_1_audio = _noised_state(audio_tools.create_initial_state(self.device, self.torch_dtype), 1.0, generator)
 
-        transformer = LTX25AVTransformer.from_checkpoint(
-            self.paths.transformer_path, device=self.device, torch_dtype=self.torch_dtype
-        )
+        transformer = self._load_transformer()
         denoiser = LTX25SimpleDenoiser(video_context, audio_context)
         stage_1_video, stage_1_audio = euler_ancestral_denoising_loop(
             torch.tensor(LTX25_STAGE1_DISTILLED_SIGMAS, device=self.device),
@@ -188,7 +189,7 @@ class LTX25DistilledPipeline(BasePipeline):
             model_dtype=self.torch_dtype,
         )
         assert stage_2_video is not None and stage_2_audio is not None
-        self._release(transformer)
+        self._release_transformer(transformer)
 
         video_latent = stage_2_tools.unpatchify(stage_2_tools.clear_conditioning(stage_2_video)).latent
         audio_latent = audio_tools.unpatchify(stage_2_audio).latent
@@ -217,6 +218,37 @@ class LTX25DistilledPipeline(BasePipeline):
         encoded = embeddings(hidden_states, attention_mask)
         self._release(text_encoder, embeddings)
         return encoded.video_encoding, encoded.audio_encoding
+
+    def _load_transformer(self) -> LTX25AVTransformer:
+        """Load the denoiser using upstream-equivalent block streaming for CPU offload."""
+        if self.config.offload != "cpu" or self.device.type != "cuda":
+            return LTX25AVTransformer.from_checkpoint(
+                self.paths.transformer_path, device=self.device, torch_dtype=self.torch_dtype
+            )
+        if getattr(self, "_streamed_transformer", None) is not None:
+            return self._streamed_transformer
+
+        transformer = LTX25AVTransformer.from_checkpoint(
+            self.paths.transformer_path, device="cpu", torch_dtype=self.torch_dtype
+        )
+        blocks = transformer.velocity_model.transformer_blocks
+        self._transformer_offload_manager = AsyncOffloadManager(
+            blocks,
+            device=self.device,
+            offload_ratio=1.0,
+            prefetch_size=1,
+        )
+        transformer.to(device=self.device, dtype=self.torch_dtype)
+        self._streamed_transformer = transformer
+        return transformer
+
+    def _release_transformer(self, transformer: LTX25AVTransformer) -> None:
+        """Release streamed blocks while retaining their CPU cache for the next request."""
+        manager = getattr(self, "_transformer_offload_manager", None)
+        if transformer is getattr(self, "_streamed_transformer", None) and manager is not None:
+            manager.release_all()
+            return
+        self._release(transformer)
 
     def _predict_num_frames(
         self,
