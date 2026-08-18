@@ -247,6 +247,7 @@ telefuser/
 |----------|------|-------|
 | `WanVideo` (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Main video generation family, including async and service examples in [examples/wan_video/README.md](examples/wan_video/README.md) |
 | `LTX Video` | I2V + Audio | Unified audio-video generation via [examples/ltx_video/README.md](examples/ltx_video/README.md) |
+| `LTX-2.5 Distilled` | T2V, I2V + Audio | Isolated two-stage LTX-2.5 path for a single H100 via [examples/ltx25_distilled/README.md](examples/ltx25_distilled/README.md) |
 | `MiniMax H3` | T2VA, FL2VA, Ref2VA + Audio | Local 768p joint audio-video generation via [examples/minimax_h3/README.md](examples/minimax_h3/README.md) |
 | `LongCat-Video` | T2V, I2V, VC | Long-form generation and continuation via [examples/longcat_video/README.md](examples/longcat_video/README.md) |
 | `LingBot-Video` | T2I, T2V, TI2V, MoE refiner | Dense/MoE generation with native CFG/SP and an in-memory base-to-refiner path; see [examples/lingbot_video/README.md](examples/lingbot_video/README.md) |
