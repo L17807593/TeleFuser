@@ -126,9 +126,9 @@ def run(
 
 def run_with_file(
     pipeline: LTX25DistilledPipeline,
-    input_image_path: str,
     prompt: str,
     output_path: str,
+    input_image_path: str = PPL_CONFIG["input_image_path"],
     seed: int = PPL_CONFIG["seed"],
     height: int = PPL_CONFIG["height"],
     width: int = PPL_CONFIG["width"],
@@ -136,10 +136,11 @@ def run_with_file(
     frame_rate: float = PPL_CONFIG["frame_rate"],
     image_frame_index: int = 0,
     image_strength: float = 1.0,
+    first_image_path: str | None = None,
     **_: object,
 ) -> dict[str, str]:
     """Generate and save an MP4 with synchronized LTX-2.5 audio."""
-    image = Image.open(input_image_path).convert("RGB")
+    image = Image.open(first_image_path or input_image_path).convert("RGB")
     result = run(
         pipeline,
         image,

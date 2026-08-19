@@ -261,6 +261,19 @@ def test_turbo_run_uses_input_image_path(monkeypatch: pytest.MonkeyPatch) -> Non
     assert calls[0]["conditions"] == [{"type": "image", "role": "keyframe", "uri": "input.png", "frame_index": 0}]
 
 
+def test_turbo_run_with_file_accepts_service_image_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def fake_run(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        return object()
+
+    monkeypatch.setattr(turbo_example, "run", fake_run)
+    turbo_example.run_with_file(object(), first_image_path="service-input.png", output_path="result.mp4")
+
+    assert calls[0][1]["input_image_path"] == "service-input.png"
+
+
 def test_ref2va_run_preserves_ordered_service_conditions() -> None:
     calls = []
     marker = object()

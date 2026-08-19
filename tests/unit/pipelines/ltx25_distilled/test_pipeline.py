@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
+from examples.ltx25_distilled import ltx25_distilled_i2v_h100 as i2v_example
 from telefuser.core.config import AttnImplType, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
 from telefuser.pipelines.ltx25_distilled.pipeline import (
@@ -184,3 +186,24 @@ def test_build_config_rejects_sparse_attention_and_invalid_sp_degree() -> None:
         pass
     else:
         raise AssertionError("sparse attention should be rejected")
+
+
+def test_i2v_run_with_file_accepts_service_image_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    opened_paths = []
+    image = SimpleNamespace(convert=lambda mode: mode)
+
+    def stop_run(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(i2v_example.Image, "open", lambda path: opened_paths.append(path) or image)
+    monkeypatch.setattr(i2v_example, "run", stop_run)
+
+    with pytest.raises(RuntimeError, match="stop"):
+        i2v_example.run_with_file(
+            object(),
+            prompt="test",
+            output_path="result.mp4",
+            first_image_path="service-input.png",
+        )
+
+    assert opened_paths == ["service-input.png"]

@@ -117,6 +117,7 @@ def run_with_file(
     output_path: str = "minimax_h3_turbo_lora.mp4",
     target_video_length: float = PPL_CONFIG["target_video_length"],
     input_image_path: str = PPL_CONFIG["input_image_path"],
+    first_image_path: str | None = None,
     **_: object,
 ) -> dict[str, str]:
     """Service-compatible wrapper that returns the generated output path."""
@@ -126,7 +127,7 @@ def run_with_file(
         seed=seed,
         output_path=output_path,
         target_video_length=target_video_length,
-        input_image_path=input_image_path,
+        input_image_path=first_image_path or input_image_path,
     )
     return {"output_path": output_path}
 
