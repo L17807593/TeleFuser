@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import torch
 
+from telefuser.core.config import AttnImplType, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
 from telefuser.pipelines.ltx25_distilled.pipeline import (
     LTX25DistilledPipeline,
@@ -33,6 +34,9 @@ class _DurationHead(torch.nn.Module):
 
 
 class _Transformer(torch.nn.Module):
+    def set_attention_config(self, attention_config: object) -> None:
+        self.attention_config = attention_config
+
     def forward(
         self, video: object, audio: object, perturbations: object
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
@@ -138,3 +142,45 @@ def test_pipeline_resolves_auto_duration_through_text_stage() -> None:
 
     assert result.num_frames == 25
     assert result.video_latent.shape == (1, 128, 4, 8, 12)
+
+
+def test_build_config_supports_ulysses_and_attention_selection() -> None:
+    config = build_ltx25_distilled_config(
+        "cuda",
+        torch.bfloat16,
+        "diff",
+        "cpu",
+        parallelism=4,
+        attn_impl=AttnImplType.TORCH_SDPA,
+    )
+
+    denoising = config.denoising_config
+    assert denoising.attention_config.attn_impl == AttnImplType.TORCH_SDPA
+    assert denoising.parallel_config.device_ids == [0, 1, 2, 3]
+    assert denoising.parallel_config.sp_ulysses_degree == 4
+    assert denoising.parallel_config.enable_fsdp
+    assert denoising.offload_config.offload_type == WeightOffloadType.NO_CPU_OFFLOAD
+    assert config.text_encoding_config.offload_config.offload_type == WeightOffloadType.MODEL_CPU_OFFLOAD
+
+
+def test_build_config_rejects_sparse_attention_and_invalid_sp_degree() -> None:
+    for parallelism in (0, 3, 33):
+        try:
+            build_ltx25_distilled_config("cuda", torch.bfloat16, "diff", "none", parallelism=parallelism)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"parallelism={parallelism} should be rejected")
+
+    try:
+        build_ltx25_distilled_config(
+            "cuda",
+            torch.bfloat16,
+            "diff",
+            "none",
+            attn_impl=AttnImplType.RADIAL_ATTN,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("sparse attention should be rejected")
