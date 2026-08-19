@@ -19,9 +19,16 @@ without loading its tensors.
 
 ## Public Pipeline
 
-`LTX25DistilledPipeline.from_model_root()` exposes the isolated two-stage
-T2V/I2V path. It accepts a prompt, seed, resolution, `8k + 1` frame count,
-frame rate, and optional `LTX25ImageCondition` values. With `offload="cpu"`,
+The public T2V/I2V path loads split-checkpoint components through
+`load_ltx25_distilled_modules()` into a CPU `ModuleManager`, then composes six
+independent stage modules with `LTX25DistilledPipeline.init()`. The stages
+own text encoding, image conditioning, two-phase denoising, latent upsampling,
+video decoding, and audio decoding. The compatibility
+`LTX25DistilledPipeline.from_model_root()` constructor follows the same manager
+and stage path.
+
+Generation accepts a prompt, seed, resolution, `8k + 1` frame count, frame
+rate, and optional `LTX25ImageCondition` values. With `offload="cpu"`,
 the denoiser keeps pinned CPU weights and streams sequential transformer
 blocks through reusable GPU buffers; Gemma, the upsampler, the video decoder,
 and the audio decoder/vocoder otherwise move through GPU memory sequentially.
