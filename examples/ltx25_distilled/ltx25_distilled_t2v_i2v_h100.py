@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import click
 import torch
 from PIL import Image
 
-from telefuser.pipelines.ltx25_distilled import LTX25DistilledOutput, LTX25DistilledPipeline, LTX25ImageCondition
+from telefuser.core.module_manager import ModuleManager
+from telefuser.pipelines.ltx25_distilled import (
+    LTX25DistilledOutput,
+    LTX25DistilledPipeline,
+    LTX25ImageCondition,
+    build_ltx25_distilled_config,
+    load_ltx25_distilled_modules,
+)
 from telefuser.utils.audio import save_wav
 from telefuser.utils.video import save_video
 
@@ -39,7 +46,26 @@ def get_pipeline(
         raise ValueError(f"video_vae must be 'diff' or 'conv', got {video_vae!r}")
     if offload not in ("none", "cpu"):
         raise ValueError(f"offload must be 'none' or 'cpu', got {offload!r}")
-    return LTX25DistilledPipeline.from_model_root(model_root, video_vae=video_vae, offload=offload)  # type: ignore[arg-type]
+    selected_video_vae = cast(Literal["diff", "conv"], video_vae)
+    selected_offload = cast(Literal["none", "cpu"], offload)
+    module_manager = ModuleManager(device="cpu", torch_dtype=torch.bfloat16)
+    load_ltx25_distilled_modules(
+        module_manager,
+        model_root,
+        video_vae=selected_video_vae,
+        torch_dtype=torch.bfloat16,
+    )
+    pipeline = LTX25DistilledPipeline(device="cuda", torch_dtype=torch.bfloat16)
+    pipeline.init(
+        module_manager,
+        build_ltx25_distilled_config(
+            "cuda",
+            torch.bfloat16,
+            selected_video_vae,
+            selected_offload,
+        ),
+    )
+    return pipeline
 
 
 def run(
