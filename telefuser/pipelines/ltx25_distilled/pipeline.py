@@ -10,10 +10,19 @@ import torch
 from PIL import Image
 
 from telefuser.core.base_pipeline import BasePipeline
-from telefuser.core.config import ModelRuntimeConfig, OffloadConfig, WeightOffloadType
+from telefuser.core.config import (
+    AttentionConfig,
+    AttnImplType,
+    ModelRuntimeConfig,
+    OffloadConfig,
+    ParallelConfig,
+    WeightOffloadType,
+)
 from telefuser.core.module_manager import ModuleManager
 from telefuser.models.ltx25.diff_vae.types import VideoLatentShape
 from telefuser.models.ltx25.sampler import ANCESTRAL_NOISE_SEED_OFFSET, LTX25_STAGE2_DISTILLED_SIGMAS
+from telefuser.utils.func import auto_async_call
+from telefuser.worker.parallel_worker import ParallelWorker
 
 from .audio_decoding import LTX25AudioDecodingStage
 from .denoising import LTX25DenoisingStage
@@ -71,7 +80,7 @@ class LTX25DistilledPipeline(BasePipeline):
         self.config: LTX25DistilledConfig | None = None
         self.text_stage: LTX25TextEncodingStage | None = None
         self.conditioning_stage: LTX25VideoConditioningStage | None = None
-        self.denoising_stage: LTX25DenoisingStage | None = None
+        self.denoising_stage: LTX25DenoisingStage | ParallelWorker | None = None
         self.upsampling_stage: LTX25LatentUpsamplingStage | None = None
         self.video_decoding_stage: LTX25VideoDecodingStage | None = None
         self.audio_decoding_stage: LTX25AudioDecodingStage | None = None
@@ -80,7 +89,12 @@ class LTX25DistilledPipeline(BasePipeline):
         self.config = config
         self.text_stage = LTX25TextEncodingStage(module_manager, config.text_encoding_config)
         self.conditioning_stage = LTX25VideoConditioningStage(module_manager, config.video_conditioning_config)
-        self.denoising_stage = LTX25DenoisingStage(module_manager, config.denoising_config)
+        denoising_stage = LTX25DenoisingStage(module_manager, config.denoising_config)
+        self.denoising_stage = (
+            ParallelWorker(denoising_stage)
+            if config.denoising_config.parallel_config.world_size > 1
+            else denoising_stage
+        )
         self.upsampling_stage = LTX25LatentUpsamplingStage(module_manager, config.upsampling_config)
         self.video_decoding_stage = LTX25VideoDecodingStage(
             module_manager, config.video_decoding_config, video_vae=config.video_vae
@@ -97,12 +111,47 @@ class LTX25DistilledPipeline(BasePipeline):
         torch_dtype: torch.dtype = torch.bfloat16,
         video_vae: Literal["diff", "conv"] = "diff",
         offload: Literal["none", "cpu"] = "cpu",
+        parallelism: int = 1,
+        attn_impl: AttnImplType = AttnImplType.FLASH_ATTN_4,
     ) -> "LTX25DistilledPipeline":
         module_manager = ModuleManager(device="cpu", torch_dtype=torch_dtype)
         load_ltx25_distilled_modules(module_manager, model_root, video_vae=video_vae, torch_dtype=torch_dtype)
         pipeline = cls(device=device, torch_dtype=torch_dtype)
-        pipeline.init(module_manager, build_ltx25_distilled_config(device, torch_dtype, video_vae, offload))
+        pipeline.init(
+            module_manager,
+            build_ltx25_distilled_config(
+                device,
+                torch_dtype,
+                video_vae,
+                offload,
+                parallelism=parallelism,
+                attn_impl=attn_impl,
+            ),
+        )
         return pipeline
+
+    def close(self) -> None:
+        """Release distributed denoising workers, when configured."""
+        if isinstance(self.denoising_stage, ParallelWorker):
+            self.denoising_stage.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def _denoising_input(self, state: LatentState) -> LatentState | dict[str, torch.Tensor | None]:
+        if not isinstance(self.denoising_stage, ParallelWorker):
+            return state
+        return {
+            "latent": state.latent,
+            "denoise_mask": state.denoise_mask,
+            "positions": state.positions,
+            "clean_latent": state.clean_latent,
+            "attention_mask": state.attention_mask,
+            "keyframes_mask": state.keyframes_mask,
+        }
 
     def _get_stages(self) -> list[object]:
         return [
@@ -159,13 +208,14 @@ class LTX25DistilledPipeline(BasePipeline):
         stage_1_audio = _noised_state(audio_tools.create_initial_state(self.device, self.torch_dtype), 1.0, generator)
 
         try:
-            stage_1_video, stage_1_audio = self.denoising_stage.denoise_stage1(
-                stage_1_video,
-                stage_1_audio,
+            stage_1_video, stage_1_audio = auto_async_call(
+                self.denoising_stage.denoise_stage1,
+                self._denoising_input(stage_1_video),
+                self._denoising_input(stage_1_audio),
                 video_context,
                 audio_context,
                 noise_seed=seed + ANCESTRAL_NOISE_SEED_OFFSET,
-            )
+            )()
             low_resolution_latent = stage_1_tools.unpatchify(stage_1_tools.clear_conditioning(stage_1_video)).latent
             upscaled_video = self.upsampling_stage.process(low_resolution_latent)
 
@@ -181,11 +231,16 @@ class LTX25DistilledPipeline(BasePipeline):
                 LTX25_STAGE2_DISTILLED_SIGMAS[0],
                 generator,
             )
-            stage_2_video, stage_2_audio = self.denoising_stage.denoise_stage2(
-                stage_2_video, stage_2_audio, video_context, audio_context
-            )
+            stage_2_video, stage_2_audio = auto_async_call(
+                self.denoising_stage.denoise_stage2,
+                self._denoising_input(stage_2_video),
+                self._denoising_input(stage_2_audio),
+                video_context,
+                audio_context,
+            )()
         finally:
-            self.denoising_stage.finish_request()
+            if not isinstance(self.denoising_stage, ParallelWorker) or not self.denoising_stage.failed:
+                auto_async_call(self.denoising_stage.finish_request)()
 
         video_latent = stage_2_tools.unpatchify(stage_2_tools.clear_conditioning(stage_2_video)).latent
         audio_latent = audio_tools.unpatchify(stage_2_audio).latent
@@ -204,30 +259,55 @@ def build_ltx25_distilled_config(
     torch_dtype: torch.dtype,
     video_vae: Literal["diff", "conv"],
     offload: Literal["none", "cpu"],
+    *,
+    parallelism: int = 1,
+    attn_impl: AttnImplType = AttnImplType.FLASH_ATTN_4,
 ) -> LTX25DistilledConfig:
     if video_vae not in ("diff", "conv"):
         raise ValueError(f"video_vae must be 'diff' or 'conv', got {video_vae!r}")
     if offload not in ("none", "cpu"):
         raise ValueError(f"offload must be 'none' or 'cpu', got {offload!r}")
+    if parallelism < 1 or 32 % parallelism:
+        raise ValueError(f"parallelism must be a positive divisor of 32, got {parallelism}")
+    if not isinstance(attn_impl, AttnImplType):
+        raise TypeError(f"attn_impl must be an AttnImplType, got {type(attn_impl).__name__}")
+    attention_config = AttentionConfig.dense_attention(attn_impl)
+    if attention_config.is_sparse():
+        raise ValueError(f"LTX-2.5 supports dense attention implementations only, got {attn_impl.name}")
     target_device = torch.device(device)
     device_type = target_device.type
     device_id = 0 if target_device.index is None else target_device.index
     regular = WeightOffloadType.MODEL_CPU_OFFLOAD if offload == "cpu" else WeightOffloadType.NO_CPU_OFFLOAD
-    denoising = WeightOffloadType.ASYNC_CPU_OFFLOAD if offload == "cpu" else WeightOffloadType.NO_CPU_OFFLOAD
+    denoising = (
+        WeightOffloadType.ASYNC_CPU_OFFLOAD
+        if offload == "cpu" and parallelism == 1
+        else WeightOffloadType.NO_CPU_OFFLOAD
+    )
 
-    def runtime(offload_type: WeightOffloadType) -> ModelRuntimeConfig:
+    def runtime(offload_type: WeightOffloadType, *, distributed: bool = False) -> ModelRuntimeConfig:
         return ModelRuntimeConfig(
             device_type=device_type,
             device_id=device_id,
             torch_dtype=torch_dtype,
             offload_config=OffloadConfig(offload_type=offload_type),
+            attention_config=attention_config,
+            parallel_config=(
+                ParallelConfig(
+                    device_ids=list(range(parallelism)),
+                    sp_ulysses_degree=parallelism,
+                    enable_fsdp=True,
+                    timeout=1800,
+                )
+                if distributed
+                else ParallelConfig()
+            ),
         )
 
     return LTX25DistilledConfig(
         video_vae=video_vae,
         text_encoding_config=runtime(regular),
         video_conditioning_config=runtime(regular),
-        denoising_config=runtime(denoising),
+        denoising_config=runtime(denoising, distributed=parallelism > 1),
         upsampling_config=runtime(regular),
         video_decoding_config=runtime(regular),
         audio_decoding_config=runtime(regular),

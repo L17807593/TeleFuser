@@ -5,6 +5,7 @@ import pytest
 
 from examples.minimax_h3 import minimax_h3_fl2va_h100 as fl2va_example
 from examples.minimax_h3 import minimax_h3_ref2va_h100 as ref2va_example
+from examples.minimax_h3 import minimax_h3_turbo_lora_h100 as turbo_example
 from examples.minimax_h3.common import (
     MINIMAX_H3_DEFAULT_FL2VA_IMAGE,
     MINIMAX_H3_DEFAULT_REF2VA_AUDIO,
@@ -244,6 +245,20 @@ def test_fl2va_run_maps_standard_service_tasks_to_model_conditions() -> None:
 
     fl2va_example.run(pipeline, task="fl2v", first_image_path="first.png", last_image_path="last.png")
     assert [item["frame_index"] for item in calls[-1]["conditions"]] == [0, -1]
+
+
+def test_turbo_run_uses_input_image_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    marker = object()
+
+    class Pipeline:
+        def __call__(self, **kwargs: object) -> object:
+            calls.append(kwargs)
+            return marker
+
+    monkeypatch.setattr(turbo_example, "save_generation", lambda *_: None)
+    assert turbo_example.run(Pipeline(), input_image_path="input.png") is marker
+    assert calls[0]["conditions"] == [{"type": "image", "role": "keyframe", "uri": "input.png", "frame_index": 0}]
 
 
 def test_ref2va_run_preserves_ordered_service_conditions() -> None:

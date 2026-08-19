@@ -6,9 +6,18 @@ from typing import Any
 import torch
 from loguru import logger
 from safetensors import safe_open
+from torch.distributed.device_mesh import DeviceMesh
 
 from telefuser.core.base_model import BaseModel
 from telefuser.core.config import AttentionConfig, AttnImplType, OffloadConfig
+from telefuser.distributed import (
+    get_attention_strategy,
+    get_ulysses_group,
+    get_ulysses_world_size,
+    ulysses_gather_heads,
+    ulysses_scatter_heads,
+)
+from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequence_parallel_unshard
 from telefuser.ops.attention import attention as attn_func
 from telefuser.ops.normalization import LayerNorm, RMSNorm
 
@@ -602,6 +611,7 @@ class Attention(torch.nn.Module):
 
         self.heads = heads
         self.dim_head = dim_head
+        self.ulysses_group: torch.distributed.ProcessGroup | None = None
 
         # The LTX-2.5 reference uses PyTorch RMSNorm. Keep that exact numerical
         # path for the fidelity baseline; attention itself still goes through the
@@ -621,6 +631,10 @@ class Attention(torch.nn.Module):
 
         self.to_out = torch.nn.Sequential(torch.nn.Linear(inner_dim, query_dim, bias=True), torch.nn.Identity())
 
+    def set_ulysses_group(self, process_group: torch.distributed.ProcessGroup | None) -> None:
+        """Configure the process group used for Ulysses head/sequence exchange."""
+        self.ulysses_group = process_group
+
     def forward(
         self,
         x: torch.Tensor,
@@ -630,6 +644,7 @@ class Attention(torch.nn.Module):
         k_pe: torch.Tensor | None = None,
         perturbation_mask: torch.Tensor | None = None,
         all_perturbed: bool = False,
+        enforce_mask: bool = False,
     ) -> torch.Tensor:
         """Multi-head attention with optional RoPE, perturbation masking, and per-head gating.
         When ``perturbation_mask`` is all zeros, the expensive query/key path
@@ -652,6 +667,7 @@ class Attention(torch.nn.Module):
                 *None* or all-ones means standard attention; all-zeros skips
                 the query/key path entirely for efficiency.
             all_perturbed: Whether all perturbations are active for this block.
+            enforce_mask: Route this call through SDPA so padding masks are honored.
         Returns:
             Output tensor of shape ``(B, T, query_dim)``.
         """
@@ -676,11 +692,27 @@ class Attention(torch.nn.Module):
             q = rearrange(q, "b t (h d) -> b t h d", h=self.heads)
             k = rearrange(k, "b s (h d) -> b s h d", h=self.heads)
             v = rearrange(v, "b s (h d) -> b s h d", h=self.heads)
-            out = attn_func(q, k, v, attention_config=self.attention_config, attn_mask=mask, input_layout="BSND")
+            local_v = v
+            if self.ulysses_group is not None:
+                q_wait = ulysses_scatter_heads(q, self.ulysses_group)
+                k_wait = ulysses_scatter_heads(k, self.ulysses_group)
+                v_wait = ulysses_scatter_heads(v, self.ulysses_group)
+                q, k, v = q_wait(), k_wait(), v_wait()
+            attention_config = self.attention_config
+            if enforce_mask:
+                attention_config = AttentionConfig(
+                    attn_impl=AttnImplType.TORCH_SDPA,
+                    scale=attention_config.scale,
+                    dropout=attention_config.dropout,
+                    is_causal=attention_config.is_causal,
+                )
+            out = attn_func(q, k, v, attention_config=attention_config, attn_mask=mask, input_layout="BSND")
+            if self.ulysses_group is not None:
+                out = ulysses_gather_heads(out, self.ulysses_group, num_heads=self.heads)()
             out = rearrange(out, "b t h d -> b t (h d)")
 
             if perturbation_mask is not None:
-                out = out * perturbation_mask + rearrange(v, "b s h d -> b s (h d)") * (1 - perturbation_mask)
+                out = out * perturbation_mask + rearrange(local_v, "b s h d -> b s (h d)") * (1 - perturbation_mask)
 
         # Apply per-head gating if enabled
         if self.to_gate_logits is not None:
@@ -761,6 +793,7 @@ class TransformerArgs:
     self_attention_mask: torch.Tensor | None = (
         None  # Additive log-space self-attention bias (B, 1, T, T), None = full attention
     )
+    key_padding_mask: torch.Tensor | None = None
 
 
 class TransformerArgsPreprocessor:
@@ -1265,6 +1298,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
                     mask=video.self_attention_mask,
                     perturbation_mask=v_mask,
                     all_perturbed=all_perturbed,
+                    enforce_mask=video.key_padding_mask is not None,
                 )
                 * vgate_msa
             )
@@ -1303,6 +1337,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
                     mask=audio.self_attention_mask,
                     perturbation_mask=a_mask,
                     all_perturbed=all_perturbed,
+                    enforce_mask=audio.key_padding_mask is not None,
                 )
                 * agate_msa
             )
@@ -1351,6 +1386,8 @@ class BasicAVTransformerBlock(torch.nn.Module):
                         context=ax_scaled,
                         pe=video.cross_positional_embeddings,
                         k_pe=audio.cross_positional_embeddings,
+                        mask=audio.key_padding_mask,
+                        enforce_mask=audio.key_padding_mask is not None,
                     )
                     * gate_out_a2v
                     * a2v_mask
@@ -1383,6 +1420,8 @@ class BasicAVTransformerBlock(torch.nn.Module):
                         context=vx_scaled,
                         pe=audio.cross_positional_embeddings,
                         k_pe=video.cross_positional_embeddings,
+                        mask=video.key_padding_mask,
+                        enforce_mask=video.key_padding_mask is not None,
                     )
                     * gate_out_v2a
                     * v2a_mask
@@ -1587,6 +1626,89 @@ class LTXModel(torch.nn.Module):
             ff_bias=ff_bias,
             audio_ff_bias=audio_ff_bias,
         )
+        self.device_mesh: DeviceMesh | None = None
+        self.usp_flag = False
+
+    def enable_usp(self, device_mesh: DeviceMesh) -> None:
+        """Enable Ulysses sequence parallelism for self- and audio/video cross-attention."""
+        strategy = get_attention_strategy(device_mesh)
+        if strategy != "ulysses":
+            raise NotImplementedError(f"LTX-2.5 supports Ulysses sequence parallelism only, got {strategy!r}")
+        world_size = get_ulysses_world_size(device_mesh)
+        for name, heads in (
+            ("video", getattr(self, "num_attention_heads", 0)),
+            ("audio", getattr(self, "audio_num_attention_heads", 0)),
+        ):
+            if heads and heads % world_size:
+                raise ValueError(
+                    f"LTX-2.5 {name} attention heads ({heads}) must be divisible by Ulysses degree ({world_size})"
+                )
+        process_group = get_ulysses_group(device_mesh)
+        for block in self.transformer_blocks:
+            for attention_name in ("attn1", "audio_attn1", "audio_to_video_attn", "video_to_audio_attn"):
+                attention = getattr(block, attention_name, None)
+                if attention is not None:
+                    attention.set_ulysses_group(process_group)
+        self.device_mesh = device_mesh
+        self.usp_flag = True
+
+    def _positional_sequence_dim(self, tensor: torch.Tensor, sequence_length: int) -> int:
+        sequence_dim = 2 if self.rope_type == LTXRopeType.SPLIT else 1
+        if tensor.ndim <= sequence_dim or tensor.shape[sequence_dim] != sequence_length:
+            raise ValueError(
+                f"Expected LTX-2.5 {self.rope_type.value} positional embeddings to have sequence length "
+                f"{sequence_length} at dimension {sequence_dim}, got {tuple(tensor.shape)}"
+            )
+        return sequence_dim
+
+    def _shard_transformer_args(self, args: TransformerArgs) -> tuple[TransformerArgs, int]:
+        if self.device_mesh is None:
+            raise RuntimeError("LTX-2.5 Ulysses is enabled without a device mesh")
+        sequence_length = args.x.shape[1]
+        world_size = get_ulysses_world_size(self.device_mesh)
+        padded_length = ((sequence_length + world_size - 1) // world_size) * world_size
+        pad_length = padded_length - sequence_length
+
+        tensors = [args.x]
+        sequence_dims = [1]
+        for tensor in (args.timesteps, args.embedded_timestep, args.cross_scale_shift_timestep):
+            if tensor is not None and tensor.ndim > 1 and tensor.shape[1] == sequence_length:
+                tensors.append(tensor)
+                sequence_dims.append(1)
+        for embeddings in (args.positional_embeddings, args.cross_positional_embeddings):
+            if embeddings is not None:
+                for tensor in embeddings:
+                    tensors.append(tensor)
+                    sequence_dims.append(self._positional_sequence_dim(tensor, sequence_length))
+        sequence_parallel_shard(self.device_mesh, tensors, sequence_dims)
+
+        self_attention_mask = args.self_attention_mask
+        key_padding_mask = None
+        if pad_length:
+            mask_value = torch.finfo(args.x.dtype).min
+            key_padding_mask = torch.zeros(
+                args.x.shape[0], 1, 1, padded_length, device=args.x.device, dtype=args.x.dtype
+            )
+            key_padding_mask[..., sequence_length:] = mask_value
+            if self_attention_mask is not None:
+                padded_mask = torch.zeros(
+                    self_attention_mask.shape[0],
+                    self_attention_mask.shape[1],
+                    padded_length,
+                    padded_length,
+                    device=self_attention_mask.device,
+                    dtype=self_attention_mask.dtype,
+                )
+                padded_mask[..., :sequence_length, :sequence_length] = self_attention_mask
+                padded_mask[..., sequence_length:] = mask_value
+                self_attention_mask = padded_mask
+            else:
+                self_attention_mask = key_padding_mask
+        return replace(
+            args,
+            self_attention_mask=self_attention_mask,
+            key_padding_mask=key_padding_mask,
+        ), sequence_length
 
     @property
     def _adaln_embedding_coefficient(self) -> int:
@@ -1878,6 +2000,13 @@ class LTXModel(torch.nn.Module):
 
         video_args = self.video_args_preprocessor.prepare(video, audio) if video is not None else None
         audio_args = self.audio_args_preprocessor.prepare(audio, video) if audio is not None else None
+        video_sequence_length = None
+        audio_sequence_length = None
+        if self.usp_flag:
+            if video_args is not None:
+                video_args, video_sequence_length = self._shard_transformer_args(video_args)
+            if audio_args is not None:
+                audio_args, audio_sequence_length = self._shard_transformer_args(audio_args)
         # Process transformer blocks
         video_out, audio_out = self._process_transformer_blocks(
             video=video_args,
@@ -1904,6 +2033,25 @@ class LTXModel(torch.nn.Module):
             if audio_out is not None
             else None
         )
+        if self.usp_flag:
+            tensors = []
+            sequence_dims = []
+            sequence_lengths = []
+            if vx is not None and video_sequence_length is not None:
+                tensors.append(vx)
+                sequence_dims.append(1)
+                sequence_lengths.append(video_sequence_length)
+            if ax is not None and audio_sequence_length is not None:
+                tensors.append(ax)
+                sequence_dims.append(1)
+                sequence_lengths.append(audio_sequence_length)
+            unsharded = sequence_parallel_unshard(self.device_mesh, tensors, sequence_dims, sequence_lengths)
+            index = 0
+            if vx is not None:
+                vx = unsharded[index]
+                index += 1
+            if ax is not None:
+                ax = unsharded[index]
         return vx, ax
 
 
@@ -2277,6 +2425,16 @@ class LTX25AVTransformer(BaseModel):
         """Configure the public TeleFuser attention dispatch for all isolated blocks."""
         super().set_attention_config(attention_config)
         Attention.attention_config = attention_config
+
+    def enable_usp(self, device_mesh: DeviceMesh) -> None:
+        """Enable Ulysses sequence parallelism in the isolated AV transformer."""
+        self.device_mesh = device_mesh
+        self.velocity_model.enable_usp(device_mesh)
+        self.usp_flag = True
+
+    def get_fsdp_module_names(self) -> list[str]:
+        """Return FSDP wrap targets relative to ``velocity_model``."""
+        return ["transformer_blocks"]
 
     def forward(
         self,
