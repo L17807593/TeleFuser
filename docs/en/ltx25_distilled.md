@@ -21,11 +21,12 @@ without loading its tensors.
 
 `LTX25DistilledPipeline.from_model_root()` exposes the isolated two-stage
 T2V/I2V path. It accepts a prompt, seed, resolution, `8k + 1` frame count,
-frame rate, and optional `LTX25ImageCondition` values. The pipeline moves
-Gemma, the transformer, the upsampler, the video decoder, and the audio
-decoder/vocoder through GPU memory sequentially, so these checkpoint groups
-are not resident together. It returns decoded video chunks, decoded stereo
-audio, and final video/audio VAE latents in `LTX25DistilledOutput`.
+frame rate, and optional `LTX25ImageCondition` values. With `offload="cpu"`,
+the denoiser keeps pinned CPU weights and streams sequential transformer
+blocks through reusable GPU buffers; Gemma, the upsampler, the video decoder,
+and the audio decoder/vocoder otherwise move through GPU memory sequentially.
+It returns decoded video chunks, decoded stereo audio, and final video/audio
+VAE latents in `LTX25DistilledOutput`.
 
 The default `video_vae="diff"` uses the NADiffusionVAE checkpoint. Pass
 `video_vae="conv"` to select the official ConvVAE checkpoint; the selected
@@ -113,7 +114,24 @@ The isolated DiffVAE decoder applies the upstream-default `CHUNKED_EAGER` recipe
 
 The formal 1536x1024 / 121-frame T2V capture and the frozen 896x512 / 121-frame I2V capture both use the upstream eager tiling and pass the request, checkpoint, exact RNG, required artifact, decoded RGB, and decoded-audio gates. The T2V decoded RGB comparison recorded 61.90 dB PSNR and 0.999685 SSIM; the I2V comparison recorded 62.95 dB PSNR and 0.999671 SSIM.
 
-The matched five-sample CPU-offload T2V performance comparison is not an accepted performance result: TeleFuser measured 87.60 s cold p50 versus 76.78 s upstream (+14.10%) and 86.65 s warm p50 versus 77.29 s upstream (+12.11%). Request and runtime identity checks passed; further optimization is required before claiming parity.
+The synchronized five-sample NATTEN performance gates pass with matching
+request and runtime provenance. Timings are end-to-end p50 seconds on one H100
+80 GB, BF16, PyTorch 2.11.0, CUDA 12.8, and NATTEN 0.21.6:
+
+| Workload | Mode | Upstream cold / warm | TeleFuser cold / warm | Result |
+| --- | --- | ---: | ---: | --- |
+| T2V 1536x1024 / 121 | `offload=cpu` | 76.78 / 77.29 | 64.44 / 60.09 | pass |
+| I2V 896x512 / 121 | `offload=cpu` | 65.02 / 64.52 | 51.98 / 44.08 | pass |
+| T2V 1536x1024 / 121 | `offload=none` | 58.28 / 55.29 | 46.79 / 46.93 | pass |
+| I2V 896x512 / 121 | `offload=none` | 48.45 / 42.34 | 30.24 / 30.29 | pass |
+
+The no-offload TeleFuser run reserved 79.14 GB at peak, so it fits on the
+validated H100 but leaves little capacity for unrelated GPU work. The CPU
+offload T2V and I2V comparison artifacts are respectively
+`streamed-comparison.json` and `i2v-streamed-comparison.json`; the no-offload
+T2V and I2V artifacts are `t2v-none-comparison.json` and
+`i2v-none-comparison.json`, all under
+`/tmp/ltx25-formal-baseline` for this validation host.
 
 Upstream capture additionally records raw Gemma input and hidden-state diagnostics. These remain visible as golden-only diagnostics in comparison reports, while missing TeleFuser interface artifacts or unexpected candidate artifacts remain failures. Large BF16 comparisons calculate cosine and NRMSE with float64 reductions to avoid false failures from float32 accumulation.
 
@@ -141,4 +159,4 @@ python tools/validation/compare_ltx25_benchmarks.py \
   --output /tmp/ltx25-performance-cpu.json
 ```
 
-It rejects mismatched request/runtime identity and fewer than five samples. A result within the 2% noise band is intentionally inconclusive, so collect more matched samples instead of reporting a performance pass. Repeat the full workflow for `offload=none` and the frozen I2V input.
+It rejects mismatched request/runtime identity and fewer than five samples. A result within the 2% noise band is intentionally inconclusive, so collect more matched samples instead of reporting a performance pass. The validated matrix covers CPU-offload and no-offload T2V, plus the frozen I2V request in both modes.
