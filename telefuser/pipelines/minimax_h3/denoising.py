@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch.distributed as dist
 
 from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig, WeightOffloadType
@@ -39,6 +41,66 @@ from .vae import MiniMaxH3PreparedCondition
 
 MINIMAX_H3_IMGVID_COND_TIMESTEP = 0.999
 MINIMAX_H3_AUDIO_REF_COND_TIMESTEP = 1.0
+
+
+@dataclass(frozen=True)
+class MiniMaxH3DiTCacheConfig:
+    """Configure optional reuse of the previous MiniMax H3 DiT velocity."""
+
+    mode: str = "off"
+    start_ratio: float = 0.2
+    end_ratio: float = 0.8
+    refresh_interval: int = 2
+    max_consecutive_reuse: int = 1
+    threshold: float | None = None
+
+    def __post_init__(self) -> None:
+        normalized_mode = str(self.mode).strip().lower().replace("_", "-")
+        if normalized_mode == "conservative":
+            normalized_mode = "velocity"
+        if normalized_mode not in {"off", "probe", "velocity"}:
+            raise ValueError(
+                "MiniMax H3 DiT cache mode must be 'off', 'probe', 'velocity', or 'conservative'"
+            )
+        object.__setattr__(self, "mode", normalized_mode)
+        if not math.isfinite(self.start_ratio) or not 0.0 <= self.start_ratio < 1.0:
+            raise ValueError("MiniMax H3 DiT cache start_ratio must be in [0, 1)")
+        if not math.isfinite(self.end_ratio) or not 0.0 < self.end_ratio <= 1.0:
+            raise ValueError("MiniMax H3 DiT cache end_ratio must be in (0, 1]")
+        if self.start_ratio >= self.end_ratio:
+            raise ValueError("MiniMax H3 DiT cache start_ratio must be smaller than end_ratio")
+        if (
+            not isinstance(self.refresh_interval, int)
+            or isinstance(self.refresh_interval, bool)
+            or self.refresh_interval < 2
+        ):
+            raise ValueError("MiniMax H3 DiT cache refresh_interval must be an integer of at least 2")
+        if (
+            not isinstance(self.max_consecutive_reuse, int)
+            or isinstance(self.max_consecutive_reuse, bool)
+            or self.max_consecutive_reuse < 1
+        ):
+            raise ValueError("MiniMax H3 DiT cache max_consecutive_reuse must be a positive integer")
+        if self.threshold is not None and (not math.isfinite(self.threshold) or self.threshold < 0.0):
+            raise ValueError("MiniMax H3 DiT cache threshold must be a finite non-negative number")
+
+
+def _dit_cache_step_is_candidate(step: int, total_steps: int, config: MiniMaxH3DiTCacheConfig) -> bool:
+    """Return a deterministic velocity-reuse schedule shared by every rank."""
+    if config.mode == "off" or total_steps < 3:
+        return False
+    start = max(1, int(math.floor(total_steps * config.start_ratio)))
+    stop = min(total_steps - 1, int(math.ceil(total_steps * config.end_ratio)))
+    if not start <= step < stop:
+        return False
+    # Refresh at the start of each interval; later steps may reuse its velocity.
+    return (step - start) % config.refresh_interval != 0
+
+
+def _relative_l1_delta(current: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    numerator = torch.mean(torch.abs(current - reference))
+    denominator = torch.mean(torch.abs(reference)).clamp_min(1e-6)
+    return numerator / denominator
 
 
 @torch.inference_mode()
@@ -244,6 +306,7 @@ class MiniMaxH3DenoisingStage(BaseStage):
         text: MiniMaxH3TextCondition | dict[str, torch.Tensor],
         conditions: list[MiniMaxH3PreparedCondition] | list[dict[str, Any]],
         num_inference_steps: int,
+        dit_cache_config: MiniMaxH3DiTCacheConfig | None = None,
         _transport_video: bool = False,
     ) -> MiniMaxH3DenoiseResult:
         self._ensure_online_quantized()
@@ -261,6 +324,11 @@ class MiniMaxH3DenoisingStage(BaseStage):
         seed = 42 if plan.seed is None else int(plan.seed)
         if num_inference_steps < 2:
             raise ValueError("num_inference_steps must be at least 2")
+        cache_config = MiniMaxH3DiTCacheConfig() if dit_cache_config is None else dit_cache_config
+        if not isinstance(cache_config, MiniMaxH3DiTCacheConfig):
+            raise TypeError("dit_cache_config must be a MiniMaxH3DiTCacheConfig")
+        if cache_config.mode != "off" and self.model_runtime_config.feature_cache_config.enabled:
+            raise ValueError("MiniMax H3 Conservative DiT cache cannot be combined with Feature Cache")
 
         ref_blocks: list[dict[str, object]] | None = None
         if plan.task == "ref2va":
@@ -470,6 +538,19 @@ class MiniMaxH3DenoisingStage(BaseStage):
         audio_denoised_scratch = torch.empty_like(audio_rows[audio_target_slice])
         self._request_serial += 1
         static_cache_key = self._request_serial
+        denoising_model_calls = 0
+        cache_candidates = 0
+        cache_threshold_passes = 0
+        cache_hits = 0
+        cache_forced_refreshes = 0
+        cache_consecutive_reuse = 0
+        cache_max_consecutive_reuse = 0
+        cache_video_deltas: list[float] = []
+        cache_audio_deltas: list[float] = []
+        cached_video_input: torch.Tensor | None = None
+        cached_audio_input: torch.Tensor | None = None
+        cached_video_velocity: torch.Tensor | None = None
+        cached_audio_velocity: torch.Tensor | None = None
 
         for step in range(len(video_sigmas) - 1):
             t_video = float(1.0 - video_sigmas[step])
@@ -481,28 +562,86 @@ class MiniMaxH3DenoisingStage(BaseStage):
             else:
                 x[0].index_copy_(0, target_img_pos, video_rows[video_target_slice])
                 audio_x[0].index_copy_(0, audio_pos[audio_update], audio_rows[audio_target_slice])
-            video_velocity, audio_velocity = self.transformer(
-                x=x,
-                audio_x=audio_x,
-                img_position_ids=img_position_ids,
-                unique_timesteps=unique_timesteps,
-                inverse_indices=inverse_indices,
-                update_mask=video_update,
-                update_audio_mask=audio_update,
-                prompt_embeds=prompt_embeds,
-                img_pos_info={"position_ids": img_pos},
-                audio_pos_info={"position_ids": audio_pos},
-                text_pos_info={"position_ids": text_pos},
-                img_pos_for_infer_output_info={"position_ids": target_img_pos},
-                packed_seq_params={"cu_seqlens_q": cu_seqlens},
-                block_token_tags=block_token_tags,
-                block_combined_indices=block_combined_indices,
-                local_embedding_layout=local_embedding_layout,
-                static_cache_key=static_cache_key,
-                sparse_step_index=step,
-                sol_prefix_tokens=sol_prefix_tokens,
-                skip_mask_out_condition=True,
+            cache_candidate = _dit_cache_step_is_candidate(step, denoising_steps, cache_config)
+            threshold_pass = False
+            if cache_candidate:
+                cache_candidates += 1
+            measure_cache_delta = bool(
+                cache_candidate
+                and cached_video_input is not None
+                and cached_audio_input is not None
+                and (cache_config.mode == "probe" or cache_config.threshold is not None)
             )
+            if measure_cache_delta:
+                cache_scores = torch.stack(
+                    (
+                        _relative_l1_delta(video_rows[video_target_slice], cached_video_input),
+                        _relative_l1_delta(audio_rows[audio_target_slice], cached_audio_input),
+                    )
+                )
+                if dist.is_available() and dist.is_initialized():
+                    dist.all_reduce(cache_scores, op=dist.ReduceOp.MAX)
+                video_delta, audio_delta = (float(value) for value in cache_scores.detach().cpu().tolist())
+                cache_video_deltas.append(video_delta)
+                cache_audio_deltas.append(audio_delta)
+                threshold_pass = (
+                    cache_config.threshold is None
+                    or max(video_delta, audio_delta) <= cache_config.threshold
+                )
+                cache_threshold_passes += int(threshold_pass)
+            elif cache_candidate and cache_config.threshold is None:
+                # Schedule-only reuse avoids a device synchronization and collective.
+                threshold_pass = True
+                cache_threshold_passes += 1
+
+            reuse_velocity = bool(
+                cache_config.mode == "velocity"
+                and cache_candidate
+                and threshold_pass
+                and cached_video_velocity is not None
+                and cached_audio_velocity is not None
+                and cache_consecutive_reuse < cache_config.max_consecutive_reuse
+            )
+            if reuse_velocity:
+                # The optimized scheduler may reuse velocity storage as scratch.
+                video_velocity = cached_video_velocity.clone()
+                audio_velocity = cached_audio_velocity.clone()
+                cache_hits += 1
+                cache_consecutive_reuse += 1
+                cache_max_consecutive_reuse = max(cache_max_consecutive_reuse, cache_consecutive_reuse)
+            else:
+                if cache_candidate:
+                    cache_forced_refreshes += 1
+                video_velocity, audio_velocity = self.transformer(
+                    x=x,
+                    audio_x=audio_x,
+                    img_position_ids=img_position_ids,
+                    unique_timesteps=unique_timesteps,
+                    inverse_indices=inverse_indices,
+                    update_mask=video_update,
+                    update_audio_mask=audio_update,
+                    prompt_embeds=prompt_embeds,
+                    img_pos_info={"position_ids": img_pos},
+                    audio_pos_info={"position_ids": audio_pos},
+                    text_pos_info={"position_ids": text_pos},
+                    img_pos_for_infer_output_info={"position_ids": target_img_pos},
+                    packed_seq_params={"cu_seqlens_q": cu_seqlens},
+                    block_token_tags=block_token_tags,
+                    block_combined_indices=block_combined_indices,
+                    local_embedding_layout=local_embedding_layout,
+                    static_cache_key=static_cache_key,
+                    sparse_step_index=step,
+                    sol_prefix_tokens=sol_prefix_tokens,
+                    skip_mask_out_condition=True,
+                )
+                denoising_model_calls += 1
+                cache_consecutive_reuse = 0
+                if cache_config.mode != "off":
+                    cached_video_input = video_rows[video_target_slice].detach().clone()
+                    cached_audio_input = audio_rows[audio_target_slice].detach().clone()
+                if cache_config.mode == "velocity":
+                    cached_video_velocity = video_velocity.detach().clone()
+                    cached_audio_velocity = audio_velocity.detach().clone()
             audio_target_velocity = audio_velocity[audio_target_slice]
             if optimized_update:
                 _minimax_h3_update_target_rows_(
@@ -564,6 +703,24 @@ class MiniMaxH3DenoisingStage(BaseStage):
             peak_reserved = 0
         runtime_metrics: dict[str, float | int] = {
             "denoising_seconds": time.perf_counter() - denoising_started,
+            "denoising_model_calls": int(denoising_model_calls),
+            "denoising_planned_model_calls": int(denoising_steps),
+            "dit_cache_mode": {"off": 0, "probe": 1, "velocity": 2}[cache_config.mode],
+            "dit_cache_candidates": int(cache_candidates),
+            "dit_cache_threshold_passes": int(cache_threshold_passes),
+            "dit_cache_hits": int(cache_hits),
+            "dit_cache_forced_refreshes": int(cache_forced_refreshes),
+            "dit_cache_hit_rate": float(cache_hits / denoising_steps) if denoising_steps else 0.0,
+            "dit_cache_candidate_hit_rate": float(cache_hits / cache_candidates) if cache_candidates else 0.0,
+            "dit_cache_max_consecutive_reuse": int(cache_max_consecutive_reuse),
+            "dit_cache_video_delta_mean": (
+                float(sum(cache_video_deltas) / len(cache_video_deltas)) if cache_video_deltas else 0.0
+            ),
+            "dit_cache_video_delta_max": float(max(cache_video_deltas)) if cache_video_deltas else 0.0,
+            "dit_cache_audio_delta_mean": (
+                float(sum(cache_audio_deltas) / len(cache_audio_deltas)) if cache_audio_deltas else 0.0
+            ),
+            "dit_cache_audio_delta_max": float(max(cache_audio_deltas)) if cache_audio_deltas else 0.0,
             "peak_allocated_bytes": peak_allocated,
             "peak_reserved_bytes": peak_reserved,
         }
@@ -584,6 +741,7 @@ class MiniMaxH3DenoisingStage(BaseStage):
         text: MiniMaxH3TextCondition | dict[str, torch.Tensor],
         conditions: list[MiniMaxH3PreparedCondition] | list[dict[str, Any]],
         num_inference_steps: int,
+        dit_cache_config: MiniMaxH3DiTCacheConfig | None = None,
     ) -> dict[str, Any]:
         """Keep the video latent on device while returning parent-consumed outputs separately."""
         result = self.denoise(
@@ -591,6 +749,7 @@ class MiniMaxH3DenoisingStage(BaseStage):
             text=text,
             conditions=conditions,
             num_inference_steps=num_inference_steps,
+            dit_cache_config=dit_cache_config,
             _transport_video=True,
         )
         return {
@@ -603,4 +762,9 @@ class MiniMaxH3DenoisingStage(BaseStage):
         }
 
 
-__all__ = ["MiniMaxH3DenoiseRemainder", "MiniMaxH3DenoiseResult", "MiniMaxH3DenoisingStage"]
+__all__ = [
+    "MiniMaxH3DenoiseRemainder",
+    "MiniMaxH3DenoiseResult",
+    "MiniMaxH3DenoisingStage",
+    "MiniMaxH3DiTCacheConfig",
+]

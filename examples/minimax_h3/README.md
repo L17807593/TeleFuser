@@ -317,6 +317,21 @@ Use `--attention-chunks 1` to disable the overlap, or `--ulysses-sequence-mode p
 communication. The fused Q/K RMSNorm + RoPE pack, zero-tail merge, and fused RMSNorm + AdaLN modulation kernels are
 selected automatically only for supported CUDA BF16 layouts; all other inputs retain their original paths.
 
+The FL2VA H100 example also exposes the optional, lossy Conservative DiT cache. It is disabled by default. Enable
+the previously validated schedule with `--dit-cache-mode conservative`: between 20% and 80% of denoising, at most
+one step reuses the preceding DiT video/audio velocity before the next refresh. `velocity` is an equivalent mode
+name, while `probe` records input deltas without skipping DiT calls. The start/end ratios, refresh interval,
+maximum consecutive reuse, and an optional relative-delta threshold have corresponding `--dit-cache-*` flags.
+Conservative DiT cache cannot be combined with Feature Cache or online AdaLN cache collection.
+
+```bash
+python -m examples.minimax_h3.minimax_h3_fl2va_h100 \
+  --gpu-num 4 \
+  --dit-cache-mode conservative \
+  --target-video-length 5 \
+  --output outputs/minimax_h3_conservative.mp4
+```
+
 ## Online DiT Quantization
 
 MiniMax H3 supports three single-GPU online quantization backends for the DiT transformer Linear layers:

@@ -86,10 +86,16 @@ def get_pipeline(
     device: str = PPL_CONFIG["device"],
     num_inference_steps: int = PPL_CONFIG["num_inference_steps"],
     enable_fsdp: bool | None = PPL_CONFIG["enable_fsdp"],
-    online_adaln_cache: bool = PPL_CONFIG["online_adaln_cache"],
+    online_adaln_cache: bool | None = None,
     attn_impl: AttnImplType | str = PPL_CONFIG["attn_impl"],
     attention_chunks: int = PPL_CONFIG["attention_chunks"],
     ulysses_sequence_mode: str = PPL_CONFIG["ulysses_sequence_mode"],
+    dit_cache_mode: str = "off",
+    dit_cache_start_ratio: float = 0.2,
+    dit_cache_end_ratio: float = 0.8,
+    dit_cache_refresh_interval: int = 2,
+    dit_cache_max_consecutive_reuse: int = 1,
+    dit_cache_threshold: float | None = None,
     sol_fp8: bool = PPL_CONFIG["sol_fp8"],
     sol_dense_steps: int = 10,
     sol_dense_layers: int = 2,
@@ -105,6 +111,10 @@ def get_pipeline(
 ) -> MiniMaxH3Pipeline:
     """Load the FL2VA checkpoint partition for one, two, or four GPUs."""
     tp_degree = 2 if parallelism == 4 else 1
+    normalized_cache_mode = str(dit_cache_mode).strip().lower().replace("_", "-")
+    resolved_online_adaln_cache = (
+        PPL_CONFIG["online_adaln_cache"] if normalized_cache_mode == "off" else False
+    ) if online_adaln_cache is None else online_adaln_cache
     return load_minimax_h3_pipeline(
         model_root,
         partition=PPL_CONFIG["partition"],
@@ -114,10 +124,16 @@ def get_pipeline(
         tp_degree=tp_degree,
         text_encoder_tp_degree=parallelism,
         enable_fsdp=enable_fsdp,
-        online_adaln_cache=online_adaln_cache,
+        online_adaln_cache=resolved_online_adaln_cache,
         attn_impl=attn_impl,
         attention_chunks=attention_chunks,
         ulysses_sequence_mode=ulysses_sequence_mode,
+        dit_cache_mode=dit_cache_mode,
+        dit_cache_start_ratio=dit_cache_start_ratio,
+        dit_cache_end_ratio=dit_cache_end_ratio,
+        dit_cache_refresh_interval=dit_cache_refresh_interval,
+        dit_cache_max_consecutive_reuse=dit_cache_max_consecutive_reuse,
+        dit_cache_threshold=dit_cache_threshold,
         sol_fp8=sol_fp8,
         sol_dense_steps=sol_dense_steps,
         sol_dense_layers=sol_dense_layers,
@@ -303,6 +319,21 @@ def _main(default_quantization: str | None = PPL_CONFIG["quantization"]) -> None
         default=PPL_CONFIG["ulysses_sequence_mode"],
     )
     parser.add_argument(
+        "--dit-cache-mode",
+        choices=("off", "conservative", "probe", "velocity"),
+        default="off",
+        help="Lossy previous-velocity reuse; 'conservative' is the validated velocity schedule.",
+    )
+    parser.add_argument("--dit-cache-start-ratio", type=float, default=0.2)
+    parser.add_argument("--dit-cache-end-ratio", type=float, default=0.8)
+    parser.add_argument("--dit-cache-refresh-interval", type=int, default=2)
+    parser.add_argument("--dit-cache-max-consecutive-reuse", type=int, default=1)
+    parser.add_argument(
+        "--dit-cache-threshold",
+        type=float,
+        help="Optional maximum relative input delta; omitted keeps the synchronization-free schedule.",
+    )
+    parser.add_argument(
         "--attn-impl",
         choices=("FLASH_ATTN_4", "SAGE_ATTN_2_8_8_SM90", "SOL_ATTN"),
         default=PPL_CONFIG["attn_impl"].name,
@@ -360,6 +391,12 @@ def _main(default_quantization: str | None = PPL_CONFIG["quantization"]) -> None
         attn_impl=args.attn_impl,
         attention_chunks=args.attention_chunks,
         ulysses_sequence_mode=args.ulysses_sequence_mode,
+        dit_cache_mode=args.dit_cache_mode,
+        dit_cache_start_ratio=args.dit_cache_start_ratio,
+        dit_cache_end_ratio=args.dit_cache_end_ratio,
+        dit_cache_refresh_interval=args.dit_cache_refresh_interval,
+        dit_cache_max_consecutive_reuse=args.dit_cache_max_consecutive_reuse,
+        dit_cache_threshold=args.dit_cache_threshold,
         sol_fp8=args.sol_fp8,
         sol_dense_steps=args.sol_dense_steps,
         sol_dense_layers=args.sol_dense_layers,

@@ -12,7 +12,11 @@ from telefuser.core.config import (
 )
 from telefuser.core.module_manager import ModuleManager
 from telefuser.pipelines.minimax_h3.data import minimax_h3_validate_canonical_request
-from telefuser.pipelines.minimax_h3.denoising import MiniMaxH3DenoisingStage
+from telefuser.pipelines.minimax_h3.denoising import (
+    MiniMaxH3DenoisingStage,
+    MiniMaxH3DiTCacheConfig,
+    _dit_cache_step_is_candidate,
+)
 from telefuser.pipelines.minimax_h3.material_io import MiniMaxH3MaterialFacts
 from telefuser.pipelines.minimax_h3.pipeline import MiniMaxH3Pipeline, MiniMaxH3PipelineConfig
 from telefuser.pipelines.minimax_h3.resolved_plan import (
@@ -28,8 +32,10 @@ class _ZeroVelocityDiT(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.anchor = torch.nn.Parameter(torch.zeros(()))
+        self.calls = 0
 
     def forward(self, **kwargs):
+        self.calls += 1
         video_rows = kwargs["img_pos_for_infer_output_info"]["position_ids"].numel()
         audio_rows = kwargs["audio_pos_info"]["position_ids"].numel()
         device = self.anchor.device
@@ -194,6 +200,77 @@ def test_t2va_denoising_stage_runs_complete_packed_contract_on_cpu() -> None:
     assert result.runtime_metrics["peak_reserved_bytes"] == 0
     assert result.runtime_metrics["feature_cache_computed_steps"] == 1
     assert result.runtime_metrics["feature_cache_skipped_steps"] == 0
+
+
+def test_conservative_dit_cache_reuses_previous_velocity_on_schedule() -> None:
+    manager = ModuleManager(device="cpu")
+    transformer = _ZeroVelocityDiT()
+    manager.add_module(transformer, "minimax_h3_transformer")
+    stage = MiniMaxH3DenoisingStage(
+        manager,
+        ModelRuntimeConfig(device_type="cpu", torch_dtype=torch.float32),
+    )
+    canonical = minimax_h3_validate_canonical_request(
+        task="t2va",
+        prompt="move",
+        conditions=[],
+        target={"short_edge": 768, "aspect_ratio": "1:1", "duration_seconds": 4.0},
+        seed=0,
+    )
+    result = stage.denoise(
+        plan=minimax_h3_resolve_plan(canonical),
+        text=MiniMaxH3TextCondition(
+            hidden_states=torch.zeros(3, 5120, dtype=torch.bfloat16),
+            token_tags=torch.ones(3, dtype=torch.long),
+        ),
+        conditions=[],
+        num_inference_steps=6,
+        dit_cache_config=MiniMaxH3DiTCacheConfig(mode="conservative"),
+    )
+
+    assert transformer.calls == 4
+    assert result.runtime_metrics["denoising_planned_model_calls"] == 5
+    assert result.runtime_metrics["denoising_model_calls"] == 4
+    assert result.runtime_metrics["dit_cache_hits"] == 1
+    assert result.runtime_metrics["dit_cache_mode"] == 2
+
+
+def test_dit_cache_defaults_off_and_normalizes_conservative_alias() -> None:
+    off = MiniMaxH3DiTCacheConfig()
+    conservative = MiniMaxH3DiTCacheConfig(mode="CONSERVATIVE")
+
+    assert off.mode == "off"
+    assert conservative.mode == "velocity"
+    assert not any(_dit_cache_step_is_candidate(step, 49, off) for step in range(49))
+    assert [step for step in range(10) if _dit_cache_step_is_candidate(step, 10, conservative)] == [3, 5, 7]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"mode": "unknown"}, "mode"),
+        ({"start_ratio": -0.1}, "start_ratio"),
+        ({"end_ratio": 1.1}, "end_ratio"),
+        ({"start_ratio": 0.8, "end_ratio": 0.8}, "smaller"),
+        ({"refresh_interval": 1}, "refresh_interval"),
+        ({"refresh_interval": 2.5}, "refresh_interval"),
+        ({"max_consecutive_reuse": 0}, "max_consecutive_reuse"),
+        ({"max_consecutive_reuse": 1.5}, "max_consecutive_reuse"),
+        ({"threshold": -0.1}, "threshold"),
+    ],
+)
+def test_dit_cache_rejects_invalid_configuration(kwargs: dict[str, object], match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        MiniMaxH3DiTCacheConfig(**kwargs)
+
+
+def test_pipeline_config_rejects_two_cross_step_caches() -> None:
+    with pytest.raises(ValueError, match="cannot be combined with Feature Cache"):
+        MiniMaxH3PipelineConfig(
+            processor_path="unused",
+            dit_config=ModelRuntimeConfig(feature_cache_config=FeatureCacheConfig(enabled=True)),
+            dit_cache_config=MiniMaxH3DiTCacheConfig(mode="conservative"),
+        )
 
 
 def test_denoising_rejects_corrupt_transported_token_tags() -> None:

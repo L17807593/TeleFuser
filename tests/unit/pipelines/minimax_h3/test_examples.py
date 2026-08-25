@@ -137,6 +137,12 @@ def test_standard_get_pipeline_forwards_parallel_runtime_options(monkeypatch: py
                 "attn_impl": AttnImplType.FLASH_ATTN_4,
                 "attention_chunks": 2,
                 "ulysses_sequence_mode": "valid_only",
+                "dit_cache_mode": "off",
+                "dit_cache_start_ratio": 0.2,
+                "dit_cache_end_ratio": 0.8,
+                "dit_cache_refresh_interval": 2,
+                "dit_cache_max_consecutive_reuse": 1,
+                "dit_cache_threshold": None,
                 "sol_fp8": False,
                 "sol_dense_steps": 10,
                 "sol_dense_layers": 2,
@@ -154,6 +160,22 @@ def test_standard_get_pipeline_forwards_parallel_runtime_options(monkeypatch: py
             },
         )
     ]
+
+
+def test_conservative_dit_cache_disables_default_online_adaln_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def fake_loader(model_root: str, **kwargs: object) -> object:
+        calls.append((model_root, kwargs))
+        return object()
+
+    monkeypatch.setattr(fl2va_example, "load_minimax_h3_pipeline", fake_loader)
+    fl2va_example.get_pipeline(4, "/models/h3", dit_cache_mode="conservative")
+
+    assert calls[0][1]["dit_cache_mode"] == "conservative"
+    assert calls[0][1]["online_adaln_cache"] is False
 
 
 def test_cache_calibration_applies_validated_h3_profile(tmp_path: Path) -> None:

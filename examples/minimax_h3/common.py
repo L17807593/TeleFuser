@@ -30,6 +30,7 @@ from telefuser.models.minimax_h3_audio_vae import MiniMaxH3AudioVAE
 from telefuser.models.minimax_h3_dit import MiniMaxH3DiT
 from telefuser.models.minimax_h3_encoder import MiniMaxH3Encoder
 from telefuser.models.minimax_h3_video_vae import MiniMaxH3VideoVAE
+from telefuser.pipelines.minimax_h3.denoising import MiniMaxH3DiTCacheConfig
 from telefuser.pipelines.minimax_h3.pipeline import (
     MiniMaxH3Generation,
     MiniMaxH3Pipeline,
@@ -183,12 +184,31 @@ def load_minimax_h3_pipeline(
     sol_fp8_layer_start: int = 0,
     sol_fp8_layer_end: int | None = None,
     feature_cache_config: FeatureCacheConfig | None = None,
+    dit_cache_mode: str = "off",
+    dit_cache_start_ratio: float = 0.2,
+    dit_cache_end_ratio: float = 0.8,
+    dit_cache_refresh_interval: int = 2,
+    dit_cache_max_consecutive_reuse: int = 1,
+    dit_cache_threshold: float | None = None,
     adaln_cache_path: str | Path | None = None,
     online_adaln_cache: bool = False,
     quantization: str | QuantType | None = None,
     lora_path: str | Path | None = None,
     lora_strength: float = 1.0,
 ) -> MiniMaxH3Pipeline:
+    dit_cache_config = MiniMaxH3DiTCacheConfig(
+        mode=dit_cache_mode,
+        start_ratio=dit_cache_start_ratio,
+        end_ratio=dit_cache_end_ratio,
+        refresh_interval=dit_cache_refresh_interval,
+        max_consecutive_reuse=dit_cache_max_consecutive_reuse,
+        threshold=dit_cache_threshold,
+    )
+    resolved_feature_cache = feature_cache_config or FeatureCacheConfig()
+    if dit_cache_config.mode != "off" and resolved_feature_cache.enabled:
+        raise ValueError("MiniMax H3 Conservative DiT cache cannot be combined with Feature Cache")
+    if dit_cache_config.mode != "off" and online_adaln_cache:
+        raise ValueError("MiniMax H3 Conservative DiT cache cannot be combined with online AdaLN cache collection")
     if adaln_cache_path is not None and online_adaln_cache:
         raise ValueError("Choose either adaln_cache_path or online_adaln_cache, not both.")
 
@@ -285,7 +305,7 @@ def load_minimax_h3_pipeline(
         torch_dtype=torch.bfloat16,
         offload_config=dit_offload,
         attention_config=attention_config,
-        feature_cache_config=feature_cache_config or FeatureCacheConfig(),
+        feature_cache_config=resolved_feature_cache,
         quant_config=quant_config,
         lora_configs=[LoraConfig(path=str(lora_path), strength=lora_strength)] if lora_path else [],
         parallel_config=ParallelConfig(
@@ -375,6 +395,7 @@ def load_minimax_h3_pipeline(
             video_vae_config=video_vae_runtime,
             audio_vae_config=audio_vae_runtime,
             num_inference_steps=num_inference_steps,
+            dit_cache_config=dit_cache_config,
         ),
     )
     return pipeline

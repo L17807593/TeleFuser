@@ -22,7 +22,7 @@ from .data import (
     minimax_h3_validate_canonical_request,
     minimax_h3_validate_reference_media_facts,
 )
-from .denoising import MiniMaxH3DenoisingStage
+from .denoising import MiniMaxH3DenoisingStage, MiniMaxH3DiTCacheConfig
 from .material_io import (
     MiniMaxH3MaterialFacts,
     minimax_h3_localize_material,
@@ -49,12 +49,17 @@ class MiniMaxH3PipelineConfig:
     video_vae_config: ModelRuntimeConfig = field(default_factory=_fp32_runtime_config)
     audio_vae_config: ModelRuntimeConfig = field(default_factory=_fp32_runtime_config)
     num_inference_steps: int = 50
+    dit_cache_config: MiniMaxH3DiTCacheConfig = field(default_factory=MiniMaxH3DiTCacheConfig)
 
     def __post_init__(self) -> None:
         if not self.processor_path:
             raise ValueError("processor_path is required")
         if self.num_inference_steps < 2:
             raise ValueError("num_inference_steps must be at least 2")
+        if not isinstance(self.dit_cache_config, MiniMaxH3DiTCacheConfig):
+            raise TypeError("dit_cache_config must be a MiniMaxH3DiTCacheConfig")
+        if self.dit_cache_config.mode != "off" and self.dit_config.feature_cache_config.enabled:
+            raise ValueError("MiniMax H3 Conservative DiT cache cannot be combined with Feature Cache")
 
 
 @dataclass(frozen=True)
@@ -422,6 +427,7 @@ class MiniMaxH3Pipeline(BasePipeline):
                     text=text,
                     conditions=denoising_conditions,
                     num_inference_steps=steps,
+                    dit_cache_config=self.config.dit_cache_config,
                 )
                 video_latent = transported["video_latent"]
                 denoised = transported["remainder"]
@@ -432,6 +438,7 @@ class MiniMaxH3Pipeline(BasePipeline):
                     text=text,
                     conditions=denoising_conditions,
                     num_inference_steps=steps,
+                    dit_cache_config=self.config.dit_cache_config,
                 )
                 video_latent = denoised.video_latent
             video_device, video_decoding_seconds = self._timed_call(self.video_vae_stage.decode_video, video_latent)
