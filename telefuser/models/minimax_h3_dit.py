@@ -584,9 +584,7 @@ class MiniMaxH3Attention(nn.Module):
             world_size,
         )
         use_fused_ulysses = (
-            use_fused_ulysses
-            and attention_config is not None
-            and attention_config.attention_chunks <= local_heads
+            use_fused_ulysses and attention_config is not None and attention_config.attention_chunks <= local_heads
         )
         if use_fused_ulysses:
             chunks = attention_config.attention_chunks

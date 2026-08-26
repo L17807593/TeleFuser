@@ -267,9 +267,7 @@ def ulysses_gather_heads_chunk_async(
     if not _can_use_destination_major_kernel(tensor):
         raise ValueError("chunked Ulysses overlap requires CUDA FP16/BF16 attention output")
     target_seq_len = destination.shape[1]
-    local_seq_len, valid_lengths = _gather_sequence_partition(
-        global_seq_len, world_size, rank, target_seq_len
-    )
+    local_seq_len, valid_lengths = _gather_sequence_partition(global_seq_len, world_size, rank, target_seq_len)
     expected_suffix = (world_size, total_local_heads, head_dim)
     if destination.shape[0] != batch or tuple(destination.shape[2:]) != expected_suffix:
         raise ValueError("invalid Ulysses gather destination shape")

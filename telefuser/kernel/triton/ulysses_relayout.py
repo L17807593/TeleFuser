@@ -197,9 +197,7 @@ def _merge_ulysses_head_chunk_kernel(
     if ZERO_TAIL:
         row = rest % output_sequence
         destination = rest // output_sequence
-        input_vector = (
-            ((destination * sequence + row) * batch + batch_index) * chunk_local_heads + chunk_head
-        )
+        input_vector = ((destination * sequence + row) * batch + batch_index) * chunk_local_heads + chunk_head
         load_mask = mask & (row[:, None] < sequence)
     else:
         row = rest % sequence
@@ -302,10 +300,25 @@ def pack_qkv_qknorm_rope_destination_major(
     total_vectors = rows * world_size * packed_local_heads
     block_n = triton.next_power_of_2(head_dim)
     _pack_qkv_qknorm_rope_destination_major_kernel[(total_vectors,)](
-        output, qkv, q_weight, k_weight, cos_sin_cache, total_vectors, rows,
-        packed_local_heads, total_local_heads, local_head_start, head_dim, rope_dim, eps,
-        qkv.stride(0), qkv.stride(1), qkv.stride(2), cos_sin_cache.stride(0),
-        BLOCK_N=block_n, num_warps=1,
+        output,
+        qkv,
+        q_weight,
+        k_weight,
+        cos_sin_cache,
+        total_vectors,
+        rows,
+        packed_local_heads,
+        total_local_heads,
+        local_head_start,
+        head_dim,
+        rope_dim,
+        eps,
+        qkv.stride(0),
+        qkv.stride(1),
+        qkv.stride(2),
+        cos_sin_cache.stride(0),
+        BLOCK_N=block_n,
+        num_warps=1,
     )
     return output
 
@@ -336,10 +349,21 @@ def merge_ulysses_head_chunk(
     block_head_dim = triton.next_power_of_2(head_dim)
     block_rows = max(1, min(8, 1024 // block_head_dim))
     _merge_ulysses_head_chunk_kernel[(triton.cdiv(total_vectors, block_rows),)](
-        output, tensor, total_vectors, batch, sequence, output.shape[1], total_local_heads,
-        local_head_start, world_size=world_size, chunk_local_heads=chunk_local_heads,
-        head_dim=head_dim, ZERO_TAIL=zero_tail, BLOCK_ROWS=block_rows,
-        BLOCK_HEAD_DIM=block_head_dim, num_warps=8,
+        output,
+        tensor,
+        total_vectors,
+        batch,
+        sequence,
+        output.shape[1],
+        total_local_heads,
+        local_head_start,
+        world_size=world_size,
+        chunk_local_heads=chunk_local_heads,
+        head_dim=head_dim,
+        ZERO_TAIL=zero_tail,
+        BLOCK_ROWS=block_rows,
+        BLOCK_HEAD_DIM=block_head_dim,
+        num_warps=8,
     )
     return output
 
