@@ -59,9 +59,7 @@ class MiniMaxH3DiTCacheConfig:
         if normalized_mode == "conservative":
             normalized_mode = "velocity"
         if normalized_mode not in {"off", "probe", "velocity"}:
-            raise ValueError(
-                "MiniMax H3 DiT cache mode must be 'off', 'probe', 'velocity', or 'conservative'"
-            )
+            raise ValueError("MiniMax H3 DiT cache mode must be 'off', 'probe', 'velocity', or 'conservative'")
         object.__setattr__(self, "mode", normalized_mode)
         if not math.isfinite(self.start_ratio) or not 0.0 <= self.start_ratio < 1.0:
             raise ValueError("MiniMax H3 DiT cache start_ratio must be in [0, 1)")
@@ -585,8 +583,7 @@ class MiniMaxH3DenoisingStage(BaseStage):
                 cache_video_deltas.append(video_delta)
                 cache_audio_deltas.append(audio_delta)
                 threshold_pass = (
-                    cache_config.threshold is None
-                    or max(video_delta, audio_delta) <= cache_config.threshold
+                    cache_config.threshold is None or max(video_delta, audio_delta) <= cache_config.threshold
                 )
                 cache_threshold_passes += int(threshold_pass)
             elif cache_candidate and cache_config.threshold is None:
